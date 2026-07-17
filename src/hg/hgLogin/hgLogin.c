@@ -30,6 +30,8 @@
 #include "mailViaPipe.h"
 #include "dystring.h"
 #include "autoUpgrade.h"
+#include "hCommon.h"
+#include "botDelay.h"
 
 #define EMAILSEP ";"
 
@@ -52,6 +54,9 @@ char returnAddr[256];
 char *hgLoginUrl = NULL; /* full absolute URL to hgLogin as seen from browser, 
     e.g. http://genome.ucsc.edu/cgi-bin/hgLogin. Can be a relative URL /cgi-bin/hgLogin if 
     hg.conf login.relativeLink is on. */
+
+/* for earlyBotCheck() function at the beginning of main() */
+#define delayFraction   1.0    /* standard penalty is 1.0 for most CGIs */
 
 /* ---- Global helper functions ---- */
 char *browserName()
@@ -344,6 +349,7 @@ else if (cfgOptionDefault(CFG_APPROVED_HOSTS, NULL))
         safecpy(returnTo, sizeof(returnTo), returnURL);
     else
         {
+        hDumpStackDisallow();
         errAbort("Error: Invalid returnto URL. Please send email to genome-www@soe.ucsc.edu "
                 "with the returnto argument from the URL (or just the full URL) so we can "
                 "fix this.");
@@ -395,7 +401,7 @@ void sendActMailOut(char *email, char *subject, char *msg)
 {
 int result;
 
-result = mailViaPipe(email, subject, msg, returnAddr);
+result = mailViaPipeBounce(email, subject, msg, returnAddr);
 
 if (result == -1)
     {
@@ -466,7 +472,7 @@ void sendMailOut(char *email, char *subject, char *msg)
 {
 char *obj = cartUsualString(cart, "hgLogin_helpWith", "");
 int result;
-result = mailViaPipe(email, subject, msg, returnAddr);
+result = mailViaPipeBounce(email, subject, msg, returnAddr);
 if (result == -1)
     {
     hPrintf( 
@@ -530,9 +536,9 @@ void sendPwdMailOut(char *email, char *recovEmail, char *subject, char *msg, cha
 char *obj = cartUsualString(cart, "hgLogin_helpWith", "");
 int result;
 
-result = mailViaPipe(email, subject, msg, returnAddr);
+result = mailViaPipeBounce(email, subject, msg, returnAddr);
 if ((result != -1) && !isEmpty(recovEmail))
-    result = mailViaPipe(recovEmail, subject, msg, returnAddr);
+    result = mailViaPipeBounce(recovEmail, subject, msg, returnAddr);
 
 if (result == -1)
     {
@@ -995,6 +1001,15 @@ if (!user || sameString(user,""))
     signupPage(conn);
     return;
     }
+/* Require at least two characters.  Single-character user names are reserved (e.g. "l" is used
+ * internally for anonymous shared-session links). */
+if (strlen(user) < 2)
+    {
+    freez(&errMsg);
+    errMsg = cloneString("User name must be at least two characters long.");
+    signupPage(conn);
+    return;
+    }
 /* Make sure the escaped usrename is less than 32 characters */
 if (strlen(encUserName) > 32)
     {
@@ -1375,6 +1390,7 @@ int main(int argc, char *argv[])
 {
 
 long enteredMainTime = clock1000();
+earlyBotCheck(enteredMainTime, "hgLogin", delayFraction, 0, 0, "html");
 pushCarefulMemHandler(100000000);
 cgiSpoof(&argc, argv);
 htmlSetStyleSheet("../style/userAccounts.css");

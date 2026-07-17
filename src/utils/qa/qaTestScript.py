@@ -186,7 +186,7 @@ if len(driver.window_handles) > 1:
     print("A second window has opened.")
     driver.quit()
     sys.exit()
-driver.find_element(By.XPATH, "//*/text()[normalize-space(.)='Cancel']/parent::*").click()
+driver.find_element(By.XPATH, "//span[text()='Drag-and-select']/../..//button[text()='Cancel']").click()
 time.sleep(3)
 
 # Tests multi-region for hg38
@@ -530,7 +530,7 @@ driver.find_element(By.NAME, "wp_size").send_keys("40000")
 select = Select(driver.find_element(By.NAME, "wp_target"))
 select.select_by_visible_text("GENCODE Genes")
 driver.find_element(By.NAME, "Submit").click()
-driver.find_element(By.LINK_TEXT, "ENST00000611156.4__ABO:90+1305").click()
+driver.find_element(By.XPATH, "//a[contains(@href,'hgPcrResult=pack')]").click()
 time.sleep(3)
 driver.find_element(By.XPATH, "//td[@id='td_data_hgPcrResult']/div[2]/map/area[2]").click()
 driver.get(machine + "/cgi-bin/cartReset")

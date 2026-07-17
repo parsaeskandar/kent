@@ -233,23 +233,31 @@ let uppyOptions = {
                         id: `${file.meta.name}DbSelect`,
                         style: "margin-left: 5px",
                         onChange: e => {
-                            onChange(e.target.value);
-                            file.meta.genome = e.target.value;
-                            file.meta.genomeLabel = e.target.selectedOptions[0].label;
-                            // If the user picked one of their own assembly hubs,
-                            // flip hubType and align parentDir so the upload
-                            // targets that existing hub rather than creating a
-                            // new stub. If they picked a UCSC db, flip back
-                            // and reset parentDir to a fresh default so they
-                            // don't accidentally upload into an assembly hub.
-                            let hub = hubCreate.assemblyHubByGenome(e.target.value);
-                            if (hub) {
-                                file.meta.hubType = "assemblyHub";
-                                file.meta.parentDir = hub.fileName;
-                            } else {
-                                file.meta.hubType = "trackHub";
-                                file.meta.parentDir = hubCreate.uiState.hubNameDefault;
-                            }
+                            let val = e.target.value;
+                            let label = e.target.selectedOptions[0].label;
+                            let hub = hubCreate.assemblyHubByGenome(val);
+                            let newParentDir = hub ? hub.fileName : hubCreate.uiState.hubNameDefault;
+                            // we call onChange here, which will do an onChange with a potentially
+                            // stale metadata if the user has also edited parentDir. later we will
+                            // fix that up and use the genome name as the recommended parentDir
+                            // or a pre-existing hub if one exists
+                            onChange(val);
+                            file.meta.genome = val;
+                            file.meta.genomeLabel = label;
+                            file.meta.hubType = hub ? "assemblyHub" : "trackHub";
+                            file.meta.parentDir = newParentDir;
+                            // Sync the Hub Name field in a later tick. In this
+                            // tick its onChange would spread the same stale
+                            // state as the genome onChange above and revert
+                            // genome; deferring lets genome flush first.
+                            setTimeout(function() {
+                                let pd = document.getElementById("uppy-Dashboard-FileCard-input-parentDir");
+                                if (pd) {
+                                    pd.value = newParentDir;
+                                    pd.dispatchEvent(new Event("input", {bubbles: true}));
+                                    pd.dispatchEvent(new Event("change", {bubbles: true}));
+                                }
+                            }, 0);
                         }
                         },
                         hubCreate.makeGenomeSelectOptions(file.meta.genome, file.meta.genomeLabel).map( (genomeObj) => {
@@ -901,7 +909,6 @@ class BatchChangePlugin extends Uppy.BasePlugin {
             this.uppy.setFileMeta(file.id, defaultMeta);
 
             // When drilled into an assembly hub, inherit and lock its genome.
-            let drilledIntoAsmHub = false;
             if (hubCreate.uiState.currentHub &&
                 hubCreate.uiState.currentHub === defaultMeta.parentDir) {
                 let existing = hubCreate.uiState.filesHash[defaultMeta.parentDir];
@@ -911,33 +918,6 @@ class BatchChangePlugin extends Uppy.BasePlugin {
                         genomeLabel: existing.genome,
                         hubType: "assemblyHub",
                         genomeLocked: true,
-                    });
-                    drilledIntoAsmHub = true;
-                }
-            }
-
-            // Top-level with no drilled-in hub: if the user already has an
-            // assembly hub, default this file to target it so they don't have
-            // to re-enter the genome + hub name. The user can still switch via
-            // the dropdown. Skip this when the file itself is hub-defining
-            // (2bit or hub.txt) or when any file in the batch is - in that
-            // case the batch is creating a *new* hub, not adding to an
-            // existing one, so the defaults should not point at the old hub.
-            let fileIsHubDefining = ftype === "2bit" || ftype === "hub.txt";
-            let batchHasHubDefining = this.uppy.getFiles().some(f =>
-                looksLikeTwoBit(f) || looksLikeHubTxt(f));
-            // dropPath means the user dragged a folder; in that case parentDir
-            // already encodes the user's intended hub root, and redirecting to
-            // an existing assembly hub would discard the folder layout.
-            if (!drilledIntoAsmHub && !fileIsHubDefining && !batchHasHubDefining && !dropPath) {
-                let firstHub = hubCreate.firstAssemblyHub();
-                if (firstHub) {
-                    this.uppy.setFileMeta(file.id, {
-                        genome: firstHub.genome,
-                        genomeLabel: firstHub.genome,
-                        parentDir: firstHub.fileName,
-                        hubType: "assemblyHub",
-                        // NOT genomeLocked - user may want a different hub/genome
                     });
                 }
             }
@@ -1063,11 +1043,13 @@ var hubCreate = (function() {
     }
 
     function sanitizeGenomeName(name) {
-        // Strip .2bit, replace non-alphanumeric/_/- with _, drop hub_ prefix.
+        // Strip .2bit, replace non-alphanumeric/_/-/. with _, drop hub_ prefix.
         // Returns empty string if nothing usable is left.
+        // The allowed character class [A-Za-z0-9._-] must match the
+        // server-side check in src/hg/hgHubConnect/hooks/pre-finish.c.
         if (!name) return "";
         let stem = name.replace(/\.2bit$/i, "");
-        stem = stem.replace(/[^A-Za-z0-9_-]/g, "_");
+        stem = stem.replace(/[^A-Za-z0-9._-]/g, "_");
         stem = stem.replace(/^hub_/, "");
         return stem;
     }
@@ -1405,8 +1387,13 @@ var hubCreate = (function() {
         cartChoice.selected = value && label ? false: true;
         defaultGenomeChoices[cartChoice.label] = cartChoice;
 
-        // next time around our value/label pair will be a default. this time around we
-        // want it selected because it was explicitly asked for, but it may not be next time
+        // Add an explicitly chosen genome (e.g. from the search box) before
+        // building the list so it is selectable on this render, not the next.
+        // Skip assembly-hub genomes, which the loop below adds with a suffix.
+        if (value && label && !(label in defaultGenomeChoices) &&
+            !genomeIsAssemblyHub(value)) {
+            defaultGenomeChoices[label] = {value: value, label: label};
+        }
         ret = Object.values(defaultGenomeChoices);
 
         // Include the user's uploaded assembly hubs as options. One entry per
@@ -1426,13 +1413,6 @@ var hubCreate = (function() {
             }
         }
 
-        // Cache the value/label pair so it's a default next time - but skip
-        // assembly-hub genomes, those are added by the loop above with the
-        // "(your assembly hub)" suffix and would otherwise show up twice.
-        if (value && label && !(label in defaultGenomeChoices) &&
-            !genomeIsAssemblyHub(value)) {
-            defaultGenomeChoices[label] = {value: value, label: label, selected: true};
-        }
         return ret;
     }
 
@@ -1521,6 +1501,56 @@ var hubCreate = (function() {
         let genome = dirRow.genome || findHubGenome(hubName) || "";
         let url = "../cgi-bin/hgTracks?hgsid=" + getHgsid() + "&" + dbParam + "=" + genome + "&hubUrl=" + encodeURIComponent(hubUrl);
         window.location.assign(url);
+    }
+
+    function hubHasHubTxt(hubName) {
+        // true if the hub directory has a hub.txt file recorded in hubSpace
+        let dir = uiState.filesHash[hubName];
+        if (dir && dir.children) {
+            for (let child of dir.children) {
+                if (child.fileType === "hub.txt") return true;
+            }
+        }
+        return false;
+    }
+
+    function hubShareLink(hubName) {
+        // build an absolute, shareable hgTracks link that connects this hub and
+        // nothing else. No hgsid so the recipient uses their own session.
+        if (typeof uiState.userUrl === "undefined" || uiState.userUrl.length === 0) {
+            return null;
+        }
+        let dirRow = uiState.filesHash[hubName];
+        if (!dirRow) return null;
+        let hubUrl = uiState.userUrl + cgiEncode(hubTxtPathForHub(hubName));
+        let dbParam = isAssemblyHub(hubName) ? "genome" : "db";
+        let genome = dirRow.genome || findHubGenome(hubName) || "";
+        return window.location.origin + "/cgi-bin/hgTracks?" + dbParam + "=" + genome +
+            "&hubUrl=" + encodeURIComponent(hubUrl);
+    }
+
+    function copyLinkIconSvg(title, dataUrl) {
+        // clipboard icon that the table click handler copies from its data-url.
+        // The title is both an attribute and a <title> child so the tooltip works
+        // across browsers (Firefox ignores title on an svg element).
+        let safeUrl = dataUrl.replaceAll("&", "&amp;").replaceAll('"', "&quot;");
+        let safeTitle = title.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll('"', "&quot;");
+        return '<svg class="copyLinkIcon" title="' + safeTitle + '" data-url="' + safeUrl + '" style="margin-left: 6px; cursor: pointer; vertical-align:baseline; width:0.8em" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><title>' + safeTitle + '</title><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg>';
+    }
+
+    function copyHubLinkFromBanner(ev) {
+        // copy the shareable hub link stashed on the button's data-url
+        ev.stopPropagation();
+        let btn = ev.currentTarget;
+        let url = btn.getAttribute("data-url");
+        if (!url) return;
+        navigator.clipboard.writeText(url).then(function() {
+            let orig = btn.textContent;
+            btn.textContent = "Copied";
+            setTimeout(function() { btn.textContent = orig; }, 1500);
+        }, function() {
+            alert("Failed to copy link: " + url);
+        });
     }
 
     function showHubBanner(hubName) {
@@ -1646,17 +1676,25 @@ var hubCreate = (function() {
     }
 
     function updateSelectedFileDiv(data, isFolderSelect = false) {
-        // update the div that shows how many files are selected
+        // update the div that shows how many files are selected, both below the
+        // table and in a banner above it
         let numSelected = data !== null ? data.length : 0;
+        // the above-table banner is only used in the top level view, not inside a hub
+        let atTopLevel = !uiState.currentHub;
         let infoDiv = document.getElementById("selectedFileInfo");
         let span = document.getElementById("numberSelectedFiles");
         let spanParentDiv = span.parentElement;
+        let banner = document.getElementById("selectedFileBanner");
+        let bannerSpan = document.getElementById("numberSelectedFilesBanner");
         if (numSelected > 0) {
+            let label;
             if (isFolderSelect || span.textContent.endsWith("hub") || span.textContent.endsWith("hubs")) {
-                span.textContent = `${numSelected} ${numSelected > 1 ? "hubs" : "hub"}`;
+                label = `${numSelected} ${numSelected > 1 ? "hubs" : "hub"}`;
             } else {
-                span.textContent = `${numSelected} ${numSelected > 1 ? "files" : "file"}`;
+                label = `${numSelected} ${numSelected > 1 ? "files" : "file"}`;
             }
+            span.textContent = label;
+            bannerSpan.textContent = label;
             // (re) set up the handlers for the selected file info div:
             let viewBtn = document.getElementById("viewSelectedFiles");
             viewBtn.addEventListener("click", viewAllInGenomeBrowser);
@@ -1665,14 +1703,37 @@ var hubCreate = (function() {
             deleteBtn.style.display = "inline-block";
             deleteBtn.addEventListener("click", deleteFileList);
             deleteBtn.textContent = "Delete selected";
+            // mirror the controls in the banner above the table
+            let bannerViewBtn = document.getElementById("viewSelectedFilesBanner");
+            bannerViewBtn.addEventListener("click", viewAllInGenomeBrowser);
+            bannerViewBtn.textContent = "View selected";
+            let bannerDeleteBtn = document.getElementById("deleteSelectedFilesBanner");
+            bannerDeleteBtn.addEventListener("click", deleteFileList);
+            bannerDeleteBtn.textContent = "Delete selected";
+            // when exactly one hub is selected, offer a shareable connect link
+            let copyBtn = document.getElementById("copyHubLinkBanner");
+            let singleHub = (data.length === 1 && data[0].fileType === "dir" &&
+                !data[0].parentDir && hubHasHubTxt(data[0].fullPath)) ? data[0].fullPath : null;
+            let singleHubLink = singleHub ? hubShareLink(singleHub) : null;
+            if (singleHubLink) {
+                copyBtn.textContent = "Copy link to hub";
+                copyBtn.setAttribute("data-url", singleHubLink);
+                copyBtn.addEventListener("click", copyHubLinkFromBanner);
+                copyBtn.style.display = "inline-block";
+            } else {
+                copyBtn.style.display = "none";
+            }
         } else {
             span.textContent = "";
+            bannerSpan.textContent = "";
+            document.getElementById("copyHubLinkBanner").style.display = "none";
         }
 
         // set the visibility of the placeholder text and info text
         spanParentDiv.style.display = numSelected === 0 ? "none": "block";
         let placeholder = document.getElementById("placeHolderInfo");
         placeholder.style.display = numSelected === 0 ? "block" : "none";
+        banner.style.display = (numSelected === 0 || !atTopLevel) ? "none" : "";
     }
 
     function handleCheckboxSelect(evtype, table, selectedRow) {
@@ -2142,14 +2203,25 @@ var hubCreate = (function() {
                 targets: 2,
                 render: function(data, type, row, meta) {
                     let decodedName = decodeURIComponent(data);
-                    if (type !== "display" || row.fileType === "dir") {
+                    if (type !== "display") {
                         return decodedName;
                     }
                     if (typeof uiState.userUrl === "undefined" || uiState.userUrl.length === 0) {
                         return decodedName;
                     }
+                    if (row.fileType === "dir") {
+                        // top-level hubs get an icon that copies a shareable connect link
+                        if (!row.parentDir && hubHasHubTxt(row.fullPath)) {
+                            let hubLink = hubShareLink(row.fullPath);
+                            if (hubLink) {
+                                let hubCopyIcon = copyLinkIconSvg("Copy a shareable link that connects this hub", hubLink);
+                                return '<span style="white-space:nowrap">' + decodedName + hubCopyIcon + '</span>';
+                            }
+                        }
+                        return decodedName;
+                    }
                     let fileUrl = uiState.userUrl + cgiEncode(row.fullPath);
-                    let copyIcon = '<svg class="copyLinkIcon" title="Copy file URL to clipboard" data-url="' + fileUrl + '" style="margin-left: 6px; cursor: pointer; vertical-align:baseline; width:0.8em" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg>';
+                    let copyIcon = copyLinkIconSvg("Copy file URL to clipboard", fileUrl);
                     return '<span style="white-space:nowrap"><a class="fileLink" href="' + fileUrl + '" target="_blank" rel="noopener">' + decodedName + '</a>' + copyIcon + '</span>';
                 }
             },

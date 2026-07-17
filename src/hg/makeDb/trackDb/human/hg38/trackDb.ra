@@ -1,4 +1,4 @@
-include ncOrfs.ra alpha
+include ncOrfs.ra
 
 include strVar.ra
 
@@ -9,6 +9,8 @@ include hoffMap.ra
 include cancerExpr.ra
 
 include mane.ra
+
+include clinvarMapped.ra alpha
 
 include gdcCancer.ra
 
@@ -539,7 +541,8 @@ include trackDb.cloneEnd.ra
 
 include hg38Patch11.ra alpha
 
-include knownGene.ra
+include knownGene.ra beta,public
+include knownGene.alpha.ra alpha
 include knownGeneArchive.ra
 include knownGene.nmd_deco.ra alpha
 
@@ -681,7 +684,7 @@ include trackDb.gencode.ra
 
 include wgEncodeReg.ra beta,public
 include wgEncodeReg.alpha.ra alpha
-include wgEncodeReg4.ra alpha
+include wgEncodeReg4.ra
 
 include encode3.ra
 include encode.cCREs.override.ra
@@ -901,6 +904,8 @@ include hprcChainNet.ra
 include hprcCoverage.ra alpha
 include trackDb.hprc90way.ra
 include hprcArr.ra
+include hprc2.ra alpha
+include hprc2Chains.ra alpha
 include hprcVCF.ra
 include hprcVCFTest.ra alpha
 
@@ -938,3 +943,9 @@ include mb2.ra alpha
 include hprcV2.trackDb.txt alpha
 
 include vgp577way.trackDb.ra alpha
+
+include crPred.ra alpha
+
+include andy_tdb.txt alpha
+
+include tad.ra alpha

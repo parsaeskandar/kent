@@ -665,6 +665,20 @@ for (highlight = highlights; highlight != NULL; highlight = highlight->next)
     }
 }
 
+static void quickLiftSetCoordFields(char **bedRow, struct bed *liftedBed,
+        char *startBuf, char *endBuf, int bufSize)
+/* Overwrite the chrom/chromStart/chromEnd entries (the first three bigBed fields) of bedRow
+ * with the lifted, target-assembly coordinates from liftedBed.  Under quickLift bedRow is
+ * loaded from the source-assembly interval, so without this a $chrom/${chromStart}/${chromEnd}
+ * mouseOver substitution would report the pre-lift position instead of where the item is drawn. */
+{
+safef(startBuf, bufSize, "%u", liftedBed->chromStart);
+safef(endBuf, bufSize, "%u", liftedBed->chromEnd);
+bedRow[0] = liftedBed->chrom;
+bedRow[1] = startBuf;
+bedRow[2] = endBuf;
+}
+
 void bigBedAddLinkedFeaturesFromExt(struct track *track,
 	char *chrom, int start, int end, int scoreMin, int scoreMax, boolean useItemRgb,
 	int fieldCount, struct linkedFeatures **pLfList, int maxItems)
@@ -722,6 +736,31 @@ else
 char *squishField = cartOrTdbString(cart, track->tdb, "squishyPackField", NULL);
 int squishFieldIdx = bbExtraFieldIndex(bbi, squishField);
 
+/* colorFields: optional alternative color scheme stored in a named extra field. */
+int colorFieldIdx = 0;
+char *colorFieldsSetting = trackDbSettingClosestToHome(tdb, "colorFields");
+if (useItemRgb && colorFieldsSetting)
+    {
+    char *colorFieldName = cartOptionalStringClosestToHome(cart, tdb, FALSE, "colorField");
+    if (!isEmpty(colorFieldName))
+        {
+        colorFieldIdx = bbExtraFieldIndex(bbi, colorFieldName);
+        /* Append "(Coloring by: <label>)" to the track's longLabel.
+         * Look up the human-readable label from the colorFields key=value list. */
+        char *label = colorFieldName;
+        struct slPair *pairs = slPairListFromString(colorFieldsSetting, TRUE);
+        if (pairs)
+            {
+            struct slPair *p = slPairFind(pairs, colorFieldName);
+            if (p && isNotEmpty((char *)p->val))
+                label = (char *)p->val;
+            }
+        char suffix[256];
+        safef(suffix, sizeof suffix, " (Coloring by: %s)", label);
+        track->longLabel = catTwoStrings(track->longLabel, suffix);
+        }
+    }
+
 int seqTypeField =  0;
 if (sameString(track->tdb->type, "bigPsl"))
     {
@@ -762,6 +801,7 @@ struct bed *bed = NULL, *bedCopy = NULL;
 for (bb = bbList; bb != NULL; bb = bb->next)
     {
     struct linkedFeatures *lf = NULL;
+    bedCopy = NULL;
     char *bedRow[bbi->fieldCount];
     if (sameString(track->tdb->type, "bigPsl"))
         {
@@ -829,6 +869,9 @@ for (bb = bbList; bb != NULL; bb = bb->next)
         if (lf && squishFieldIdx)
             lf->squishyPackVal = atof(restField(bb, squishFieldIdx));
 
+        if (lf && colorFieldIdx)
+            lf->filterColor = itemRgbColumn(restField(bb, colorFieldIdx));
+
         if (track->visibility != tvDense && lf && doWindowSizeFilter
             && (quickLiftFile ? lf->start : bb->start) < winStart
             && (quickLiftFile ? lf->end : bb->end) > winEnd)
@@ -876,7 +919,12 @@ for (bb = bbList; bb != NULL; bb = bb->next)
                 if (mouseOverIdx > 0)
                     tmp->mouseOver = restField(bb, mouseOverIdx);
                 else if (mouseOverPattern)
+                    {
+                    char qStartBuf[16], qEndBuf[16];
+                    if (quickLiftFile && bedCopy)
+                        quickLiftSetCoordFields(bedRow, bedCopy, qStartBuf, qEndBuf, sizeof qStartBuf);
                     tmp->mouseOver = replaceFieldInPattern(mouseOverPattern, bbi->fieldCount, fieldNames, bedRow);
+                    }
                 slAddHead(&spannedLf, tmp);
                 }
             continue; // lf will be NULL, but these items aren't "filtered", they're merged
@@ -919,7 +967,12 @@ for (bb = bbList; bb != NULL; bb = bb->next)
         if (mouseOverIdx > 0)
             lf->mouseOver = restField(bb, mouseOverIdx);
         else if (mouseOverPattern)
+            {
+            char qStartBuf[16], qEndBuf[16];
+            if (quickLiftFile && bedCopy)
+                quickLiftSetCoordFields(bedRow, bedCopy, qStartBuf, qEndBuf, sizeof qStartBuf);
             lf->mouseOver = replaceFieldInPattern(mouseOverPattern, bbi->fieldCount, fieldNames, bedRow);
+            }
         }
     slAddHead(pLfList, lf);
     }

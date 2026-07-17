@@ -873,6 +873,8 @@ int maxItemsToUseOverflow = maxItemsToOverflow(tg);
 tg->heightPer = heightPer;
 tg->lineHeight = lineHeight;
 
+boolean isCompactPack = trackDbSettingOn(tg->tdb, "compactPack");
+
 /* Note that the maxCount variable passed to packCountRowsOverflow()
    is tied to the maximum height allowed for a track and influences
    decisions about when to squish, dense, or overflow a track.
@@ -900,6 +902,11 @@ switch (vis)
 	break;
     case tvPack:
 	{
+	if (isCompactPack)
+	    {
+	    tg->heightPer = heightPer / 2;
+	    tg->lineHeight = tg->heightPer;
+	    }
 	if(allowOverflow && itemCount < maxItemsToUseOverflow)
 	    rows = packCountRowsOverflow(tg, floor(maxHeight/tg->lineHeight), TRUE, allowOverflow, vis);
 	else
@@ -915,10 +922,18 @@ switch (vis)
 	}
     case tvSquish:
         {
-	tg->heightPer = heightPer/2;
-	if ((tg->heightPer & 1) == 0)
-	    tg->heightPer -= 1;
-	tg->lineHeight = tg->heightPer + 1;
+	if (isCompactPack)
+	    {
+	    tg->heightPer = 3;
+	    tg->lineHeight = 3;
+	    }
+	else
+	    {
+	    tg->heightPer = heightPer/2;
+	    if ((tg->heightPer & 1) == 0)
+		tg->heightPer -= 1;
+	    tg->lineHeight = tg->heightPer + 1;
+	    }
 	if(allowOverflow && itemCount < maxItemsToUseOverflow)
 	    rows = packCountRowsOverflow(tg, floor(maxHeight/tg->lineHeight), FALSE, allowOverflow, vis);
 	else
@@ -1109,12 +1124,15 @@ void mapStatusMessage(char *format, ...)
 /* Write out stuff that will cause a status message to
  * appear when the mouse is over this box. */
 {
-va_list(args);
+va_list args;
 va_start(args, format);
-hPrintf(" TITLE=\"");
-hvPrintf(format, args);
-hPutc('"');
+struct dyString *dy = dyStringNew(0);
+dyStringVaPrintf(dy, format, args);
 va_end(args);
+char *encoded = attributeEncode(dy->string);
+hPrintf(" TITLE=\"%s\" data-tooltip=\"%s\"", encoded, encoded);
+freeMem(encoded);
+dyStringFree(&dy);
 }
 
 void mapBoxReinvoke(struct hvGfx *hvg, int x, int y, int width, int height,
@@ -2909,6 +2927,58 @@ slFreeList(&crList);
 return result;
 }
 
+static int splicedBaseCount(struct linkedFeatures *lf, int gStart, int gEnd)
+/* Number of exonic (spliced mRNA) bases in the genomic half-open interval
+ * [gStart, gEnd), summed over the transcript's exon blocks (lf->components).
+ * Measuring in spliced space means introns don't inflate UTR distances. */
+{
+if (gStart >= gEnd)
+    return 0;
+int total = 0;
+struct simpleFeature *sf;
+for (sf = lf->components; sf != NULL; sf = sf->next)
+    {
+    int s = max(sf->start, gStart);
+    int e = min(sf->end, gEnd);
+    if (e > s)
+        total += e - s;
+    }
+return total;
+}
+
+static void utrHgvsCoord(struct linkedFeatures *lf, int g, char *buf, int bufSize)
+/* Format the HGVS CDS-relative coordinate for the single UTR base at genomic
+ * position g, without the leading "c." : "-N" in the 5' UTR (counting back to
+ * the first coding base) or "*N" in the 3' UTR (counting forward from the last
+ * coding base).  Distances are spliced, and query orientation is taken from
+ * lf->orientation so the same code serves both strands. */
+{
+boolean posStrand = (lf->orientation >= 0);
+int cdsStart = lf->tallStart, cdsEnd = lf->tallEnd;
+if ((posStrand && g < cdsStart) || (!posStrand && g >= cdsEnd))
+    {
+    int n = posStrand ? splicedBaseCount(lf, g, cdsStart)
+                      : splicedBaseCount(lf, cdsEnd, g + 1);
+    safef(buf, bufSize, "-%d", n);
+    }
+else
+    {
+    int n = posStrand ? splicedBaseCount(lf, cdsEnd, g + 1)
+                      : splicedBaseCount(lf, g, cdsStart);
+    safef(buf, bufSize, "*%d", n);
+    }
+}
+
+static int txMrnaPos(struct linkedFeatures *lf, int g)
+/* 1-based spliced (mRNA) position of genomic base g measured from the
+ * transcript's 5' end.  Used for HGVS n. numbering of non-coding transcripts. */
+{
+if (lf->orientation >= 0)
+    return splicedBaseCount(lf, lf->start, g + 1);
+else
+    return splicedBaseCount(lf, g, lf->end);
+}
+
 void linkedFeaturesItemExonMaps(struct track *tg, struct hvGfx *hvg, void *item, double scale,
     int y, int heightPer, int sItem, int eItem,
     boolean lButton, boolean rButton, int buttonW)
@@ -3005,14 +3075,14 @@ for (ref = exonList; TRUE; )
 		--numExonIntrons;  // introns are one fewer than exons
 		}
 
-            char strandChar;
+            char* strandStr;
 	    if (!revStrand) {
 		exonIntronNumber = exonIx;
-                strandChar = '+';
+                strandStr = "+";
             }
 	    else {
 		exonIntronNumber = numExonIntrons-exonIx+1;
-                strandChar = '-';
+                strandStr = "-";
             }
 
             // we still need to show the existing mouseover text
@@ -3083,10 +3153,59 @@ for (ref = exonList; TRUE; )
                                         dyStringPrintf(codonDy, "<b>Transcript: </b> %s<br>", existingText);
                                     int codonHgvsIx = (codon->codonIndex - 1) * 3;
                                     if (codonHgvsIx >= 0)
-                                        dyStringPrintf(codonDy, "<b>Codons: </b> c.%d-%d<br>", codonHgvsIx + 1, codonHgvsIx + 3);
+                                        {
+                                        int cStart = codonHgvsIx + 1;
+                                        int cEnd = codonHgvsIx + 3;
+                                        // a codon is a single amino acid; p. is 1-based like c.
+                                        int pPos = codonHgvsIx / 3 + 1;
+                                        // the one-letter amino acid was stored on the codon when it
+                                        // was translated (cds.c); map it to its three-letter code
+                                        char aaLetter = codon->codonAa;
+                                        char aaAbbr[8];
+                                        char *aaName = NULL;
+                                        if (aaLetter == '*')
+                                            {
+                                            safecpy(aaAbbr, sizeof(aaAbbr), "Ter");
+                                            aaName = "termination";
+                                            }
+                                        else if (aaLetter == 'X')  // error/partial codon: nothing to show
+                                            aaAbbr[0] = '\0';
+                                        else
+                                            {
+                                            aaToAbbr(aaLetter, aaAbbr, sizeof(aaAbbr));
+                                            aaName = aaToName(aaLetter);
+                                            }
+                                        dyStringPrintf(codonDy, "<b>Codon: </b> c.%d-%d (p.%d)<br>",
+                                                cStart, cEnd, pPos);
+                                        if (!isEmpty(aaAbbr))
+                                            {
+                                            if (aaName != NULL)
+                                                dyStringPrintf(codonDy, "<b>Amino acid: </b> %s - %s<br>", aaAbbr, aaName);
+                                            else
+                                                dyStringPrintf(codonDy, "<b>Amino acid: </b> %s<br>", aaAbbr);
+                                            }
+                                        }
+                                    else if (lf->tallStart < lf->tallEnd)
+                                        {
+                                        // UTR block of a coding transcript (codonIndex 0, so no
+                                        // c./p. above): label it with its HGVS UTR range.  codonS/
+                                        // codonE span the whole UTR portion of this exon.
+                                        boolean posStrand = (lf->orientation >= 0);
+                                        int gFivePrime  = posStrand ? codonS : codonE - 1;
+                                        int gThreePrime = posStrand ? codonE - 1 : codonS;
+                                        char loBuf[16], hiBuf[16];
+                                        utrHgvsCoord(lf, gFivePrime,  loBuf, sizeof(loBuf));
+                                        utrHgvsCoord(lf, gThreePrime, hiBuf, sizeof(hiBuf));
+                                        char *utrSide = ((posStrand && codonS < lf->tallStart) ||
+                                                (!posStrand && codonS >= lf->tallEnd)) ? "5' UTR" : "3' UTR";
+                                        if (sameString(loBuf, hiBuf))
+                                            dyStringPrintf(codonDy, "<b>%s: </b> c.%s<br>", utrSide, loBuf);
+                                        else
+                                            dyStringPrintf(codonDy, "<b>%s: </b> c.%s_%s<br>", utrSide, loBuf, hiBuf);
+                                        }
                                     // if you change the text below, also change hgTracks:mouseOverToExon
-                                    dyStringPrintf(codonDy, "<b>Strand: </b> %c&nbsp;&nbsp;&nbsp;&nbsp;<b>Length: </b>%dbp<br><b>Exon: </b>%s %d of %d<br>%s",
-                                                strandChar, e - s, exonIntronText, exonIntronNumber, numExonIntrons, phaseText);
+                                    dyStringPrintf(codonDy, "<b>Strand: </b> %s<br><b>Exon: </b>%s %d of %d&nbsp;&nbsp;<b>Length: </b>%d bp<br>%s",
+                                                strandStr, exonIntronText, exonIntronNumber, numExonIntrons, e - s, phaseText);
                                     tg->mapItem(tg, hvg, item, codonDy->string, tg->mapItemName(tg, item),
                                             sItem, eItem, codonsx, y, w, heightPer);
                                     // and restore the mouseOver
@@ -3101,18 +3220,35 @@ for (ref = exonList; TRUE; )
                     // if you change this text, make sure you also change hgTracks.js:mouseOverToLabel
                     // if you change the text below, also change hgTracks:mouseOverToExon
                     char *posNote = "";
+                    char posBuf[64];
                     char *exonOrIntron = "Intron";
-                    if (isExon) 
+                    char *lengthLabel = "Length:";
+                    if (isExon)
                         {
-                        posNote = "<b>Codons:</b> Zoom in to show cDNA position<br>";
                         exonOrIntron = "Exon";
+                        lengthLabel = "Exon Length:";
+                        if (lf->tallStart >= lf->tallEnd && zoomedToCdsColorLevel)
+                            {
+                            // non-coding transcript (no CDS): label the exon with its
+                            // spliced HGVS n. nucleotide range instead of the codon note.
+                            boolean posStrand = (lf->orientation >= 0);
+                            int n5 = txMrnaPos(lf, posStrand ? s : e - 1);
+                            int n3 = txMrnaPos(lf, posStrand ? e - 1 : s);
+                            if (n5 == n3)
+                                safef(posBuf, sizeof(posBuf), "<b>Position: </b> n.%d<br>", n5);
+                            else
+                                safef(posBuf, sizeof(posBuf), "<b>Position: </b> n.%d_%d<br>", n5, n3);
+                            posNote = posBuf;
+                            }
+                        else
+                            posNote = "<b>Codons:</b> Zoom in to show cDNA position<br>";
                         }
 
 
                     safef(mouseOverText, sizeof(mouseOverText), "<b>Transcript:</b> %s<br>%s"
-                            "<b>Strand:</b> %c<br><b>%s:</b> %s %d of %d&nbsp;&nbsp;<b>Length:</b> %d bp<br>%s",
-                        existingText, posNote, strandChar, exonOrIntron, exonIntronText,
-                        exonIntronNumber, numExonIntrons, e - s, phaseText);
+                            "<b>Strand:</b> %s<br><b>%s:</b> %s %d of %d&nbsp;&nbsp;<b>%s</b> %d bp<br>%s",
+                        existingText, posNote, strandStr, exonOrIntron, exonIntronText,
+                        exonIntronNumber, numExonIntrons, lengthLabel, e - s, phaseText);
 
                     // temporarily remove the mouseOver from the lf, since linkedFeatureMapItem will always 
                     // prefer a lf->mouseOver over the itemName
@@ -3708,7 +3844,9 @@ return shadesOfGray[2];
 
 
 void makeGrayShades(struct hvGfx *hvg)
-/* Make eight shades of gray in display. */
+/* Fill shadesOfGray[0..maxShade] with a white-to-black gradient, then set
+ * shadesOfGray[maxShade+1] to red as an overflow sentinel (shadesOfGray is
+ * declared with maxShade+2 entries to leave room for it). */
 {
 hMakeGrayShades(hvg, shadesOfGray, maxShade);
 shadesOfGray[maxShade+1] = MG_RED;
@@ -4386,6 +4524,9 @@ if (vis != tvDense)
      * drawn so that exons sharing the pixel don't overdraw differences. */
     baseColorOverdrawDiff(tg, lf, hvg, xOff, y, scale, heightPer,
 			  qSeq, qOffset, psl, winStart, drawOpt);
+    /* When codons are colored, distribute strand arrows across the exons on top
+     * of the boxes (coding exons when too small to label, plus the UTRs). */
+    baseColorDrawCdsArrows(tg, lf, hvg, xOff, y, scale, heightPer, winStart, drawOpt, color);
     if (psl && (indelShowQueryInsert || indelShowPolyA))
 	baseColorOverdrawQInsert(tg, lf, hvg, xOff, y, scale, heightPer,
 				 qSeq, qOffset, psl, font, winStart, drawOpt,
@@ -6313,10 +6454,7 @@ if (liftDb != NULL)
     struct sqlConnection *conn = hAllocConn(liftDb);
     char *quickLiftFile = cloneString(trackDbSetting(tg->tdb, "quickLiftUrl"));
 
-// using this loader on genePred tables with less than 15 fields may be a problem.
-extern struct genePred *genePredExtLoad15(char **row);
-
-    struct genePred *gpList = (struct genePred *)quickLiftSql(conn, quickLiftFile, table, chromName, winStart, winEnd,  NULL, NULL, (ItemLoader2)genePredExtLoad15, 0, chainHash);
+    struct genePred *gpList = quickLiftGenePreds(conn, quickLiftFile, table, chromName, winStart, winEnd, NULL, chainHash);
     hFreeConn(&conn);
 
     calcLiftOverGenePreds( gpList, chainHash, 0.0, 0.0, TRUE, NULL, NULL,  TRUE, FALSE);

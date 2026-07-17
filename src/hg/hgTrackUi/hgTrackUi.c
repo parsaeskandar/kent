@@ -2148,6 +2148,11 @@ boolean showRuler = cartUsualBoolean(cart, BASE_SHOWRULER, TRUE);
 boolean complementsToo = cartUsualBoolean(cart, MOTIF_COMPLEMENT, FALSE);
 boolean showPos = cartUsualBoolean(cart, BASE_SHOWPOS, FALSE);
 boolean showAsm = cartUsualBoolean(cart, BASE_SHOWASM, FALSE);
+/* complement-bases var is assembly-specific (same one toggled by the "Click to
+ * complement" arrow next to the ruler, see hgTracks.c drawComplementArrow) */
+boolean complementBases = cartUsualBooleanDb(cart, database, COMPLEMENT_BASES_VAR, FALSE);
+char complementVar[256];
+safef(complementVar, sizeof(complementVar), "%s_%s", COMPLEMENT_BASES_VAR, database);
 /* title var is assembly-specific */
 char titleVar[256];
 char *title = NULL;
@@ -2166,6 +2171,16 @@ puts("&nbsp;<B>Show scale bar</B>");
 puts("<P>");
 cgiMakeCheckBox(BASE_SHOWASM_SCALEBAR, cartUsualBoolean(cart, BASE_SHOWASM_SCALEBAR, TRUE));
 puts("&nbsp;<B>Show assembly next to scale bar</B>");
+puts("</P>");
+
+puts("<P>");
+cgiMakeCheckBox(complementVar, complementBases);
+puts("&nbsp;<B>Complement the bases</B>");
+printInfoIcon("Show the complementary DNA base at each position. "
+     "Same as the &quot;Click to complement&quot; arrow next to the ruler. "
+     "Does not reverse the sequence. "
+     "To reverse-complement the entire display, sequence and annotations, "
+     "click the \"Reverse\" button under the image instead.");
 puts("</P>");
 
 puts("<P>");
@@ -2878,9 +2893,9 @@ for (childRef = superTdb->children; childRef != NULL; childRef = childRef->next)
         hPrintIcons(tdb);
 	safef(id, sizeof id, "%s_link", tdb->track);
         // the <select> tag is only needed to send arguments to the hgTracks CGI. It will be hidden, see below.
-        printf("<A HREF='%s?%s=%s&c=%s&g=%s' id='%s'>%s</A>&nbsp;", 
+        printf("<A HREF='%s?%s=%s&db=%s&c=%s&g=%s' id='%s'>%s</A>&nbsp;", 
                     tdbIsDownloadsOnly(tdb) ? hgFileUiName(): hTrackUiForTrack(tdb->track),
-                    cartSessionVarName(), cartSessionId(cart), chromosome, cgiEncode(tdb->track), 
+                    cartSessionVarName(), cartSessionId(cart), database, chromosome, cgiEncode(tdb->track), 
                     id, tdb->shortLabel);
 	jsOnEventById("click", id, "superT.submitAndLink(this);");
         }
@@ -3043,7 +3058,7 @@ freeMem(tdbDataTypes);
 return list;
 }
 
-unsigned int cartDbParseId(char *, char **);  // ADS: avoid extra include
+unsigned long cartDbParseId(char *, char **);  // ADS: avoid extra include
 
 
 static void facetedCompositeUi(struct trackDb *tdb)
@@ -3337,7 +3352,8 @@ printf("<tr><td>Permission:</td><td>"
     "</td></tr>\n");
 printf("<tr><td>Share with:</td>"
     "<td><input type=\"text\" id=\"shareTargetUser\""
-    " placeholder=\"Username (blank = anyone with link)\" style=\"width:250px\"></td></tr>\n");
+    " placeholder=\"Username(s), comma-separated (blank = anyone with link)\""
+    " style=\"width:250px\"></td></tr>\n");
 printf("<tr><td>Label:</td>"
     "<td><input type=\"text\" id=\"shareLabel\" placeholder=\"Optional label\""
     " style=\"width:250px\"></td></tr>\n");
@@ -3569,8 +3585,8 @@ if (tdbSupportsColorOverride(tdb))
 /* myVariants own track: render inline share management. Skip shared tracks
  * (myVariants_shared_*) - you can't re-share someone else's data. */
 if (cfgOptionBooleanDefault("doMyVariants", FALSE)
-    && startsWith("myVariants_", tdb->track)
-    && !startsWith("myVariants_shared_", tdb->track))
+    && isMyVariantsTrack(tdb->track)
+    && !isMyVariantsSharedTrack(tdb->track))
     myVariantsShareUi(tdb);
 
 if (!ajax) // ajax asks for a simple cfg dialog for right-click popup or hgTrackUi subtrack cfg
@@ -3638,11 +3654,11 @@ if (!tdb->parent)
 // show super-track info
 struct trackDb *tdbParent = tdb->parent;
 
-printf("<b>Back to parent track: "
+printf("<b>Configure track container: "
            "<img height=12 src='../images/ab_up.gif'>"
-            "<a href='%s?%s=%s&c=%s&g=%s'>%s </a></b>",
+            "<a href='%s?%s=%s&db=%s&c=%s&g=%s'>%s </a></b>",
             hgTrackUiName(), cartSessionVarName(), cartSessionId(cart),
-            chromosome, cgiEncode(tdbParent->track), tdbParent->longLabel);
+            database, chromosome, cgiEncode(tdbParent->track), tdbParent->longLabel);
 printf("<p>");
 
 if (tdbIsComposite(tdb) && sameOk(trackDbLocalSetting(tdb, "compositeTrack"), "faceted"))
@@ -3673,9 +3689,9 @@ if (tdbParent->html)
         *end = '\0';
     printf("%s", html);
     printf("<p><i>To view the full description, click "
-                "<a target='_blank' href='%s?%s=%s&c=%s&g=%s#TRACK_HTML'>here.</a></i>\n",
+                "<a target='_blank' href='%s?%s=%s&db=%s&c=%s&g=%s#TRACK_HTML'>here.</a></i>\n",
                         hgTrackUiName(), cartSessionVarName(), cartSessionId(cart),
-                        chromosome, cgiEncode(tdbParent->track));
+                        database, chromosome, cgiEncode(tdbParent->track));
     jsEndCollapsibleSection();
     printf("</table>\n"); // required by jsCollapsible
     }
@@ -3700,9 +3716,9 @@ for (childRef = tdbParent->children; childRef != NULL; childRef = childRef->next
         continue;
         }
     printf("<tr>");
-    printf("<td><a href='%s?%s=%s&c=%s&g=%s'>%s</a>&nbsp;</td>", 
+    printf("<td><a href='%s?%s=%s&db=%s&c=%s&g=%s'>%s</a>&nbsp;</td>", 
                 tdbIsDownloadsOnly(sibTdb) ? hgFileUiName(): hTrackUiForTrack(sibTdb->track),
-                cartSessionVarName(), cartSessionId(cart), chromosome, cgiEncode(sibTdb->track), 
+                cartSessionVarName(), cartSessionId(cart), database, chromosome, cgiEncode(sibTdb->track), 
                 sibTdb->shortLabel);
     printf("<td>%s</td></tr>\n", sibTdb->longLabel);
     }
@@ -3885,10 +3901,10 @@ if (!ajax)
             if (sameString(grp->name,tdb->grp))
                 {
                 printf("&nbsp;&nbsp;<B style='font-size:100%%;'>"
-                       "(<A HREF=\"%s?%s=%s&c=%s&hgTracksConfigPage=configure"
+                       "(<A HREF=\"%s?%s=%s&db=%s&c=%s&hgTracksConfigPage=configure"
                        "&hgtgroup_%s_close=0#%sGroup\" title='%s tracks in track configuration "
                        "page'><IMG height=12 src='../images/ab_up.gif'>All %s%s</A>)</B>",
-                       hgTracksName(), cartSessionVarName(), cartSessionId(cart),chromosome,
+                       hgTracksName(), cartSessionVarName(), cartSessionId(cart),database,chromosome,
                        tdb->grp,tdb->grp,grp->label,grp->label,
                        endsWith(grp->label," Tracks")?"":" tracks");
                 break;
@@ -3997,15 +4013,15 @@ if (!tdbIsDownloadsOnly(tdb))
 	/* Offer to dupe the non-containery tracks including composite and supertrack elements */
 	if (tdbIsDupable(tdb))
 	    {
-	    printf("\n&nbsp;&nbsp;<a href='%s?%s=%s&c=%s&g=%s&hgTrackUi_op=dupe' >Duplicate track</a>\n", 
+	    printf("\n&nbsp;&nbsp;<a href='%s?%s=%s&db=%s&c=%s&g=%s&hgTrackUi_op=dupe' >Duplicate track</a>\n", 
 		hgTrackUiName(), cartSessionVarName(), cartSessionId(cart),
-		chromosome, cgiEncode(tdb->track));
+		database, chromosome, cgiEncode(tdb->track));
 	    if (isDupTrack(tdb->track))
 		{
 		/* Offer to undupe */
-		printf("\n&nbsp;&nbsp;<a href='%s?%s=%s&c=%s&g=%s&hgTrackUi_op=undupe' >Remove duplicate</a>\n", 
+		printf("\n&nbsp;&nbsp;<a href='%s?%s=%s&db=%s&c=%s&g=%s&hgTrackUi_op=undupe' >Remove duplicate</a>\n", 
 		    hgTrackUiName(), cartSessionVarName(), cartSessionId(cart),
-		    chromosome, cgiEncode(tdb->track));
+		    database, chromosome, cgiEncode(tdb->track));
 		}
 
 	    }
@@ -4013,9 +4029,9 @@ if (!tdbIsDownloadsOnly(tdb))
 	char *quickLiftSourceDb = trackDbSetting(tdb, "quickLiftDb");
 	if (quickLiftSourceDb != NULL)
 	    {
-	    printf("\n&nbsp;&nbsp;<a href='%s?%s=%s&c=%s&g=%s&hgTrackUi_op=quickLiftRemove&qlSourceDb=%s' >Remove from QuickLift</a>\n",
+	    printf("\n&nbsp;&nbsp;<a href='%s?%s=%s&db=%s&c=%s&g=%s&hgTrackUi_op=quickLiftRemove&qlSourceDb=%s' >Remove from QuickLift</a>\n",
 		hgTrackUiName(), cartSessionVarName(), cartSessionId(cart),
-		chromosome, cgiEncode(tdb->track), cgiEncode(quickLiftSourceDb));
+		database, chromosome, cgiEncode(tdb->track), cgiEncode(quickLiftSourceDb));
 	    }
 	}
 
@@ -4026,7 +4042,7 @@ if (!tdbIsDownloadsOnly(tdb))
         cgiMakeHiddenVar(CT_SELECTED_TABLE_VAR, tdb->track);
         puts("&nbsp;");
         if (differentString(tdb->type, "chromGraph") &&
-            differentString(tdb->type, "myVariants"))
+            !isMyVariantsType(tdb->type))
             {
             char buf[256];
             if (ajax)
@@ -4038,8 +4054,8 @@ if (!tdbIsDownloadsOnly(tdb))
                 safef(buf, sizeof(buf), "document.customTrackForm.submit();return false;");
             cgiMakeOnClickButton("htui_updtCustTrk", buf, "Update custom track");
             }
-        if (sameString(tdb->type, "myVariants") &&
-            !startsWith("myVariants_shared_", tdb->track))
+        if (isMyVariantsType(tdb->type) &&
+            !isMyVariantsSharedTrack(tdb->track))
             {
             /* Labels are per (track, db) so the same myVariants table can
              * carry a different name on each assembly. */
@@ -4079,8 +4095,11 @@ if (!tdbIsSuper(tdb) && !tdbIsDownloadsOnly(tdb) && !ajax)
             downArrow = "&darr;";
         printf("&nbsp;&nbsp;<A HREF='#DISPLAY_SUBTRACKS' TITLE='Jump to subtrack list section of "
                "page'>Subtracks%s</A>", downArrow);
-        printf("&nbsp;&nbsp;<A HREF='#TRACK_HTML' TITLE='Jump to description section of page'>"
-               "Description%s</A>", downArrow);
+        if (isNotEmpty(tdb->html))
+            {
+            printf("&nbsp;&nbsp;<A HREF='#TRACK_HTML' TITLE='Jump to description section of page'>"
+                   "Description%s</A>", downArrow);
+            }
         if (trackDbSetting(tdb, "wgEncode") && isEncode2(database, tdb->track))
             {
             printf("&nbsp;&nbsp;<A HREF='#TRACK_CREDITS' TITLE='Jump to ENCODE lab contacts for this data'>"
@@ -4094,10 +4113,13 @@ if (!tdbIsSuper(tdb) && !tdbIsDownloadsOnly(tdb) && !ajax)
         enum browserType browser = cgiBrowser();
         if (browser == btIE || browser == btFF)
             downArrow = "&darr;";
-        printf("\n&nbsp;&nbsp;<span id='navDown' style='float:right; display:none;'>");
-        printf("&nbsp;&nbsp;<A HREF='#TRACK_HTML' TITLE='Jump to description section of page'>"
-               "Description%s</A>", downArrow);
-        printf("&nbsp;</span>");
+        if (isNotEmpty(tdb->html))
+            {
+            printf("\n&nbsp;&nbsp;<span id='navDown' style='float:right; display:none;'>");
+            printf("&nbsp;&nbsp;<A HREF='#TRACK_HTML' TITLE='Jump to description section of page'>"
+                   "Description%s</A>", downArrow);
+            printf("&nbsp;</span>");
+            }
         }
     }
 if (!tdbIsSuperTrack(tdb) && !tdbIsComposite(tdb))
@@ -4521,7 +4543,7 @@ else if (sameWord(track, OLIGO_MATCH_TRACK_NAME))
 else if (sameWord(track, CUTTERS_TRACK_NAME))
     tdb = trackDbForPseudoTrack(CUTTERS_TRACK_NAME, CUTTERS_TRACK_LABEL, CUTTERS_TRACK_LONGLABEL, tvHide, TRUE);
 else if (isCustomTrack(track)
-         || (cfgOptionBooleanDefault("doMyVariants", FALSE) && startsWith("myVariants_", track)))
+         || (cfgOptionBooleanDefault("doMyVariants", FALSE) && isMyVariantsTrack(track)))
     {
     /* myVariants tracks (own and shared) are built dynamically and live in
      * the CT list rather than the SQL trackDb table, but their names don't
@@ -4540,7 +4562,7 @@ else if (isCustomTrack(track)
      * the myVariants CT file and re-parse. Normally the CT file was written
      * during the preceding hgTracks visit, so this branch only fires for
      * bookmarked URLs or direct links. */
-    if (tdb == NULL && startsWith("myVariants_", track))
+    if (tdb == NULL && isMyVariantsTrack(track))
         {
         char *userName = getUserName();
         char *ctFile = myVariantsWriteCtFile(userName, database, cart);
@@ -4582,6 +4604,8 @@ if (tdb == NULL)
 if (isDup)
     {
     struct dupTrack *dup = dupTrackFindInList(dupList, dupWholeName);
+    if (dup == NULL)
+        errAbort("Can't find duplicate track %s", dupWholeName);
     tdb = dupTdbFrom(tdb, dup);
     }
 

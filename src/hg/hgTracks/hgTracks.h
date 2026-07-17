@@ -380,9 +380,13 @@ struct simpleFeature
     {
     struct simpleFeature *next;
     int start, end;			/* Start/end in browser coordinates. */
-    int qStart, qEnd;			/* query start/end */
+    int qStart, qEnd;			/* query start/end; only used for alignment tracks
+                                         * (PSL, BAM, chain, snake); 0 for gene models (genePred). */
     int grayIx;                         /* Level of gray usually. */
     int codonIndex;                     /* 1-based codon index (ignored if 0) */
+    char codonAa;                       /* For a codon, its display amino-acid letter:
+                                         * AA letter, '*' stop, 'M' start, 'X' error/partial,
+                                         * 0 if not a codon.  Set when grayIx is. */
     };
 
 /* Some details of how to draw linked features. */
@@ -1900,6 +1904,11 @@ boolean hasRecTrackSet(struct cart *cart);
 
 void printRecTrackSets();
 /* Create dialog with list of recommended track sets */
+
+boolean loadRecTrackSetFromFile(struct cart *cart, char *sessionName);
+/* If a contents file exists in htdocs for this recommended track set, merge its
+ * settings into the current cart and return TRUE.  Return FALSE if no file, so the
+ * caller can fall back to loading the session from hgcentral. */
 
 Color colorFromSoTerm(enum soTerm term);
 /* Assign a Color according to soTerm: red for non-synonymous, green for synonymous, blue for

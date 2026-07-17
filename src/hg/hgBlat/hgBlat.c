@@ -1,4 +1,9 @@
-/* hgBlat - CGI-script to manage fast human genome sequence searching. */
+/* hgBlat - CGI-script to manage fast human genome sequence searching.
+ *
+ * NOTE: The hubApi /blat endpoint (src/hg/hubApi/blat.c) derives its
+ * alignment logic (server lookup, sequence filtering, gfAlign* calls,
+ * temp-file round-trip) from this file.  If you fix a bug or change
+ * behaviour here, check whether hubApi/blat.c needs the same fix. */
 
 /* Copyright (C) 2014 The Regents of the University of California 
  * See kent/LICENSE or http://genome.ucsc.edu/license/ for licensing information. */
@@ -322,107 +327,35 @@ char *outputList[] = {"hyperlink", "psl", "psl no header", "JSON"};
 
 int minMatchShown = 0;
 
-static struct serverTable *databaseServerTable(char *db, boolean isTrans)
-/* Load blat table for a database */
+struct serverTable *findServer(char *db, boolean isTrans)
+/* Return server for given database.  Db can either be database name or
+ * description.  Server lookup delegated to findBlatServer() in hg/lib/blatServers.c. */
 {
-struct sqlConnection *conn = hConnectCentral();
-char query[512];
-struct sqlResult *sr;
-char **row;
-char dbActualName[32];
-
-/* If necessary convert database description to name. */
-sqlSafef(query, sizeof(query), "select name from dbDb where name = '%s'", db);
-if (!sqlExists(conn, query))
-    {
-    sqlSafef(query, sizeof(query), "select name from dbDb where description = '%s'", db);
-    if (sqlQuickQuery(conn, query, dbActualName, sizeof(dbActualName)) != NULL)
-        db = dbActualName;
-    }
-
-struct serverTable *st;
-AllocVar(st);
-
-/* Do a little join to get data to fit into the serverTable and grab
- * dbDb.nibPath too.  Check for newer dynamic flag and allow with or without
- * it.
- * For debugging, one set the variable blatServersTbl to some db.table to
- * pick up settings from somewhere other than dbDb.blatServers.
- */
-char *blatServersTbl = cfgOptionDefault("blatServersTbl", "blatServers");
-boolean haveDynamic = sqlColumnExists(conn, blatServersTbl, "dynamic");
-sqlSafef(query, sizeof(query), "select dbDb.name, dbDb.description, blatServers.isTrans,"
-         "blatServers.host, blatServers.port, dbDb.nibPath, %s "
-         "from dbDb, %s blatServers where blatServers.isTrans = %d and "
-         "dbDb.name = '%s' and dbDb.name = blatServers.db", 
-         (haveDynamic ? "blatServers.dynamic" : "0"), blatServersTbl, isTrans, db);
-sr = sqlGetResult(conn, query);
-if ((row = sqlNextRow(sr)) == NULL)
-    {
+struct blatServerParams *p = findBlatServer(db, isTrans);
+if (p == NULL)
     errAbort("Can't find a server for %s database %s.  Click "
 	     "<A HREF=\"/cgi-bin/hgBlat?%s&command=start&db=%s\">here</A> "
 	     "to reset to default database.",
 	     (isTrans ? "translated" : "DNA"), db,
 	     cartSidUrlString(cart), hDefaultDb());
-    }
-st->db = cloneString(row[0]);
-st->genome = cloneString(row[1]);
-st->isTrans = atoi(row[2]);
-st->host = cloneString(row[3]);
-st->port = cloneString(row[4]);
-st->nibDir = hReplaceGbdbSeqDir(row[5], st->db);
-if (atoi(row[6]))
-    {
-    st->isDynamic = TRUE;
-    st->genomeDataDir = cloneString(st->db);  // directories by database name for database genomes
-    ++nonHubDynamicBlatServerCount;
-    }
-
-sqlFreeResult(&sr);
-hDisconnectCentral(&conn);
-return st;
-}
-
-static struct serverTable *trackHubServerTable(char *db, boolean isTrans)
-/* Load blat table for a hub */
-{
-char *host, *port;
-char *genomeDataDir;
-
-if (!trackHubGetBlatParams(db, isTrans, &host, &port, &genomeDataDir))
-    return NULL;
-
 struct serverTable *st;
 AllocVar(st);
-
-st->db = cloneString(db);
-st->genome = cloneString(hGenome(db));
-st->isTrans = isTrans;
-st->host = host; 
-st->port = port;
-struct trackHubGenome *genome = trackHubGetGenome(db);
-st->nibDir = cloneString(genome->twoBitPath);
-char *ptr = strrchr(st->nibDir, '/');
-// we only want the directory name
-if (ptr != NULL)
-    *ptr = 0;
-if (genomeDataDir != NULL)
+st->db          = p->db;
+st->genome      = p->genome;
+st->isTrans     = p->isTrans;
+st->host        = p->host;
+st->port        = p->port;
+st->nibDir      = p->nibDir;
+st->isDynamic   = p->isDynamic;
+st->genomeDataDir = p->genomeDataDir;
+if (p->isDynamic)
     {
-    st->isDynamic = TRUE;
-    st->genomeDataDir = cloneString(genomeDataDir);
-    ++hubDynamicBlatServerCount;
+    if (trackHubDatabase(db))
+        ++hubDynamicBlatServerCount;
+    else
+        ++nonHubDynamicBlatServerCount;
     }
 return st;
-}
-
-struct serverTable *findServer(char *db, boolean isTrans)
-/* Return server for given database.  Db can either be
- * database name or description. */
-{
-if (trackHubDatabase(db))
-    return trackHubServerTable(db, isTrans);
-else
-    return databaseServerTable(db, isTrans);
 }
 
 void findClosestServer(char **pDb, char **pOrg)
@@ -431,7 +364,7 @@ void findClosestServer(char **pDb, char **pOrg)
 {
 char *db = *pDb, *org = *pOrg;
 
-if (trackHubDatabase(db) && (trackHubServerTable(db, FALSE) != NULL))
+if (trackHubDatabase(db) && (findBlatServer(db, FALSE) != NULL))
     {
     *pDb = db;
     *pOrg = hGenome(db);
@@ -1966,14 +1899,14 @@ for (seq = seqList; seq != NULL; seq = seq->next)
     if (oneSize < minSuggested)
         {
 	warn("Warning: Sequence %s is only %d letters long (%d is the recommended minimum).<br><br>"
-                "To search for short sequences in the browser window, use the <a href='hgTrackUi?%s=%s&g=oligoMatch&oligoMatch=pack'>Short Sequence Match</a> track. "
+                "To search for short sequences in the browser window, use the <a href='hgTrackUi?%s=%s&db=%s&g=oligoMatch&oligoMatch=pack'>Short Sequence Match</a> track. "
                 "You can also use our commandline tool <tt>findMotifs</tt> "
                 "(see the <a target=_blank href='https://hgdownload.soe.ucsc.edu/downloads.html#utilities_downloads'>utilities download page</a>) to "
                 "search for sequences on the entire genome.<br><br>"
                 "For primers, you can use the <a href='hgPcr?%s=%s'>In-silico PCR</a> tool. In-silico PCR can search the entire genome or a set of "
                 "transcripts. In the latter case, it can find matches that straddle exon/intron boundaries.<br><br>"
                 "<a href='../contacts.html'>Contact us</a> for additional help using BLAT or its related tools.",
-		seq->name, oneSize, minSuggested, cartSessionVarName(), cartSessionId(cart), cartSessionVarName(), cartSessionId(cart));
+		seq->name, oneSize, minSuggested, cartSessionVarName(), cartSessionId(cart), database, cartSessionVarName(), cartSessionId(cart));
 	// we could use "continue;" here to actually enforce skipping, 
 	// but let's give the short sequence a chance, it might work.
 	// minimum possible length = tileSize+stepSize, so mpl=16 for dna stepSize=5, mpl=10 for protein.
@@ -2201,10 +2134,10 @@ if (hgPcrOk(db))
     printf("<P>For locating PCR primers, use <A HREF=\"../cgi-bin/hgPcr?db=%s\">In-Silico PCR</A>"
            " for best results instead of BLAT. " 
            "To search for short sequences &lt; 20bp only in the sequence shown on the Genome Browser, "
-           "use our <a href='hgTrackUi?%s=%s&g=oligoMatch&oligoMatch=pack'>Short Sequence Match</a> track. "
+           "use our <a href='hgTrackUi?%s=%s&db=%s&g=oligoMatch&oligoMatch=pack'>Short Sequence Match</a> track. "
            "If you are using the command line and want to search the entire genome, try our command line tool <tt>findMotifs</tt>, from the "
            "<a target=_blank href='https://hgdownload.soe.ucsc.edu/downloads.html#utilities_downloads'>utilities download page</a>.</p>",
-           db, cartSessionVarName(), cartSessionId(cart));
+           db, cartSessionVarName(), cartSessionId(cart), db);
 puts("</TD></TR></TABLE>\n");
 
 

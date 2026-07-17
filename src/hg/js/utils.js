@@ -24,6 +24,11 @@ var gnomadVarExp = "^(([0-9]+)|(X|Y|M|MT))-([0-9]+)-([A-Za-z]+)-([A-Za-z]+)$";
 // allow gnomad ranges, ex: 12-1234-11223344
 var gnomadRangeExp = "^(([0-9]+)|(X|Y|M|MT))-([0-9]+)-([0-9]+)$";
 
+// gene symbol + exon number: "TP53 exon 5", "BRCA1 exon 10"
+var geneExonExp = /^[\s]*([A-Za-z][A-Za-z0-9._-]*)[\s]+exon[\s]+([0-9]+)[\s]*$/i;
+// compact exon notation: "TP53:e.5", "NM_000546:e.5+2", "BRCA2:e.10-3"
+var geneExonCoordExp = /^[\s]*([A-Za-z0-9._-]+):e\.([0-9]+)([+-][0-9]+)?[\s]*$/i;
+
 function createInfoIcon(text) {
     /* Create an info icon (i in circle) with tooltip text.
      * Returns a span element containing the SVG icon.
@@ -489,6 +494,22 @@ function tdbIsCompositeSubtrack(tdb)  { return (tdb.kindOfChild  === 2); }
 function tdbIsMultiTrackSubtrack(tdb) { return (tdb.kindOfChild  === 3); }
 function tdbIsSubtrack(tdb)           { return (tdb.kindOfChild  === 2 || tdb.kindOfChild === 3); }
 function tdbHasParent(tdb)            { return (tdb.kindOfChild  !== 0 && tdb.parentTrack); }
+
+function parentIsAllWiggle(tdb)
+{   // True if every subtrack of tdb's parent composite is a wiggle type.
+    if (!tdb.parentTrack)
+        return false;
+    var parentName = tdb.parentTrack, found = false;
+    for (var name in hgTracks.trackDb) {
+        var t = hgTracks.trackDb[name];
+        if (t.parentTrack === parentName) {
+            found = true;
+            if (/^wigMaf/.test(t.type) || !/^(wig|bigWig|bedGraph)/.test(t.type))
+                return false;
+        }
+    }
+    return found;
+}
 
 function cartHideAnyTrack (id, cartVars, cartVals) {
     /* set the right cart variables to hide a track, changes cartVars and cartVals */
@@ -4225,7 +4246,6 @@ function addMouseover(ele1, text = null, ele2 = null) {
         ele1.setAttribute("mouseoverText", text);
         // Remove title attribute to prevent default browser tooltip
         if (ele1.title || ele1.dataset.tooltip) {
-            ele1.setAttribute("originalTitle", ele1.title);
             ele1.title = "";
         }
         // Remove previous listeners if any

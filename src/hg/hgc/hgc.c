@@ -106,6 +106,7 @@
 #include "estPair.h"
 #include "softPromoter.h"
 #include "customTrack.h"
+#include "myVariants.h"
 #include "trackHub.h"
 #include "hubConnect.h"
 #include "sage.h"
@@ -542,8 +543,8 @@ static void hgcAnchorSomewhereExt(char *group, char *item, char *other, char *ch
  * and other parameters. */
 {
 char *itemSafe = cgiEncode(item);
-printf("<A HREF=\"%s&g=%s&i=%s&c=%s&l=%d&r=%d&o=%s&table=%s\">",
-       hgcPathAndSettings(), group, itemSafe, chrom, start, end, other, tbl);
+printf("<A HREF=\"%s&db=%s&g=%s&i=%s&c=%s&l=%d&r=%d&o=%s&table=%s\">",
+       hgcPathAndSettings(), database, group, itemSafe, chrom, start, end, other, tbl);
 freeMem(itemSafe);
 }
 
@@ -560,8 +561,8 @@ void hgcAnchorPosition(char *group, char *item)
  * and group parameters. */
 {
 char *tbl = cgiUsualString("table", cgiString("g"));
-printf("<A HREF=\"%s&g=%s&i=%s&table=%s\">",
-       hgcPathAndSettings(), group, item, tbl);
+printf("<A HREF=\"%s&db=%s&g=%s&i=%s&table=%s\">",
+       hgcPathAndSettings(), database, group, item, tbl);
 }
 
 void hgcAnchorWindow(char *group, char *item, int thisWinStart,
@@ -570,8 +571,8 @@ void hgcAnchorWindow(char *group, char *item, int thisWinStart,
  * and other parameters, INCLUDING the ability to specify left and
  * right window positions different from the current window*/
 {
-printf("<A HREF=\"%s&g=%s&i=%s&c=%s&l=%d&r=%d&o=%s\">",
-       hgcPathAndSettings(), group, item, chrom,
+printf("<A HREF=\"%s&db=%s&g=%s&i=%s&c=%s&l=%d&r=%d&o=%s\">",
+       hgcPathAndSettings(), database, group, item, chrom,
        thisWinStart, thisWinEnd, other);
 }
 
@@ -590,16 +591,16 @@ void hgcAnchorTranslatedChain(int item, char *other, char *chrom, int cdsStart, 
  * and other parameters. */
 {
 char *tbl = cgiUsualString("table", cgiString("g"));
-printf("<A HREF=\"%s&g=%s&i=%d&c=%s&l=%d&r=%d&o=%s&table=%s&qs=%d&qe=%d\">",
-       hgcPathAndSettings(), "htcChainTransAli", item, chrom, winStart, winEnd, other,
+printf("<A HREF=\"%s&db=%s&g=%s&i=%d&c=%s&l=%d&r=%d&o=%s&table=%s&qs=%d&qe=%d\">",
+       hgcPathAndSettings(), database, "htcChainTransAli", item, chrom, winStart, winEnd, other,
        tbl, cdsStart, cdsEnd);
 }
 void hgcAnchorPseudoGene(char *item, char *other, char *chrom, char *tag, int start, int end, char *qChrom, int qStart, int qEnd, int chainId, char *db2)
 /* Generate an anchor to htcPseudoGene. */
 {
 char *encodedItem = cgiEncode(item);
-printf("<A HREF=\"%s&g=%s&i=%s&c=%s&l=%d&r=%d&o=%s&db2=%s&ci=%d&qc=%s&qs=%d&qe=%d&xyzzy=xyzzy#%s\">",
-       hgcPathAndSettings(), "htcPseudoGene", encodedItem, chrom, start, end,
+printf("<A HREF=\"%s&db=%s&g=%s&i=%s&c=%s&l=%d&r=%d&o=%s&db2=%s&ci=%d&qc=%s&qs=%d&qe=%d&xyzzy=xyzzy#%s\">",
+       hgcPathAndSettings(), database, "htcPseudoGene", encodedItem, chrom, start, end,
        other, db2, chainId, qChrom, qStart, qEnd, tag);
 }
 
@@ -757,9 +758,9 @@ if (featDna && end > start)
     {
     char *tbl = cgiUsualString("table", cgiString("g"));
     strand = cgiEncode(strand);
-    printf("<A HREF=\"%s&o=%d&g=getDna&i=%s&c=%s&l=%d&r=%d&strand=%s&table=%s\">"
+    printf("<A HREF=\"%s&db=%s&o=%d&g=getDna&i=%s&c=%s&l=%d&r=%d&strand=%s&table=%s\">"
 	   "View DNA for this feature</A>  (%s/%s)<BR>\n",  hgcPathAndSettings(),
-	   start, (item != NULL ? cgiEncode(item) : ""),
+	   database, start, (item != NULL ? cgiEncode(item) : ""),
 	   cgiEncode(chrom), start, end, strand, tbl, trackHubSkipHubName(database), trackHubSkipHubName(hGenome(database)));
     }
 }
@@ -813,6 +814,12 @@ printPos(smp->chrom, smp->chromStart, smp->chromEnd, NULL, TRUE, smp->name);
 }
 
 
+// Many callers pass a track-specific struct cast to (struct bed *), relying on
+// its bed-compatible leading fields (only the first bedSize fields are read).
+// At -O3 GCC's -Warray-bounds flags those casts because the real object is
+// smaller than struct bed; the accesses are safe by the bed-layout convention.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
 void bedPrintPos(struct bed *bed, int bedSize, struct trackDb *tdb)
 /* Print first bedSize fields of a bed type structure in
  * standard format. */
@@ -840,6 +847,7 @@ if (bedSize >= 6)
 printPos(bed->chrom, bed->chromStart, bed->chromEnd, strand, TRUE, bed->name);
 
 }
+#pragma GCC diagnostic pop
 
 void genericHeader(struct trackDb *tdb, char *item)
 /* Put up generic track info. */
@@ -2992,10 +3000,8 @@ if (liftDb != NULL)
     struct hash *chainHash = newHash(8);
     char extraWhere[512];
     sqlSafef(extraWhere, sizeof extraWhere, "name = \"%s\"", name);
-    extern struct genePred *genePredExtLoad15(char **row);
-    gpList = (struct genePred *)quickLiftSql(conn, quickLiftFile, rootTable,
-        seqName, winStart, winEnd, NULL, extraWhere,
-        (ItemLoader2)genePredExtLoad15, 0, chainHash);
+    gpList = quickLiftGenePreds(conn, quickLiftFile, rootTable,
+        seqName, winStart, winEnd, extraWhere, chainHash);
     calcLiftOverGenePreds(gpList, chainHash, 0.0, 0.0, TRUE, NULL, NULL, TRUE, FALSE);
     }
 else
@@ -3663,9 +3669,9 @@ char *trackName = getParentTrackName(tdb);
 struct trackDb *parentTdb = tdb;
 if (!sameString(trackName, tdb->track))
     parentTdb = hTrackDbForTrack(database, trackName);
-printf("<P><A HREF=\"%s?g=%s&%s\">"
+printf("<P><A HREF=\"%s?db=%s&g=%s&%s\">"
        "Go to %s track controls</A></P>\n",
-       hTrackUiForTrack(tdb->track), trackName, cartSidUrlString(cart), parentTdb->shortLabel);
+       hTrackUiForTrack(tdb->track), database, trackName, cartSidUrlString(cart), parentTdb->shortLabel);
 }
 
 void printDataRestrictionDate(struct trackDb *tdb)
@@ -3707,8 +3713,7 @@ void printTrackHtml(struct trackDb *tdb)
  * last update time for data table and make a link
  * to the TB table schema page for this table. */
 {
-if (!isCustomTrack(tdb->track) &&
-    !(tdb->type && sameString(tdb->type, "myVariants")))
+if (!isCustomTrack(tdb->track) && !isMyVariantsType(tdb->type))
     {
     printRelatedTracks(database, trackHash, tdb, cart);
     extraUiLinks(database, tdb, cart);
@@ -9665,12 +9670,9 @@ if (liftDb != NULL)
     struct hash *chainHash = newHash(8);
     struct sqlConnection *conn = hAllocConn(liftDb);
 
-// using this loader on genePred tables with less than 15 fields may be a problem.
-extern struct genePred *genePredExtLoad15(char **row);
-
     char extraWhere[4096];
     sqlSafef(extraWhere, sizeof extraWhere, "name = \"%s\"", geneName);
-    gpList = (struct genePred *)quickLiftSql(conn, quickLiftFile, table, seqName, winStart, winEnd,  NULL, extraWhere, (ItemLoader2)genePredExtLoad15, 0, chainHash);
+    gpList = quickLiftGenePreds(conn, quickLiftFile, table, seqName, winStart, winEnd, extraWhere, chainHash);
     hFreeConn(&conn);
 
     calcLiftOverGenePreds( gpList, chainHash, 0.0, 0.0, TRUE, NULL, NULL,  TRUE, FALSE);
@@ -12208,7 +12210,7 @@ if (url != NULL && url[0] != 0)
 		    printf("<B>RefSeq Gene(s): </B>");
                 else
 		    printf(", ");
-                printf("<A HREF=\"%s%s&o=%s&t=%s\">", "../cgi-bin/hgc?g=refGene&i=",
+                printf("<A HREF=\"../cgi-bin/hgc?db=%s&g=refGene&i=%s&o=%s&t=%s\">", database,
                        row[0], chromStart, chromEnd);
                 printf("%s</A></B>", row[0]);
 	        printedCnt++;
@@ -12269,6 +12271,7 @@ if (url != NULL && url[0] != 0)
     }
 
 printf("</div>"); // #omimText
+hFreeConn(&conn);
 }
 
 static void printOmimLocationDetails(struct trackDb *tdb, char *itemName, boolean encode)
@@ -13912,7 +13915,7 @@ static char gi[64];
 if (!startsWith("gi|", ncbiFaHead))
     return NULL;
 ncbiFaHead += 3;
-strncpy(gi, ncbiFaHead, sizeof(gi));
+safecpy(gi, sizeof(gi), ncbiFaHead);
 s = strchr(gi, '|');
 if (s != NULL)
     *s = 0;
@@ -15425,8 +15428,8 @@ if (tiNum != NULL)
     printf("NCBI Trace Repository for %s\n</A><BR>\n", itemName);
     }
 printf("Get ");
-printf("<A HREF=\"%s&g=htcExtSeq&c=%s&l=%d&r=%d&i=%s\">",
-       hgcPathAndSettings(), seqName, winStart, winEnd, itemName);
+printf("<A HREF=\"%s&db=%s&g=htcExtSeq&c=%s&l=%d&r=%d&i=%s\">",
+       hgcPathAndSettings(), database, seqName, winStart, winEnd, itemName);
 printf("Mouse DNA</A><BR>\n");
 
 /* Print info about mate pair. */
@@ -15447,8 +15450,8 @@ if (tiNum != NULL && sqlTableExists(conn, "mouseTraceInfo"))
 	    if (!sameString(ti, itemName))
 	        {
 		printf("Get ");
-		printf("<A HREF=\"%s&g=htcExtSeq&c=%s&l=%d&r=%d&i=%s\">",
-		       hgcPathAndSettings(), seqName, winStart, winEnd, ti);
+		printf("<A HREF=\"%s&db=%s&g=htcExtSeq&c=%s&l=%d&r=%d&i=%s\">",
+		       hgcPathAndSettings(), database, seqName, winStart, winEnd, ti);
 		printf("DNA for read on other end of plasmid</A><BR>\n");
 		gotMate = TRUE;
 		}
@@ -15857,13 +15860,13 @@ if (gp == NULL)
 
 /* extract nib directory from nibfile */
 if (strrchr(nibFile,'/') != NULL)
-    strncpy(tNibDir, nibFile, strlen(nibFile)-strlen(strrchr(nibFile,'/')));
+    memcpy(tNibDir, nibFile, strlen(nibFile)-strlen(strrchr(nibFile,'/')));
 else
     errAbort("Cannot find nib directory for %s\n",nibFile);
 tNibDir[strlen(nibFile)-strlen(strrchr(nibFile,'/'))] = '\0';
 
 if (strrchr(qNibFile,'/') != NULL)
-    strncpy(qNibDir, qNibFile, strlen(qNibFile)-strlen(strrchr(qNibFile,'/')));
+    memcpy(qNibDir, qNibFile, strlen(qNibFile)-strlen(strrchr(qNibFile,'/')));
 else
     errAbort("Cannot find nib directory for %s\n",qNibFile);
 qNibDir[strlen(qNibFile)-strlen(strrchr(qNibFile,'/'))] = '\0';
@@ -16000,8 +16003,8 @@ printPosOnChrom(chrom,start,end,NULL,FALSE,NULL);
 printf("<H1>Information on %s Sequence %s</H1>", otherGenome, itemName);
 
 printf("Get ");
-printf("<A HREF=\"%s&g=htcExtSeq&c=%s&l=%d&r=%d&i=%s\">",
-               hgcPathAndSettings(), seqName, winStart, winEnd, itemName);
+printf("<A HREF=\"%s&db=%s&g=htcExtSeq&c=%s&l=%d&r=%d&i=%s\">",
+               hgcPathAndSettings(), database, seqName, winStart, winEnd, itemName);
 printf("%s DNA</A><BR>\n", otherGenome);
 
 /* Get alignment info and print. */
@@ -16041,8 +16044,8 @@ char *table = "refFullAli"; /* Table with the pertinent PSL data */
 cartWebStart(cart, database, "%s", itemName);
 printf("<H1>Information on DBTSS Sequence %s</H1>", itemName);
 printf("Get ");
-printf("<A HREF=\"%s&g=htcExtSeq&c=%s&l=%d&r=%d&i=%s\">",
-       hgcPathAndSettings(), seqName, winStart, winEnd, itemName);
+printf("<A HREF=\"%s&db=%s&g=htcExtSeq&c=%s&l=%d&r=%d&i=%s\">",
+       hgcPathAndSettings(), database, seqName, winStart, winEnd, itemName);
 printf("Sequence</A><BR>\n");
 
 /* Get alignment info and print. */
@@ -16615,8 +16618,8 @@ if (row != NULL)
 	while ((row = sqlNextRow(sr)) != NULL)
 	    {
 	    stsMapMouseStaticLoad(row, &stsRow);
-	    printf("<TR><TD>%s:</TD><TD><A HREF = \"../cgi-bin/hgc?hgsid=%s&o=%u&t=%d&g=stsMapMouse&i=%s&c=%s\" target=_blank>%d</A></TD></TR>\n",
-		   stsRow.chrom, hgsid, stsRow.chromStart,stsRow.chromEnd, stsRow.name, stsRow.chrom,(stsRow.chromStart+stsRow.chromEnd)>>1);
+	    printf("<TR><TD>%s:</TD><TD><A HREF = \"../cgi-bin/hgc?hgsid=%s&db=%s&o=%u&t=%d&g=stsMapMouse&i=%s&c=%s\" target=_blank>%d</A></TD></TR>\n",
+		   stsRow.chrom, hgsid, database, stsRow.chromStart,stsRow.chromEnd, stsRow.name, stsRow.chrom,(stsRow.chromStart+stsRow.chromEnd)>>1);
 	    }
 	printf("</TABLE>\n");
 	}
@@ -16801,9 +16804,9 @@ if (row != NULL)
             while ((row = sqlNextRow(sr)) != NULL)
                 {
                 stsMapMouseNewStaticLoad(row, &stsRow);
-                printf("<TR><TD>%s:</TD><TD><A HREF = \"../cgi-bin/hgc?hgsid=%s&o=%u&t=%d&"
+                printf("<TR><TD>%s:</TD><TD><A HREF = \"../cgi-bin/hgc?hgsid=%s&db=%s&o=%u&t=%d&"
                        "g=stsMapMouseNew&i=%s&c=%s\" target=_blank>%d</A></TD></TR>\n",
-                       stsRow.chrom, hgsid, stsRow.chromStart,stsRow.chromEnd, stsRow.name,
+                       stsRow.chrom, hgsid, database, stsRow.chromStart,stsRow.chromEnd, stsRow.name,
                        stsRow.chrom,(stsRow.chromStart+stsRow.chromEnd)>>1);
 		}
 	    printf("</TABLE>\n");
@@ -16981,8 +16984,8 @@ if (row != NULL)
 	while ((row = sqlNextRow(sr)) != NULL)
 	    {
 	    stsMapRatStaticLoad(row+hasBin, &stsRow);
-	    printf("<TR><TD>%s:</TD><TD><A HREF = \"../cgi-bin/hgc?hgsid=%s&o=%u&t=%d&g=stsMapRat&i=%s&c=%s\" target=_blank>%d</A></TD></TR>\n",
-		   stsRow.chrom, hgsid, stsRow.chromStart,stsRow.chromEnd, stsRow.name, stsRow.chrom,(stsRow.chromStart+stsRow.chromEnd)>>1);
+	    printf("<TR><TD>%s:</TD><TD><A HREF = \"../cgi-bin/hgc?hgsid=%s&db=%s&o=%u&t=%d&g=stsMapRat&i=%s&c=%s\" target=_blank>%d</A></TD></TR>\n",
+		   stsRow.chrom, hgsid, database, stsRow.chromStart,stsRow.chromEnd, stsRow.name, stsRow.chrom,(stsRow.chromStart+stsRow.chromEnd)>>1);
 	    }
 	printf("</TABLE>\n");
 	}
@@ -17471,9 +17474,9 @@ while ((row = sqlNextRow(sr)) != NULL)
 	       xenoOrg, xenoChrom, el.xenoStart, el.xenoEnd);
 
 	}
-    printf("<A HREF=\"%s&o=%d&g=getDna&i=%s&c=%s&l=%d&r=%d&strand=%s&table=%s\">"
+    printf("<A HREF=\"%s&db=%s&o=%d&g=getDna&i=%s&c=%s&l=%d&r=%d&strand=%s&table=%s\">"
 	   "View DNA for this feature</A><BR>\n",  hgcPathAndSettings(),
-	   el.chromStart, cgiEncode(el.name),
+	   database, el.chromStart, cgiEncode(el.name),
 	   el.chrom, el.chromStart, el.chromEnd, el.strand, tbl);
     freez(&elname);
     }
@@ -19298,10 +19301,7 @@ if (pSnpCodonPos != NULL)
     *pSnpCodonPos = snpCodonPos;
 if (pRefAA != NULL)
     {
-    if (isMito(seqName))
-        *pRefAA = lookupMitoCodon(refCodon);
-    else
-        *pRefAA = lookupCodon(refCodon);
+    *pRefAA = lookupCodonInCode(hGeneticCodeForChrom(database, seqName), refCodon);
     if (*pRefAA == '\0') *pRefAA = '*';
     }
 }
@@ -19378,11 +19378,7 @@ for (j = 0;  j < alleleCount;  j++)
         char snpCodon[4];
         safecpy(snpCodon, sizeof(snpCodon), refCodon);
         snpCodon[snpCodonPos] = alBase;
-        char snpAA = '\0';
-        if (isMito(seqName))
-            snpAA = lookupMitoCodon(snpCodon);
-        else
-            snpAA = lookupCodon(snpCodon);
+        char snpAA = lookupCodonInCode(hGeneticCodeForChrom(database, seqName), snpCodon);
         if (snpAA == '\0') snpAA = '*';
         char refCodonHtml[16], snpCodonHtml[16];
         safecpy(refCodonHtml, sizeof(refCodonHtml), highlightCodonBase(refCodon, snpCodonPos));
@@ -22986,7 +22982,7 @@ else if (sameWord(type, "vcfTabix") || sameWord(type, "vcfPhasedTrio"))
     doVcfTabixDetails(ct->tdb, itemName);
 else if (sameWord(type, "vcf"))
     doVcfDetails(ct->tdb, itemName);
-else if (cfgOptionBooleanDefault("doMyVariants", FALSE) && startsWith("myVariants_", trackId))
+else if (cfgOptionBooleanDefault("doMyVariants", FALSE) && isMyVariantsTrack(trackId))
     doMyVariantsDetails(ct, item);
 else if (ct->wiggle)
     {
@@ -24552,16 +24548,16 @@ if (cut)
 	int i;
 	puts("<B>Isoschizomers: </B>");
 	for (i = 0; i < cut->numSciz-1; i++)
-	    printf("<A HREF=\"%s&g=%s&i=%s\">%s</A>, ", hgcPathAndSettings(), CUTTERS_TRACK_NAME, cut->scizs[i], cut->scizs[i]);
-	printf("<A HREF=\"%s&g=%s&i=%s\">%s</A><BR>\n", hgcPathAndSettings(), CUTTERS_TRACK_NAME, cut->scizs[cut->numSciz-1], cut->scizs[cut->numSciz-1]);
+	    printf("<A HREF=\"%s&db=%s&g=%s&i=%s\">%s</A>, ", hgcPathAndSettings(), database, CUTTERS_TRACK_NAME, cut->scizs[i], cut->scizs[i]);
+	printf("<A HREF=\"%s&db=%s&g=%s&i=%s\">%s</A><BR>\n", hgcPathAndSettings(), database, CUTTERS_TRACK_NAME, cut->scizs[cut->numSciz-1], cut->scizs[cut->numSciz-1]);
 	}
     if (isoligs)
 	{
 	struct slName *cur;
 	puts("<B>Isoligamers: </B>");
 	for (cur = isoligs; cur->next != NULL; cur = cur->next)
-	    printf("<A HREF=\"%s&g=%s&i=%s\">%s</A>, ", hgcPathAndSettings(), CUTTERS_TRACK_NAME, cur->name, cur->name);
-	printf("<A HREF=\"%s&g=%s&i=%s\">%s</A><BR>\n", hgcPathAndSettings(), CUTTERS_TRACK_NAME, cur->name, cur->name);
+	    printf("<A HREF=\"%s&db=%s&g=%s&i=%s\">%s</A>, ", hgcPathAndSettings(), database, CUTTERS_TRACK_NAME, cur->name, cur->name);
+	printf("<A HREF=\"%s&db=%s&g=%s&i=%s\">%s</A><BR>\n", hgcPathAndSettings(), database, CUTTERS_TRACK_NAME, cur->name, cur->name);
 	slFreeList(&isoligs);
 	}
     if (cut->numRefs > 0)
@@ -24586,8 +24582,8 @@ if (cut)
     if (c && o && t)
         {
 	puts("<BR><B>Download BED of enzymes in this browser range:</B>&nbsp");
-	printf("<A HREF=\"%s&g=%s&l=%s&r=%s&c=%s&doGetBed=all\">all enzymes</A>, ", hgcPathAndSettings(), CUTTERS_TRACK_NAME, l, r, c);
-	printf("<A HREF=\"%s&g=%s&l=%s&r=%s&c=%s&doGetBed=%s\">just %s</A><BR>\n", hgcPathAndSettings(), CUTTERS_TRACK_NAME, l, r, c, cut->name, cut->name);
+	printf("<A HREF=\"%s&db=%s&g=%s&l=%s&r=%s&c=%s&doGetBed=all\">all enzymes</A>, ", hgcPathAndSettings(), database, CUTTERS_TRACK_NAME, l, r, c);
+	printf("<A HREF=\"%s&db=%s&g=%s&l=%s&r=%s&c=%s&doGetBed=%s\">just %s</A><BR>\n", hgcPathAndSettings(), database, CUTTERS_TRACK_NAME, l, r, c, cut->name, cut->name);
 	}
     }
 webIncludeHelpFile(CUTTERS_TRACK_NAME, TRUE);
@@ -25083,7 +25079,7 @@ int start = cartInt(cart, "o");
 
 genericHeader(tdb, itemName);
 
-printf("<B>Item:</B> %s <BR>\n", itemName);
+printf("<B>Item:</B> %s <BR>\n", naForNull(itemName));
 printf("<B>Outside Link:</B> ");
 printf("<A HREF=");
 printSwissProtVariationUrl(stdout, itemName);
@@ -27222,7 +27218,7 @@ if (seqName == NULL)
     }
 
 struct customTrack *ct = NULL;
-if (isCustomTrack(track) || startsWith("myVariants_", track))
+if (isCustomTrack(track) || isMyVariantsTrack(track))
     {
     struct customTrack *ctList = getCtList();
     for (ct = ctList; ct != NULL; ct = ct->next)
@@ -27230,7 +27226,7 @@ if (isCustomTrack(track) || startsWith("myVariants_", track))
             break;
     }
 
-if ((!isCustomTrack(track) && !startsWith("myVariants_", track) && dbIsFound)
+if ((!isCustomTrack(track) && !isMyVariantsTrack(track) && dbIsFound)
 ||  ((ct!= NULL) && (((ct->dbTrackType != NULL) &&  sameString(ct->dbTrackType, "maf"))|| sameString(ct->tdb->type, "bigMaf"))))
     {
     trackHash = makeTrackHashWithComposites(database, seqName, TRUE);
@@ -27880,7 +27876,7 @@ else if (sameWord(table, "softPromoter"))
     {
     hgSoftPromoter(table, item);
     }
-else if (isCustomTrack(table) || startsWith("myVariants_", table))
+else if (isCustomTrack(table) || isMyVariantsTrack(table))
     {
     if (tdb != NULL)
         {
@@ -28589,7 +28585,7 @@ cart = theCart;
 doMiddle();
 }
 
-char *excludeVars[] = {"Submit", "submit", "g", "i", "aliTable", "addp", "pred", NULL};
+char *excludeVars[] = {"Submit", "submit", "g", "i", "aliTable", "addp", "pred", "quickLiftCcds", NULL};
 
 int main(int argc, char *argv[])
 {

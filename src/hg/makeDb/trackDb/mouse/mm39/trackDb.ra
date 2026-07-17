@@ -34,7 +34,8 @@ include trackDb.chainNet.ra
 include trackDb.syntenicNet.ra alpha
 include trackDb.rbestNet.ra alpha
 include trackDb.gencode.ra
-include knownGene.ra
+include knownGene.ra beta,public
+include knownGene.alpha.ra alpha
 include knownGeneArchive.ra
 include reMap.ra
 
@@ -61,3 +62,5 @@ longLabel Pfam Domains in GENCODE Genes
 html gencodePfam
 
 include vgp577way.trackDb.ra alpha
+
+include tad.ra alpha

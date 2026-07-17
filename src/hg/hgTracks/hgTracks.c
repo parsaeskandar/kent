@@ -306,15 +306,17 @@ else if (bIsHub)
 return iDif;
 }
 
-void changeTrackVisExclude(struct group *groupList, char *groupTarget, int changeVis, struct hash *excludeHash)
+void changeTrackVisExclude(struct group *groupList, char *groupTarget, int changeVis, struct hash *excludeHash, boolean keepQuickLift)
 /* Change track visibilities. If groupTarget is
  * NULL then set visibility for tracks in all groups.  Otherwise,
  * just set it for the given group.  If vis is -2, then visibility is
  * unchanged.  If -1 then set visibility to default, otherwise it should
  * be tvHide, tvDense, etc.
  * If we are going back to default visibility, then reset the track
- * ordering also. 
+ * ordering also.
  * If excludeHash is not NULL then don't change the visibility of the group names in that hash.
+ * If keepQuickLift is set then don't change the visibility of tracks lifted from another
+ * assembly via QuickLift.
  */
 {
 struct group *group;
@@ -336,6 +338,8 @@ for (group = groupList; group != NULL; group = group->next)
             {
             struct track *track = tr->track;
             struct trackDb *tdb = track->tdb;
+            if (keepQuickLift && (trackDbSetting(tdb, "quickLiftUrl") != NULL))
+                continue;   // leave QuickLifted tracks visible
             if (changeVis == -1) // to default
                 {
                 if (tdbIsComposite(tdb))
@@ -440,7 +444,7 @@ void changeTrackVis(struct group *groupList, char *groupTarget, int changeVis)
  * If we are going back to default visibility, then reset the track
  * ordering also. */
 {
-changeTrackVisExclude(groupList, groupTarget, changeVis, NULL);
+changeTrackVisExclude(groupList, groupTarget, changeVis, NULL, FALSE);
 }
 
 int trackOffsetX()
@@ -656,10 +660,23 @@ void drawComplementArrow( struct hvGfx *hvg, int x, int y,
 {
 boolean baseCmpl = cartUsualBooleanDb(cart, database, COMPLEMENT_BASES_VAR, FALSE);
 // reverse arrow when base complement doesn't match display
-char *text =  (baseCmpl == revCmplDisp) ? "--->" : "<---";
+char *text =  NULL;
+char *mouseOver = NULL;
+
+if (baseCmpl == revCmplDisp)
+    {
+    text = "Click to complement -->";
+    mouseOver = "Forward strand of genome is shown. Click to show the complement (not the reverse complement). Configure this track to show amino acids for three reading frames. Use the \"Reverse\" button below the image to reverse complement the sequence shown and to also show all annotations on the reverse strand.";
+    }
+else
+    {
+    text = "Click to complement <--";
+    mouseOver = "Reverse strand of genome is shown. Click to show the forward strand. Configure this track to show amino acids for three reading frames. Use the \"Reverse\" button below the image to reverse complement the sequence shown and to also show all annotations on the reverse strand.";
+    }
+
 hvGfxTextRight(hvg, x, y, width, height, MG_BLACK, font, text);
 mapBoxToggleComplement(hvg, x, y, width, height, NULL, chromName, winStart, winEnd,
-                       "complement bases");
+                       mouseOver);
 }
 
 struct track *chromIdeoTrack(struct track *trackList)
@@ -5237,14 +5254,14 @@ if ((sortTrack = cgiOptionalString( "sortSim")) != NULL)
     {
     char buffer[1024];
     safef(buffer, sizeof buffer,  "simOrder_%s", sortTrack);
-    wigOrder = cartString(cart, buffer);
+    wigOrder = cartOptionalString(cart, buffer);
     }
 
 if ((sortTrack = cgiOptionalString( "sortExp")) != NULL)
     {
     char buffer[1024];
     safef(buffer, sizeof buffer,  "expOrder_%s", sortTrack);
-    wigOrder = cartString(cart, buffer);
+    wigOrder = cartOptionalString(cart, buffer);
     }
 
 if (wigOrder != NULL)
@@ -6756,7 +6773,7 @@ else if (sameString(type, "vcf"))
     vcfMethods(tg);
     tg->mapItemName = ctMapItemName;
     }
-else if (sameString(type, "myVariants"))
+else if (isMyVariantsType(type))
     {
     tg = trackFromTrackDb(tdb);
     myVariantsMethods(tg);
@@ -7536,35 +7553,48 @@ if (rtsLoad)  // load a recommended track set using the merge method
     // Hide all tracks except custom tracks
     struct hash *excludeHash = newHash(2);
     hashStore(excludeHash, "user");
-    changeTrackVisExclude(groupList, NULL, tvHide, excludeHash);
+    changeTrackVisExclude(groupList, NULL, tvHide, excludeHash, FALSE);
 
     // delete any ordering we have
     char wildCard[32];
     safef(wildCard,sizeof(wildCard),"*_%s",IMG_ORDER_VAR);
     cartRemoveLike(cart, wildCard);
 
-    // now we have to restart to load the session since that happens at cart initialization
-    
-    char newUrl[4096];
-    safef(newUrl, sizeof newUrl,
-        "./hgTracks?"
-        hgsOtherUserSessionName "=%s"
-        "&" hgsOtherUserName "=%s"
-        "&" hgsMergeCart "=on"
-        "&" hgsDoOtherUser "=submit"
-	"&hgsid=%s"
-        , otherUserSessionName, otherUserName,cartSessionId(cart));
+    if (loadRecTrackSetFromFile(cart, rtsLoad))
+        {
+        // Settings from the htdocs file are now overlaid on the cart.  The visibility
+        // loop below and the draw path read them, so no redirect is needed.  Record
+        // which set is loaded so hasRecTrackSet() and change detection still work, and
+        // drop the one-shot action variable so it does not persist in the cart.
+        cartSetString(cart, hgsOtherUserSessionName, rtsLoad);
+        cartRemove(cart, "rtsLoad");
+        }
+    else
+        {
+        // No htdocs file for this set: fall back to loading the session from hgcentral.
+        // That happens at cart initialization, so we have to restart to load it.
+        char newUrl[4096];
+        safef(newUrl, sizeof newUrl,
+            "./hgTracks?"
+            hgsOtherUserSessionName "=%s"
+            "&" hgsOtherUserName "=%s"
+            "&" hgsMergeCart "=on"
+            "&" hgsDoOtherUser "=submit"
+            "&hgsid=%s"
+            , otherUserSessionName, otherUserName,cartSessionId(cart));
 
-    cartCheckout(&cart);   // make sure cart records all our changes above
+        cartCheckout(&cart);   // make sure cart records all our changes above
 
-    // output the redirect and exit
-    printf("<META HTTP-EQUIV=\"REFRESH\" CONTENT=\"0;URL=%s\">", newUrl);
-    exit(0);
+        // output the redirect and exit
+        printf("<META HTTP-EQUIV=\"REFRESH\" CONTENT=\"0;URL=%s\">", newUrl);
+        exit(0);
+        }
     }
 
 boolean hideTracks = cgiOptionalString( "hideTracks") != NULL;
 if (hideTracks)
-    changeTrackVis(groupList, NULL, tvHide);    // set all top-level tracks to hide
+    // set all top-level tracks to hide, but leave QuickLifted tracks visible
+    changeTrackVisExclude(groupList, NULL, tvHide, NULL, TRUE);
 
 /* Get visibility values if any from ui. */
 struct hash *superTrackHash = newHash(5);  // cache whether supertrack is hiding tracks or not
@@ -8743,28 +8773,41 @@ hButtonNoSubmitMaybePressed("hgTracksConfigMultiRegionPage", "Multi-region", buf
             "popUpHgt.hgTracks('multi-region config'); return false;", isPressed);
 }
 
-static void printTrackDelIcon(struct track *track)
-/* little track icon after track name. Github uses SVG elements for all icons, apparently that is faster */
-/* we probably should have a library with all the icons, at least for the <svg> part */
+static void printTrashIcon(char *title, char *cssClass, char *dataAttrs)
+/* Print a trash-can icon as a clickable <div>.  title is the hover text,
+ * cssClass selects the click behavior/styling, and dataAttrs holds any
+ * preformatted data-* attributes that the click handler reads.
+ * Github uses SVG elements for all icons, apparently that is faster.
+ * We probably should have a library with all the icons, at least for the <svg> part. */
 {
-    hPrintf("<div title='Delete this custom track' data-track='%s' class='trackDeleteIcon'><svg xmlns='http://www.w3.org/2000/svg' height='0.8em' viewBox='0 0 448 512'><!--! Font Awesome Free 6.4.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license (Commercial License) Copyright 2023 Fonticons, Inc. --><path d='M135.2 17.7C140.6 6.8 151.7 0 163.8 0H284.2c12.1 0 23.2 6.8 28.6 17.7L320 32h96c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 96 0 81.7 0 64S14.3 32 32 32h96l7.2-14.3zM32 128H416V448c0 35.3-28.7 64-64 64H96c-35.3 0-64-28.7-64-64V128zm96 64c-8.8 0-16 7.2-16 16V432c0 8.8 7.2 16 16 16s16-7.2 16-16V208c0-8.8-7.2-16-16-16zm96 0c-8.8 0-16 7.2-16 16V432c0 8.8 7.2 16 16 16s16-7.2 16-16V208c0-8.8-7.2-16-16-16zm96 0c-8.8 0-16 7.2-16 16V432c0 8.8 7.2 16 16 16s16-7.2 16-16V208c0-8.8-7.2-16-16-16z'/></svg></div>", track->track);
+hPrintf("<div title='%s' %s class='%s'>"
+        "<svg xmlns='http://www.w3.org/2000/svg' height='0.8em' viewBox='0 0 448 512'>"
+        "<!--! Font Awesome Free 6.4.0 by @fontawesome - https://fontawesome.com License "
+        "- https://fontawesome.com/license (Commercial License) Copyright 2023 Fonticons, Inc. -->"
+        "<path d='M135.2 17.7C140.6 6.8 151.7 0 163.8 0H284.2c12.1 0 23.2 6.8 28.6 17.7L320 32h96c17.7 "
+        "0 32 14.3 32 32s-14.3 32-32 32H32C14.3 96 0 81.7 0 64S14.3 32 32 32h96l7.2-14.3zM32 128H416V448c0 "
+        "35.3-28.7 64-64 64H96c-35.3 0-64-28.7-64-64V128zm96 64c-8.8 0-16 7.2-16 16V432c0 8.8 7.2 16 16 "
+        "16s16-7.2 16-16V208c0-8.8-7.2-16-16-16zm96 0c-8.8 0-16 7.2-16 16V432c0 8.8 7.2 16 16 16s16-7.2 "
+        "16-16V208c0-8.8-7.2-16-16-16zm96 0c-8.8 0-16 7.2-16 16V432c0 8.8 7.2 16 16 16s16-7.2 "
+        "16-16V208c0-8.8-7.2-16-16-16z'/></svg></div>",
+        title, dataAttrs, cssClass);
+}
 
+static void printTrackDelIcon(struct track *track)
+/* Trash-can icon after a custom track's name; clicking it deletes the track. */
+{
+char dataAttrs[512];
+safef(dataAttrs, sizeof dataAttrs, "data-track='%s'", track->track);
+printTrashIcon("Delete this custom track", "trackDeleteIcon", dataAttrs);
 }
 
 static void printQuickLiftDelIcon(struct track *track, char *sourceDb)
-/* little 'x' icon next to a track in a quickLift group; clicking it removes
+/* Trash-can icon next to a track in a quickLift group; clicking it removes
  * the track from the quickLift hub. */
 {
-    hPrintf("<div title='Remove this track from the QuickLift group' "
-            "data-track='%s' data-sourcedb='%s' class='quickLiftDelIcon'>"
-            "<svg xmlns='http://www.w3.org/2000/svg' height='0.8em' viewBox='0 0 384 512'>"
-            "<!--! Font Awesome Free 6.4.0 by @fontawesome - https://fontawesome.com License "
-            "- https://fontawesome.com/license (Commercial License) Copyright 2023 Fonticons, Inc. -->"
-            "<path d='M342.6 150.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0L192 210.7 "
-            "86.6 105.4c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0 45.3L146.7 256 41.4 361.4"
-            "c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0L192 301.3 297.4 406.6c12.5 12.5 "
-            "32.8 12.5 45.3 0s12.5-32.8 0-45.3L237.3 256 342.6 150.6z'/></svg></div>",
-            track->track, sourceDb);
+char dataAttrs[1024];
+safef(dataAttrs, sizeof dataAttrs, "data-track='%s' data-sourcedb='%s'", track->track, sourceDb);
+printTrashIcon("Remove this track from the QuickLift group", "quickLiftDelIcon", dataAttrs);
 }
 
 static void printTrackLink(struct track *track)
@@ -8889,9 +8932,9 @@ hPrintf(" ");
 
 hButtonWithOnClick("hgt.setWidth", "Resize", "Resize image width to browser window size - keyboard shortcut: r, then s", "hgTracksSetWidth()");
 
-// put up the My Variants dialog if the hg.conf statement is present
-// and the visitor is logged in (anonymous users can't write to the table).
-if (cfgOptionBooleanDefault("doMyVariants", FALSE) && getUserName() != NULL)
+// put up the My Variants dialog if the hg.conf statement is present.
+// Anonymous visitors see the button too; the JS dialog tells them to log in.
+if (cfgOptionBooleanDefault("doMyVariants", FALSE))
     {
     hPrintf("<button id=\"myVariantsButton\" title=\"Add an item to the My Annotations track\">Add Annotation</button>");
     jsInline("var doMyVariants = true;\n");
@@ -8935,6 +8978,15 @@ if (cfgOptionBooleanDefault("doMyVariants", FALSE) && getUserName() != NULL)
             jsonObjectAdd(jsonForClient, "myVariantsHiddenFields", hfList);
             slFreeList(&hiddenFields);
             }
+        }
+    else if (loginSystemEnabled() || wikiLinkEnabled())
+        {
+        // Hand the JS dialog a login URL that returns to this hgTracks page.
+        char *retUrl = wikiLinkEncodeReturnUrl(cartSessionId(cart), "hgTracks", "");
+        char *loginUrl = wikiLinkUserLoginUrlReturning(cartSessionId(cart), retUrl);
+        jsInlineF("var myVariantsLoginUrl = \"%s\";\n", loginUrl);
+        freez(&retUrl);
+        freez(&loginUrl);
         }
     }
 
@@ -10519,7 +10571,7 @@ if (pdfFile != NULL)
     printf("<div style=\"margin-top:15px\">Tips for producing quality images for publication:</div>\n");
     printf("<UL style=\"margin-top:0px\">\n");
     printf("<LI>Add assembly name and chromosome range to the image on the\n"
-        "<A HREF=\"hgTrackUi?g=ruler\">configuration page of the base position track</A>.\n");
+        "<A HREF=\"hgTrackUi?db=%s&g=ruler\">configuration page of the base position track</A>.\n", database);
     printf("<LI>If using the default genes track (e.g. GENCODE for hg38 or UCSC Genes for older assemblies),\n"
            "consider showing only one transcript per gene by turning off splice variants on the track configuration page.\n");
     printf("<LI>Increase the font size and remove the light blue vertical guidelines in the \n"
