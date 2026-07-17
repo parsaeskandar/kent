@@ -35,9 +35,15 @@ JQUERY_FILES_MODIFIED=jquery.tablednd.js ui.dropdownchecklist.js
 
 JQUERY_FILES=${JQUERY_FILES_UNTOUCHED} ${JQUERY_FILES_MODIFIED}
 
+# Pangenome mapping tool (new browser service).  Its JSON API field names are
+# snake_case (dictated by the mapping middleware contract), which conflicts with
+# the repo-wide camelcase jshint rule, so these are deployed without jshint,
+# like the untouched third-party files.
+PANGENOME_JS_FILES=hgPangenome.js hgPangenomeMock.js
+
 # SYMLINKED files are include in CGIs via a version or timestamped symlink
 #           to force client side updates
-SYMLINKED_FILES=${UCSC_JS_FILES} ${JQUERY_FILES}
+SYMLINKED_FILES=${UCSC_JS_FILES} ${JQUERY_FILES} ${PANGENOME_JS_FILES}
 
 ifdef LOWELAB
     # LOWE lab files should be forced through jshint (but currently aren't)

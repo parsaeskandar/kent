@@ -1,0 +1,146 @@
+/* hgPangenome.css - results styling for the pangenome mapping page.
+ * Deliberately matches the UCSC Genome Browser look (see HGStyle.css):
+ * cream section boxes (#fffee8) with a light-blue subheading bar (#D9E4F8),
+ * tan table heads (#fcecc0), UCSC-blue links (#121E9A), Arial body text and
+ * Monaco/lucida-console monospace.  No pills, gradients or accent colors. */
+
+.hgPangenomeTable { width: 100%; max-width: 1000px; margin: 0.5em 0; }
+.hgPangenomeTable td { padding: 4px 8px; vertical-align: top; }
+.hgPangenomeTable textarea {
+    width: 100%; box-sizing: border-box;
+    font-family: Monaco, 'andale mono', 'lucida console', monospace; font-size: 0.8em;
+}
+
+.pgResults { max-width: 1000px; }
+.pgStatus  { max-width: 1000px; margin: 0.6em 0; }
+
+/* ---- Status / progress / errors (kept plain, UCSC-style notice boxes) ---- */
+
+.pgProgress {
+    padding: 6px 10px; background: #fffee8; border: 1px solid #888888;
+    font-size: 0.9em; display: flex; align-items: center; gap: 8px;
+}
+.pgSpinner {
+    width: 12px; height: 12px; border: 2px solid #bbbbbb; border-top-color: #666666;
+    border-radius: 50%; display: inline-block; animation: pgspin 0.8s linear infinite;
+}
+@keyframes pgspin { to { transform: rotate(360deg); } }
+
+.pgErrBox {
+    padding: 6px 10px; background: #fff9d2; border: 1px solid #888888; font-size: 0.9em;
+}
+.pgErrBox ul { margin: 4px 0 0 1.2em; }
+.pgErrText { font-weight: bold; }
+
+/* ---- Result "cards" = UCSC .section boxes with a .subheadingBar head ---- */
+
+.pgCard {
+    background: #fffee8; border: 1px solid #888888; margin-bottom: 16px;
+}
+.pgPending { opacity: 0.6; }
+
+.pgCardHead {
+    font-weight: bold; font-size: 1.1em; color: #000000; background-color: #D9E4F8;
+    padding: 2px 10px; border-bottom: 1px solid #888888;
+}
+.pgName { font-family: Monaco, 'andale mono', 'lucida console', monospace; }
+
+/* status word in the head: plain, not a colored pill */
+.pgBadge {
+    font-weight: normal; font-size: 0.72em; color: #333333; margin-left: 8px;
+}
+.pgError { color: #aa3333; }              /* the one UCSC error tint, used sparingly */
+
+.pgBody { padding: 8px 12px; }
+
+/* ---- Summary line ---- */
+
+.pgSummary { margin-bottom: 8px; }
+.pgSummaryStats {
+    font-family: Monaco, 'andale mono', 'lucida console', monospace; font-size: 0.85em;
+    color: #000000;
+}
+.pgSummaryHap { display: block; margin-top: 2px; font-size: 0.9em; }
+
+/* ---- Sections within a card ---- */
+
+.pgSection { margin: 8px 0 0; padding-top: 6px; border-top: 1px solid #dddddd; }
+.pgSectionLabel { font-weight: bold; font-size: 0.9em; color: #000000; margin-bottom: 3px; }
+.pgMuted { color: #666666; font-size: 0.9em; }
+
+/* ---- Haplotypes ---- */
+
+.pgHapRep { margin-bottom: 4px; }
+.pgHapName { font-family: Monaco, 'andale mono', 'lucida console', monospace; font-weight: bold; }
+.pgRepRole { font-size: 0.85em; color: #444444; }   /* " — representative, reference" as plain text */
+
+.pgHapPreview {
+    font-family: Monaco, 'andale mono', 'lucida console', monospace; font-size: 0.85em;
+    line-height: 1.5; word-break: break-all;
+}
+
+.pgHapMore { margin-top: 6px; }
+.pgHapMore > summary { cursor: pointer; color: #121E9A; }
+.pgHapToolbar { display: flex; gap: 10px; align-items: center; margin: 6px 0; }
+.pgHapSearch { font-size: 0.85em; padding: 2px 4px; flex: 0 0 220px; }
+.pgHapList {
+    max-height: 220px; overflow: auto; border: 1px solid #888888; background: #ffffff;
+}
+.pgHapListRow {
+    font-family: Monaco, 'andale mono', 'lucida console', monospace; font-size: 0.85em;
+    padding: 1px 8px; border-bottom: 1px solid #eeeeee;
+}
+.pgHapListRow:hover { background: #fdffb7; }
+
+/* ---- Downloads: plain UCSC-blue text links, not buttons ---- */
+
+.pgDownload { display: inline-block; margin-top: 4px; }
+.pgDlBtn {
+    font: inherit; font-size: 0.85em; color: #121E9A; background: none; border: none;
+    padding: 0 8px 0 0; cursor: pointer; text-decoration: underline;
+}
+.pgDlBtn:hover { color: #aa3333; }
+
+/* ---- Surjection ---- */
+
+.pgSurjectOk { font-size: 0.9em; }
+.pgSurjectPos {
+    font-family: Monaco, 'andale mono', 'lucida console', monospace; font-weight: bold;
+}
+.pgSurjectMeta {
+    font-family: Monaco, 'andale mono', 'lucida console', monospace; font-size: 0.85em;
+    color: #444444; margin-left: 10px;
+}
+.pgSurjectOk .pgDlBtn { margin-left: 12px; }
+.pgSurjectBad { font-size: 0.9em; }
+
+/* ---- Mosaic: a plain table plus a restrained blue-ramp bar ---- */
+
+.pgMosaicBar {
+    display: flex; height: 22px; width: 100%; border: 1px solid #888888;
+}
+.pgMosaicSeg {
+    display: flex; align-items: center; justify-content: center;
+    color: #ffffff; font-size: 0.75em; overflow: hidden; white-space: nowrap;
+    border-right: 1px solid #ffffff;
+}
+.pgMosaicSeg:last-child { border-right: none; }
+.pgMosaicSegLabel { padding: 0 4px; }
+/* monochromatic UCSC-blue ramp, not rainbow */
+.pgMosaicSeg0 { background: #33487f; }
+.pgMosaicSeg1 { background: #5b6fa6; }
+.pgMosaicSeg2 { background: #8497c0; }
+.pgMosaicSeg3 { background: #aab8d8; color: #000000; }
+
+.pgMosaicLegend {
+    margin-top: 5px; font-size: 0.85em; color: #333333;
+    display: flex; flex-wrap: wrap; gap: 4px 16px;
+}
+.pgMosaicKey { display: flex; align-items: center; gap: 5px; }
+.pgMosaicSwatch { width: 11px; height: 11px; display: inline-block; border: 1px solid #888888; }
+
+/* ---- Other placements ---- */
+
+.pgOther { margin-top: 8px; }
+.pgOther > summary { cursor: pointer; color: #121E9A; }
+.pgOtherItem { padding: 6px 0 6px 10px; border-left: 2px solid #dddddd; margin-top: 6px; }
