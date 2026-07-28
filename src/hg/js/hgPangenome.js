@@ -138,7 +138,9 @@ function parseInput(text) {
 // Validate + normalize.  Mutates parsed.sequences (assigns names, uppercases),
 // appends to parsed.errors.  Returns true if OK to submit.
 function validate(parsed) {
-    var seen = {};
+    // Prototype-less map: a plain {} would report inherited members such as
+    // "constructor" or "toString" as already-seen and rename them spuriously.
+    var seen = Object.create(null);
     var auto = 0;
     parsed.sequences.forEach(function (s) {
         // name
@@ -464,6 +466,59 @@ var SURJECT_MSG = {
     path_not_indexed: "target haplotype is not indexed for surjection"
 };
 
+// Reference haplotype samples that are browsable UCSC assemblies.  Keyed by the
+// lower-cased SAMPLE field of a "SAMPLE#PHASE#CONTIG" haplotype name.  Sample
+// (non-reference) haplotypes are absent here, so they get no link.  Overridable
+// via window.pangenomeConfig.refAssemblies.
+var PG_REF_DB_DEFAULT = {
+    "chm13": "hs1", "t2t-chm13": "hs1", "hs1": "hs1",
+    "grch38": "hg38", "hg38": "hg38",
+    "grch37": "hg19", "hg19": "hg19"
+};
+function refDbFor(sample) {
+    var map = CFG.refAssemblies || PG_REF_DB_DEFAULT;
+    var key = String(sample).toLowerCase();
+    // hasOwnProperty, so names like "constructor" don't resolve to inherited
+    // Object.prototype members.
+    if (!Object.prototype.hasOwnProperty.call(map, key)) return null;
+    return map[key] || null;
+}
+
+// Reference bases consumed by a CIGAR (M/D/N/=/X), for the link's end coord.
+function cigarRefSpan(cigar) {
+    if (!cigar) return 0;
+    var span = 0, re = /(\d+)([MIDNSHP=X])/g, m;
+    while ((m = re.exec(cigar)) !== null) {
+        var op = m[2];
+        if (op === "M" || op === "D" || op === "N" || op === "=" || op === "X")
+            span += parseInt(m[1], 10);
+    }
+    return span;
+}
+
+// If the surjection target is a UCSC-browsable reference, return {db, url}
+// pointing hgTracks at the surjected position; otherwise null.
+function refBrowserInfo(sj) {
+    if (!sj || sj.status !== "ok" || sj.target == null || sj.position == null)
+        return null;
+    var parts = String(sj.target).split("#");           // PanSN: SAMPLE#PHASE#CONTIG
+    if (parts.length < 3) return null;
+    var db = refDbFor(parts[0]);
+    if (!db) return null;
+    var contig = parts[2];
+    var offset = 0;
+    if (parts.length > 3) {                              // optional subpath offset suffix
+        if (/^\d+$/.test(parts[3])) offset = parseInt(parts[3], 10);
+        else return null;                               // unknown subpath form -> don't guess
+    }
+    var start0 = offset + sj.position;                  // 0-based
+    var end = start0 + (cigarRefSpan(sj.cigar) || 1);
+    var pos = contig + ":" + (start0 + 1) + "-" + end;   // hgTracks is 1-based
+    return { db: db,
+             url: "../cgi-bin/hgTracks?db=" + encodeURIComponent(db) +
+                  "&position=" + encodeURIComponent(pos) };
+}
+
 function renderSurjection(sj) {
     var box = el("div", { class: "pgSection pgSurject" });
     box.appendChild(el("div", { class: "pgSectionLabel", text: "Surjection" }));
@@ -491,6 +546,16 @@ function renderSurjection(sj) {
                 .map(function (v) { return v == null ? "" : v; }).join("\t");
         })
     ]));
+    // BLAT-style: if the target is a UCSC-browsable reference, link straight to
+    // that position in the Genome Browser.
+    var ref = refBrowserInfo(sj);
+    if (ref) {
+        box.appendChild(el("div", { class: "pgSurjectLink" }, [
+            el("a", { href: ref.url,
+                title: "Show this position in the UCSC Genome Browser",
+                text: "→ View in UCSC Genome Browser (" + ref.db + ")" })
+        ]));
+    }
     return box;
 }
 
@@ -680,5 +745,21 @@ if (document.readyState === "loading")
     document.addEventListener("DOMContentLoaded", init);
 else
     init();
+
+// Test hook.  In a browser "module" is undefined, so this is a no-op there; the
+// unit tests (hgPangenome/tests/) load this file under node and use these.
+if (typeof module !== "undefined" && module.exports)
+    module.exports = {
+        parseInput: parseInput,
+        validate: validate,
+        cigarRefSpan: cigarRefSpan,
+        refDbFor: refDbFor,
+        refBrowserInfo: refBrowserInfo,
+        formEncode: formEncode,
+        fmt: fmt,
+        readConfig: readConfig,
+        renderResult: renderResult,
+        init: init
+    };
 
 }());

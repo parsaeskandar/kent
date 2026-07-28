@@ -113,6 +113,8 @@
 }
 .pgSurjectOk .pgDlBtn { margin-left: 12px; }
 .pgSurjectBad { font-size: 0.9em; }
+.pgSurjectLink { margin-top: 4px; font-size: 0.9em; }
+.pgSurjectLink a { color: #121E9A; }
 
 /* ---- Mosaic: a plain table plus a restrained blue-ramp bar ---- */
 

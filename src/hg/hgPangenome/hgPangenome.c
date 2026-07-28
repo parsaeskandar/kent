@@ -31,6 +31,18 @@
  *   pangenome.transport      "job" (async, poll) or "sync"; default "job"
  *   pangenome.timeoutSecs    per-request timeout talking to the middleware; default 120
  *   pangenome.pollIntervalMs poll interval in ms; default 1500
+ *   pangenome.maxSequences   max sequences per submit (server-enforced); default 50
+ *   pangenome.maxSeqLen      max length of one sequence in bp; default 100000
+ *   pangenome.maxRequestBytes max raw payload size; default 10000000
+ *   pangenome.apiToken       shared secret sent to the middleware as the
+ *                            X-Pangenome-Token header; if empty, no auth header
+ *                            is sent (middleware runs auth-off for testing)
+ *
+ * Abuse protection: submissions (cmd=map) and the page itself are rate-limited
+ * via the UCSC bottleneck server (botDelay), exactly like hgBlat; polling
+ * (cmd=poll) is exempt.  The maxSequences/maxSeqLen/maxRequestBytes caps are
+ * enforced here server-side (the browser's checks are bypassable) and should be
+ * kept in sync with the middleware's own limits.
  *   pangenome.maxSequences   max sequences accepted per submit; default 50
  *   pangenome.maxMultimaps   default alignments per sequence; default 1
  *   pangenome.surject        "on"/"off" default for the surject checkbox; default "on"
@@ -49,6 +61,9 @@
 #include "dystring.h"
 #include "hCommon.h"
 #include "hui.h"
+#include "botDelay.h"
+#include "errCatch.h"
+#include "portable.h"
 #include <ctype.h>
 #include <curl/curl.h>
 
@@ -56,6 +71,12 @@
 struct cart *cart;
 struct hash *oldVars = NULL;
 char *excludeVars[] = {"Submit", "submit", "Clear", NULL};
+
+/* Abuse protection.  We use the same UCSC bottleneck/botDelay mechanism as
+ * hgBlat.  The backend is expensive (seconds per read), so we apply the full
+ * standard penalty rather than hgBlat's 0.5. */
+#define delayFraction 1.0
+static boolean issueBotWarning = FALSE;
 
 static char *cfgOr(char *name, char *def)
 /* hg.conf value or default. */
@@ -85,9 +106,10 @@ dyStringAppendN(dy, (char *)ptr, n);
 return n;
 }
 
-static struct pgResp pgHttp(char *url, char *postJson, int timeoutSecs)
+static struct pgResp pgHttp(char *url, char *postJson, int timeoutSecs, char *token)
 /* Make one request to the middleware.  GET when postJson is NULL, otherwise
- * POST postJson as application/json.  Caller frees resp.body / resp.errMsg. */
+ * POST postJson as application/json.  When token is non-empty, send it as the
+ * X-Pangenome-Token auth header.  Caller frees resp.body / resp.errMsg. */
 {
 struct pgResp r;
 r.code = 0;
@@ -105,6 +127,12 @@ if (curl == NULL)
 
 struct curl_slist *hdrs = NULL;
 hdrs = curl_slist_append(hdrs, "Accept: application/json");
+if (isNotEmpty(token))
+    {
+    struct dyString *auth = dyStringCreate("X-Pangenome-Token: %s", token);
+    hdrs = curl_slist_append(hdrs, auth->string);
+    dyStringFree(&auth);
+    }
 curl_easy_setopt(curl, CURLOPT_URL, url);
 curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, pgAccum);
 curl_easy_setopt(curl, CURLOPT_WRITEDATA, r.body);
@@ -169,12 +197,83 @@ for (p = s; *p != '\0'; ++p)
 return TRUE;
 }
 
+static char *pgValidatePayload(char *payload, int maxSeqs, int maxSeqLen)
+/* Server-side enforcement of the input caps (the browser's checks are
+ * bypassable by POSTing straight here).  Parse the map payload and verify the
+ * sequence count, per-sequence length and ACGTN charset.  Returns NULL if OK,
+ * otherwise a human-readable reason.  Never aborts: malformed JSON is caught
+ * and reported as an error.  This is a cheap first pass; the middleware
+ * validates authoritatively too. */
+{
+static char msg[256];
+char *result = NULL;
+struct errCatch *errCatch = errCatchNew();
+if (errCatchStart(errCatch))
+    {
+    struct jsonElement *root = jsonParse(payload);
+    struct jsonElement *seqsEl = jsonFindNamedField(root, "", "sequences");
+    if (seqsEl == NULL)
+        result = "payload is missing 'sequences'";
+    else
+        {
+        struct slRef *list = jsonListVal(seqsEl, "sequences");
+        int count = slCount(list);
+        if (count < 1)
+            result = "no sequences submitted";
+        else if (count > maxSeqs)
+            {
+            safef(msg, sizeof(msg), "too many sequences: %d (limit %d)", count, maxSeqs);
+            result = msg;
+            }
+        else
+            {
+            struct slRef *ref;
+            for (ref = list; ref != NULL; ref = ref->next)
+                {
+                struct jsonElement *seqObj = ref->val;
+                char *seq = jsonOptionalStringField(seqObj, "sequence", NULL);
+                if (seq == NULL)
+                    { result = "a sequence entry has no 'sequence'"; break; }
+                int n = strlen(seq);
+                if (n == 0)
+                    { result = "a sequence is empty"; break; }
+                if (n > maxSeqLen)
+                    {
+                    safef(msg, sizeof(msg), "a sequence is %d bp (limit %d)", n, maxSeqLen);
+                    result = msg;
+                    break;
+                    }
+                char *p;
+                for (p = seq; *p != '\0'; ++p)
+                    {
+                    char c = toupper((unsigned char)*p);
+                    if (c != 'A' && c != 'C' && c != 'G' && c != 'T' && c != 'N')
+                        {
+                        safef(msg, sizeof(msg),
+                              "invalid character in a sequence (only A,C,G,T,N allowed)");
+                        result = msg;
+                        break;
+                        }
+                    }
+                if (result != NULL) break;
+                }
+            }
+        }
+    }
+errCatchEnd(errCatch);
+if (errCatch->gotError)
+    result = "invalid JSON payload";
+errCatchFree(&errCatch);
+return result;
+}
+
 static void apiProxy(char *cmd)
 /* Forward one browser request to the middleware and stream back its JSON.
  * This is the whole "request the other service for everything" mechanism. */
 {
 char *apiBase = cloneString(cfgOr("pangenome.apiBase", ""));
 int timeout = atoi(cfgOr("pangenome.timeoutSecs", "120"));
+char *token = cfgOr("pangenome.apiToken", "");   /* empty => no auth header */
 
 if (isEmpty(apiBase))
     {
@@ -195,8 +294,26 @@ if (sameString(cmd, "map"))
         emitJsonError("missing 'payload'");
         return;
         }
+    /* Server-side input caps (do not trust the browser).  These must stay in
+     * sync with the middleware's limits; keep them in hg.conf. */
+    /* Limits agreed with the middleware team; keep both sides identical. */
+    int maxSeqs = atoi(cfgOr("pangenome.maxSequences", "50"));
+    int maxSeqLen = atoi(cfgOr("pangenome.maxSeqLen", "100000"));      /* 100 kb / read */
+    int maxBytes = atoi(cfgOr("pangenome.maxRequestBytes", "10000000")); /* 10 MB body */
+    if (strlen(payload) > (size_t)maxBytes)
+        {
+        emitJsonError("request too large: %lu bytes (limit %d)",
+                      (unsigned long)strlen(payload), maxBytes);
+        return;
+        }
+    char *bad = pgValidatePayload(payload, maxSeqs, maxSeqLen);
+    if (bad != NULL)
+        {
+        emitJsonError("%s", bad);
+        return;
+        }
     safef(url, sizeof(url), "%s/api/v1/map", apiBase);
-    r = pgHttp(url, payload, timeout);
+    r = pgHttp(url, payload, timeout, token);
     }
 else /* cmd == "poll" */
     {
@@ -207,7 +324,7 @@ else /* cmd == "poll" */
         return;
         }
     safef(url, sizeof(url), "%s/api/v1/map/%s", apiBase, jobId);
-    r = pgHttp(url, NULL, timeout);
+    r = pgHttp(url, NULL, timeout, token);
     }
 
 if (r.transportErr)
@@ -327,6 +444,12 @@ boolean surjectDefault = sameString(cfgOr("pangenome.surject", "on"), "on");
 
 cartWebStart(cart, NULL, "Pangenome Mapping");
 
+if (issueBotWarning)
+    {
+    char *ip = getenv("REMOTE_ADDR");
+    botDelayMessage(ip, botDelayMillis);
+    }
+
 webIncludeResourceFile("hgPangenome.css");
 
 drawForm(maxSeq, surjectDefault, maxMultimaps);
@@ -346,6 +469,7 @@ cartWebEnd();
 int main(int argc, char *argv[])
 /* Process command line. */
 {
+long enteredMainTime = clock1000();
 cgiSpoof(&argc, argv);
 
 /* API modes: forward to the middleware and return JSON, skipping the cart
@@ -353,11 +477,18 @@ cgiSpoof(&argc, argv);
 char *cmd = cgiOptionalString("cmd");
 if (cmd != NULL && (sameString(cmd, "map") || sameString(cmd, "poll")))
     {
+    /* Rate-limit the expensive submit via the UCSC bottleneck server, with a
+     * JSON hog-exit so the client renders it as an error.  Polling is cheap
+     * and happens many times per job, so it is deliberately NOT throttled -
+     * throttling it would penalize legitimate users' polling loops. */
+    if (sameString(cmd, "map"))
+        earlyBotCheck(enteredMainTime, "hgPangenome", delayFraction, 0, 0, "json");
     apiProxy(cmd);
     return 0;
     }
 
-/* Otherwise render the page. */
+/* Otherwise render the page (HTML hog-exit if the IP is abusing us). */
+issueBotWarning = earlyBotCheck(enteredMainTime, "hgPangenome", delayFraction, 0, 0, "html");
 oldVars = hashNew(8);
 cartEmptyShell(doMiddle, hUserCookie(), excludeVars, oldVars);
 return 0;
