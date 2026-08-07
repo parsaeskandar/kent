@@ -98,11 +98,19 @@ function load(options) {
         createElement: makeNode,
         createTextNode: function (t) { var n = makeNode(); n._text = String(t); return n; },
         body: makeNode('body'),
-        addEventListener: function (ev, fn) { (docListeners[ev] = docListeners[ev] || []).push(fn); },
-        execCommand: function () { return true; }
+        addEventListener: function (ev, fn) { (docListeners[ev] = docListeners[ev] || []).push(fn); }
     };
-    // copyToClipboard in the client calls document.execCommand via `document`
-    document.execCommand = function () { return true; };
+    // The client copies by appending a <textarea>, selecting it and calling
+    // document.execCommand('copy').  Capture what would have hit the clipboard
+    // in document.copiedText so tests can assert the exact text.
+    document.copiedText = null;
+    document.execCommand = function (cmd) {
+        if (cmd === 'copy') {
+            var ta = findAll(document.body, function (n) { return n.tagName === 'TEXTAREA'; });
+            if (ta.length > 0) document.copiedText = ta[ta.length - 1].value;
+        }
+        return true;
+    };
 
     var sandbox = {
         document: document,
@@ -130,6 +138,15 @@ function load(options) {
     };
     sandbox.self = sandbox.window;
     vm.createContext(sandbox);
+
+    // Generated haplotype->assembly table, loaded by the page before the app.
+    // withAssemblies:false lets a test exercise the no-table fallback path.
+    if (options.withAssemblies !== false) {
+        var tablePath = path.join(JS_DIR, 'hgPangenomeAssemblies.js');
+        if (fs.existsSync(tablePath))
+            vm.runInContext(fs.readFileSync(tablePath, 'utf8'), sandbox,
+                            { filename: 'hgPangenomeAssemblies.js' });
+    }
 
     if (options.withMock !== false)
         vm.runInContext(fs.readFileSync(path.join(JS_DIR, 'hgPangenomeMock.js'), 'utf8'),

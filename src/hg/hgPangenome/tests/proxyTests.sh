@@ -1,0 +1,413 @@
+#!/bin/bash
+# proxyTests.sh - Layer 2 of the hgPangenome test suite.
+#
+# Tests the compiled CGI's API modes (cmd=map / cmd=poll) against a mock
+# middleware: server-side input caps, what we actually send upstream (URL,
+# Content-Type, auth header, payload bytes), the job-id charset guard, upstream
+# HTTP error mapping, timeouts, response passthrough, and that bot-delay is
+# applied to submissions but not to polling.
+#
+# Fully isolated: the test hg.conf files do NOT include the site hg.conf, so
+# these tests never contact the shared bottleneck server, MySQL, or the real
+# middleware.  Only python3 stdlib + the compiled CGI are needed.
+#
+# Usage:   ./proxyTests.sh            (exit 0 = all passed)
+#          PG_CGI=/path/to/hgPangenome ./proxyTests.sh
+
+set -u
+cd "$(dirname "$0")"
+
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/pgProxyTests.XXXXXX")
+REC="$TMP/requests.jsonl"
+MOCK_PID=""
+PORT=""
+pass=0
+fail=0
+
+cleanup() {
+    [ -n "$MOCK_PID" ] && kill "$MOCK_PID" 2>/dev/null
+    rm -rf "$TMP"
+}
+trap cleanup EXIT
+
+# ---------------------------------------------------------------- locate CGI
+
+find_cgi() {
+    if [ -n "${PG_CGI:-}" ] && [ -x "${PG_CGI}" ]; then echo "$PG_CGI"; return; fi
+    if [ -x ../hgPangenome ]; then echo "$(cd .. && pwd)/hgPangenome"; return; fi
+    if [ -x /usr/local/apache/cgi-bin-$USER/hgPangenome ]; then
+        echo "/usr/local/apache/cgi-bin-$USER/hgPangenome"; return; fi
+    echo ""
+}
+CGI=$(find_cgi)
+if [ -z "$CGI" ]; then
+    echo "SKIP: no hgPangenome binary found."
+    echo "      Build one with:  (cd .. && make compile)   or set PG_CGI=/path/to/hgPangenome"
+    exit 0
+fi
+echo "Using CGI: $CGI"
+
+# ------------------------------------------------------------------ utilities
+
+free_port() {
+    python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(('127.0.0.1', 0))
+print(s.getsockname()[1])
+s.close()
+PY
+}
+
+start_mock() {                      # start_mock [extra mockMiddleware args...]
+    stop_mock
+    PORT=$(free_port)
+    : > "$REC"
+    python3 ./mockMiddleware.py --port "$PORT" --record "$REC" "$@" 2>"$TMP/mock.err" &
+    MOCK_PID=$!
+    # wait for it to listen (max ~3s)
+    for _ in $(seq 1 30); do
+        if grep -q listening "$TMP/mock.err" 2>/dev/null; then return 0; fi
+        sleep 0.1
+    done
+    echo "ERROR: mock middleware failed to start:"; cat "$TMP/mock.err"; exit 1
+}
+
+stop_mock() {
+    if [ -n "$MOCK_PID" ]; then kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null; MOCK_PID=""; fi
+}
+
+# Write a test hg.conf.  Deliberately standalone (no include of the site conf).
+mk_conf() {                          # mk_conf <file> [extra lines...]
+    local f="$1"; shift
+    : > "$f"
+    for line in "$@"; do echo "$line" >> "$f"; done
+}
+
+# Default conf pointing at the running mock.
+conf_default() {
+    mk_conf "$TMP/hg.conf" \
+        "pangenome.apiBase=http://127.0.0.1:$PORT" \
+        "pangenome.maxSequences=50" \
+        "pangenome.maxSeqLen=100" \
+        "pangenome.maxRequestBytes=5000" \
+        "pangenome.timeoutSecs=10"
+    echo "$TMP/hg.conf"
+}
+
+# Invoke the CGI as a real browser POST (urlencoded body on stdin).
+cgi_post() {                         # cgi_post <conf> <payload-json>
+    local conf="$1" payload="$2"
+    local body
+    body=$(BODY_PAYLOAD="$payload" python3 -c '
+import os, urllib.parse
+print("cmd=map&payload=" + urllib.parse.quote(os.environ["BODY_PAYLOAD"]))')
+    printf '%s' "$body" | env -i \
+        HGDB_CONF="$conf" REMOTE_ADDR=127.0.0.1 \
+        REQUEST_METHOD=POST CONTENT_TYPE=application/x-www-form-urlencoded \
+        CONTENT_LENGTH=${#body} \
+        "$CGI" 2>&1
+}
+
+# Same as cgi_post but keeps the streams apart: stdout is returned (the HTTP
+# response body the browser sees), stderr is left in $TMP/stderr.txt (what the
+# apache error log would get).
+cgi_post_split() {                   # cgi_post_split <conf> <payload-json>
+    local conf="$1" payload="$2"
+    local body
+    body=$(BODY_PAYLOAD="$payload" python3 -c '
+import os, urllib.parse
+print("cmd=map&payload=" + urllib.parse.quote(os.environ["BODY_PAYLOAD"]))')
+    printf '%s' "$body" | env -i \
+        HGDB_CONF="$conf" REMOTE_ADDR=127.0.0.1 \
+        REQUEST_METHOD=POST CONTENT_TYPE=application/x-www-form-urlencoded \
+        CONTENT_LENGTH=${#body} \
+        "$CGI" 2>"$TMP/stderr.txt"
+}
+
+# Invoke the CGI as a real browser GET (QUERY_STRING).
+cgi_get() {                          # cgi_get <conf> <query-string>
+    local conf="$1" qs="$2"
+    env -i HGDB_CONF="$conf" REMOTE_ADDR=127.0.0.1 \
+        REQUEST_METHOD=GET QUERY_STRING="$qs" \
+        "$CGI" 2>&1 < /dev/null
+}
+
+# Number of requests the mock has received.
+mock_count() { [ -s "$REC" ] && wc -l < "$REC" | tr -d ' ' || echo 0; }
+
+# Field of the last recorded request (python-side extraction).
+mock_field() {                       # mock_field <key>
+    MF_KEY="$1" python3 -c '
+import json, os, sys
+key = os.environ["MF_KEY"]
+lines = [l for l in open(sys.argv[1]) if l.strip()]
+if not lines:
+    print("<no-request>"); sys.exit(0)
+v = json.loads(lines[-1]).get(key)
+print("<null>" if v is None else v)
+' "$REC"
+}
+
+# --------------------------------------------------------------- assertions
+
+check() {                            # check <label> <condition-result 0/1>
+    if [ "$2" -eq 0 ]; then pass=$((pass+1)); echo "  ok   $1"
+    else fail=$((fail+1)); echo "  FAIL $1"; fi
+}
+
+check_contains() {                   # check_contains <label> <text> <needle>
+    case "$2" in
+        *"$3"*) check "$1" 0 ;;
+        *) check "$1" 1; echo "         expected to contain: $3"
+           echo "         got: $(echo "$2" | tr '\n' ' ' | cut -c1-200)" ;;
+    esac
+}
+
+check_not_contains() {               # check_not_contains <label> <text> <needle>
+    case "$2" in
+        *"$3"*) check "$1" 1; echo "         should NOT contain: $3"
+                echo "         got: $(echo "$2" | tr '\n' ' ' | cut -c1-200)" ;;
+        *) check "$1" 0 ;;
+    esac
+}
+
+check_eq() {                         # check_eq <label> <actual> <expected>
+    if [ "$2" = "$3" ]; then check "$1" 0
+    else check "$1" 1; echo "         expected: $3"; echo "         actual:   $2"; fi
+}
+
+section() { echo; echo "--- $1 ---"; }
+
+# Build a payload of N sequences of a given sequence string.
+payload_n() {                        # payload_n <count> [sequence]
+    PN_N="$1" PN_SEQ="${2:-ACGT}" python3 -c '
+import json, os
+n = int(os.environ["PN_N"]); seq = os.environ["PN_SEQ"]
+print(json.dumps({"sequences": [{"name": "s%d" % i, "sequence": seq} for i in range(n)],
+                  "options": {"max_multimaps": 1, "surject": True, "surject_target": None}}))'
+}
+
+echo "============================================================"
+echo "Layer 2: CGI proxy tests"
+echo "============================================================"
+
+start_mock
+CONF=$(conf_default)
+
+# =================================================== A. server-side input caps
+section "server-side input caps (must be enforced here, not just in the browser)"
+
+: > "$REC"
+out=$(cgi_post "$CONF" "$(payload_n 51)")
+check_contains "51 sequences rejected with the limit" "$out" "too many sequences: 51 (limit is 50)"
+check_eq       "51 sequences never reached the middleware" "$(mock_count)" "0"
+
+: > "$REC"
+out=$(cgi_post "$CONF" "$(payload_n 50)")
+check_contains "50 sequences accepted (boundary)" "$out" "job_id"
+check_eq       "50 sequences forwarded once" "$(mock_count)" "1"
+
+: > "$REC"
+long=$(python3 -c 'print("A"*101)')
+out=$(cgi_post "$CONF" "$(payload_n 1 "$long")")
+check_contains "over-long sequence rejected" "$out" "(limit 100)"
+check_eq       "over-long sequence not forwarded" "$(mock_count)" "0"
+
+: > "$REC"
+exact=$(python3 -c 'print("A"*100)')
+out=$(cgi_post "$CONF" "$(payload_n 1 "$exact")")
+check_contains "sequence exactly at the length limit accepted" "$out" "job_id"
+
+: > "$REC"
+out=$(cgi_post "$CONF" '{"sequences":[{"name":"r","sequence":"ACGTX"}],"options":{}}')
+check_contains "invalid character rejected" "$out" "only A,C,G,T,N allowed"
+check_eq       "invalid character not forwarded" "$(mock_count)" "0"
+
+: > "$REC"
+out=$(cgi_post "$CONF" '{"sequences":[{"name":"r","sequence":"acgtn"}],"options":{}}')
+check_contains "lower-case acgtn accepted" "$out" "job_id"
+
+: > "$REC"
+out=$(cgi_post "$CONF" '{"sequences":[{"name":"r","sequence":"ACGU"}],"options":{}}')
+check_contains "RNA (U) rejected" "$out" "only A,C,G,T,N allowed"
+
+: > "$REC"
+big=$(payload_n 50 "$(python3 -c 'print("A"*100)')")
+out=$(cgi_post "$CONF" "$big")
+check_contains "over-size request body rejected" "$out" "request too large"
+check_eq       "over-size body not forwarded" "$(mock_count)" "0"
+
+: > "$REC"
+out=$(cgi_post "$CONF" '{"sequences": [ ')
+check_contains "malformed JSON rejected without aborting" "$out" "invalid JSON payload"
+check_eq       "malformed JSON not forwarded" "$(mock_count)" "0"
+
+: > "$REC"
+out=$(cgi_post "$CONF" '{"options":{}}')
+check_contains "payload with no sequences field rejected" "$out" "missing 'sequences'"
+
+: > "$REC"
+out=$(cgi_post "$CONF" '{"sequences":[],"options":{}}')
+check_contains "empty sequences array rejected" "$out" "no sequences submitted"
+
+: > "$REC"
+out=$(cgi_post "$CONF" '{"sequences":[{"name":"r"}],"options":{}}')
+check_contains "sequence entry without a sequence rejected" "$out" "no 'sequence'"
+
+: > "$REC"
+out=$(cgi_post "$CONF" '{"sequences":[{"name":"r","sequence":""}],"options":{}}')
+check_contains "empty sequence string rejected" "$out" "empty"
+
+# =============================================== B. what we send upstream
+section "upstream request shaping"
+
+: > "$REC"
+PAYLOAD='{"sequences":[{"name":"r1","sequence":"ACGTACGT"}],"options":{"max_multimaps":1,"surject":true,"surject_target":"CHM13#0#chr10"}}'
+out=$(cgi_post "$CONF" "$PAYLOAD")
+check_eq       "valid submit forwarded exactly once" "$(mock_count)" "1"
+check_eq       "forwarded as POST" "$(mock_field method)" "POST"
+check_eq       "forwarded to /api/v1/map" "$(mock_field path)" "/api/v1/map"
+check_eq       "sent as application/json" "$(mock_field content_type)" "application/json"
+check_eq       "payload forwarded byte-for-byte" "$(mock_field body)" "$PAYLOAD"
+check_eq       "Accept: application/json sent" "$(mock_field accept)" "application/json"
+check_contains "identifies itself as hgPangenome" "$(mock_field user_agent)" "hgPangenome"
+check_contains "middleware answer passed through" "$out" '"job_id": "job1"'
+check_contains "CGI emits JSON content type" "$out" "Content-Type: application/json"
+
+: > "$REC"
+out=$(cgi_get "$CONF" "cmd=poll&job_id=job1")
+check_eq       "poll forwarded as GET" "$(mock_field method)" "GET"
+check_eq       "poll hits /api/v1/map/<job_id>" "$(mock_field path)" "/api/v1/map/job1"
+check_contains "poll result passed through" "$out" '"status": "done"'
+
+# trailing slash in apiBase must not produce a double slash
+mk_conf "$TMP/slash.conf" "pangenome.apiBase=http://127.0.0.1:$PORT/"
+: > "$REC"
+cgi_get "$TMP/slash.conf" "cmd=poll&job_id=job1" > /dev/null
+check_eq "trailing slash in apiBase normalized" "$(mock_field path)" "/api/v1/map/job1"
+
+# =========================================================== auth header
+section "auth token"
+
+mk_conf "$TMP/tok.conf" "pangenome.apiBase=http://127.0.0.1:$PORT" \
+                        "pangenome.apiToken=test-token-abc123"
+: > "$REC"
+cgi_post "$TMP/tok.conf" '{"sequences":[{"name":"r","sequence":"ACGT"}],"options":{}}' > /dev/null
+check_eq "configured token sent as X-Pangenome-Token" "$(mock_field token)" "test-token-abc123"
+
+: > "$REC"
+cgi_get "$TMP/tok.conf" "cmd=poll&job_id=job1" > /dev/null
+check_eq "token also sent on poll" "$(mock_field token)" "test-token-abc123"
+
+: > "$REC"
+cgi_post "$CONF" '{"sequences":[{"name":"r","sequence":"ACGT"}],"options":{}}' > /dev/null
+check_eq "no token configured means no auth header" "$(mock_field token)" "<null>"
+
+# ======================================================= C. job_id guard
+section "job_id guard (path traversal / SSRF)"
+
+for bad in "../../etc/passwd" "a/b" "a?x=1" "a&b" "a;b" "a b" "http://evil.example/x" '$(id)'; do
+    : > "$REC"
+    out=$(cgi_get "$CONF" "cmd=poll&job_id=$(python3 -c "
+import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$bad")")
+    check_contains "rejects job_id '$bad'" "$out" "invalid 'job_id'"
+    check_eq       "job_id '$bad' not forwarded" "$(mock_count)" "0"
+done
+
+: > "$REC"
+out=$(cgi_get "$CONF" "cmd=poll")
+check_contains "missing job_id rejected" "$out" "invalid 'job_id'"
+
+: > "$REC"
+longid=$(python3 -c 'print("a"*129)')
+out=$(cgi_get "$CONF" "cmd=poll&job_id=$longid")
+check_contains "over-long job_id rejected" "$out" "invalid 'job_id'"
+check_eq       "over-long job_id not forwarded" "$(mock_count)" "0"
+
+: > "$REC"
+cgi_get "$CONF" "cmd=poll&job_id=abc-123_XY.9" > /dev/null
+check_eq "accepts a normal job_id charset" "$(mock_field path)" "/api/v1/map/abc-123_XY.9"
+
+# ================================================ D. upstream error mapping
+section "upstream HTTP error mapping"
+
+for code in 400 401 403 429 500 503; do
+    start_mock --status "$code" --body '{"status":"error","error":"upstream says no"}'
+    CONF2=$(conf_default)
+    out=$(cgi_post "$CONF2" '{"sequences":[{"name":"r","sequence":"ACGT"}],"options":{}}')
+    check_contains "HTTP $code surfaced as an error envelope" "$out" '"status":"error"'
+    check_contains "HTTP $code names the status code" "$out" "HTTP $code"
+done
+
+start_mock --status 200 --body 'this is not json' --content-type text/plain
+CONF2=$(conf_default)
+out=$(cgi_post "$CONF2" '{"sequences":[{"name":"r","sequence":"ACGT"}],"options":{}}')
+check_contains "non-JSON 200 is passed through verbatim (client reports it)" "$out" "this is not json"
+
+# unreachable middleware
+mk_conf "$TMP/dead.conf" "pangenome.apiBase=http://127.0.0.1:$(free_port)"
+out=$(cgi_post "$TMP/dead.conf" '{"sequences":[{"name":"r","sequence":"ACGT"}],"options":{}}')
+check_contains "unreachable middleware reported clearly" "$out" "could not reach mapping server"
+
+# timeout
+start_mock --delay 3
+mk_conf "$TMP/to.conf" "pangenome.apiBase=http://127.0.0.1:$PORT" "pangenome.timeoutSecs=1"
+out=$(cgi_post "$TMP/to.conf" '{"sequences":[{"name":"r","sequence":"ACGT"}],"options":{}}')
+check_contains "slow middleware times out instead of hanging" "$out" "could not reach mapping server"
+
+# apiBase not configured
+mk_conf "$TMP/noapi.conf" "pangenome.transport=job"
+out=$(cgi_post "$TMP/noapi.conf" '{"sequences":[{"name":"r","sequence":"ACGT"}],"options":{}}')
+check_contains "missing apiBase reported" "$out" "apiBase is not configured"
+out=$(cgi_get "$TMP/noapi.conf" "cmd=poll&job_id=job1")
+check_contains "missing apiBase reported on poll too" "$out" "apiBase is not configured"
+
+# ================================================= E. bot delay differential
+section "bot delay: applied to submissions, not to polling"
+
+# Point the bottleneck server at a dead port.  A submission must attempt the
+# bot check (and therefore fail closed); a poll must not consult it at all.
+DEADP=$(free_port)
+start_mock
+mk_conf "$TMP/bot.conf" "pangenome.apiBase=http://127.0.0.1:$PORT" \
+                        "bottleneck.host=127.0.0.1" \
+                        "bottleneck.port=$DEADP"
+# Keep stdout (what the browser sees) and stderr (the error log) apart.
+body=$(cgi_post_split "$TMP/bot.conf" '{"sequences":[{"name":"r","sequence":"ACGT"}],"options":{}}')
+log=$(cat "$TMP/stderr.txt")
+check_contains "cmd=map consults the bottleneck server" "$log" "bottleneck"
+# When the bottleneck server is down the API path must still answer JSON, not an
+# HTML 500 page (the client would otherwise show raw markup).
+check_contains     "bottleneck failure answered as JSON" "$body" "Content-Type: application/json"
+check_contains     "bottleneck failure uses our error envelope" "$body" '"status":"error"'
+check_contains     "bottleneck failure message is user-facing" "$body" "rate limiter unavailable"
+check_not_contains "bottleneck failure leaks no HTML to the browser" "$body" "<!DOCTYPE"
+check_not_contains "bottleneck failure leaks no host/port to the browser" "$body" "IP 127.0.0.1"
+check_contains     "bottleneck failure detail is written to the error log" "$log" "bot check failed"
+
+: > "$REC"
+out=$(cgi_get "$TMP/bot.conf" "cmd=poll&job_id=job1")
+check_not_contains "cmd=poll does not consult the bottleneck server" "$out" "bottleneck"
+check_contains     "cmd=poll still works while bot check is unreachable" "$out" '"status": "done"'
+
+# =============================================== F. non-API paths untouched
+section "non-API requests do not enter the proxy"
+
+: > "$REC"
+out=$(cgi_get "$CONF" "cmd=bogus&job_id=job1")
+check_eq           "unknown cmd is not forwarded upstream" "$(mock_count)" "0"
+check_not_contains "unknown cmd does not emit an API error envelope" "$out" '"status":"error"'
+
+# --------------------------------------------------------------------- report
+
+echo
+echo "---------------------------------------------"
+total=$((pass+fail))
+if [ "$fail" -eq 0 ]; then
+    echo "ALL PASSED: $pass/$total"
+    exit 0
+else
+    echo "FAILED: $fail of $total"
+    exit 1
+fi

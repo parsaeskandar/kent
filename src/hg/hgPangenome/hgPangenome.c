@@ -222,7 +222,7 @@ if (errCatchStart(errCatch))
             result = "no sequences submitted";
         else if (count > maxSeqs)
             {
-            safef(msg, sizeof(msg), "too many sequences: %d (limit %d)", count, maxSeqs);
+            safef(msg, sizeof(msg), "too many sequences: %d (limit is %d)", count, maxSeqs);
             result = msg;
             }
         else
@@ -460,6 +460,7 @@ printf("<div id='pgResults' class='pgResults'></div>\n");
 
 /* Config first (inline, runs before DOMContentLoaded), then the app + mock. */
 injectConfig();
+jsIncludeFile("hgPangenomeAssemblies.js", NULL);   /* generated haplotype->assembly table */
 jsIncludeFile("hgPangenomeMock.js", NULL);
 jsIncludeFile("hgPangenome.js", NULL);
 
@@ -482,7 +483,28 @@ if (cmd != NULL && (sameString(cmd, "map") || sameString(cmd, "poll")))
      * and happens many times per job, so it is deliberately NOT throttled -
      * throttling it would penalize legitimate users' polling loops. */
     if (sameString(cmd, "map"))
-        earlyBotCheck(enteredMainTime, "hgPangenome", delayFraction, 0, 0, "json");
+        {
+        /* If the bottleneck server itself is unreachable, botDelay errAborts,
+         * which would send an HTML 500 down a JSON endpoint (the client would
+         * show raw markup).  Catch it and answer with our error envelope
+         * instead - the pattern botDelay.c documents for JSON endpoints.
+         * Note a genuine hog still exits via hogExit(), which emits JSON 429. */
+        struct errCatch *errCatch = errCatchNew();
+        if (errCatchStart(errCatch))
+            earlyBotCheck(enteredMainTime, "hgPangenome", delayFraction, 0, 0, "json");
+        errCatchEnd(errCatch);
+        if (errCatch->gotError)
+            {
+            /* Detail (host/port of the bottleneck server) goes to the error log,
+             * not to the browser. */
+            fprintf(stderr, "hgPangenome: bot check failed: %s\n",
+                    trimSpaces(errCatch->message->string));
+            emitJsonError("rate limiter unavailable, please try again in a moment");
+            errCatchFree(&errCatch);
+            return 0;
+            }
+        errCatchFree(&errCatch);
+        }
     apiProxy(cmd);
     return 0;
     }

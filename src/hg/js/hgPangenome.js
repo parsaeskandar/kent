@@ -466,10 +466,11 @@ var SURJECT_MSG = {
     path_not_indexed: "target haplotype is not indexed for surjection"
 };
 
-// Reference haplotype samples that are browsable UCSC assemblies.  Keyed by the
-// lower-cased SAMPLE field of a "SAMPLE#PHASE#CONTIG" haplotype name.  Sample
-// (non-reference) haplotypes are absent here, so they get no link.  Overridable
-// via window.pangenomeConfig.refAssemblies.
+// Fallback for reference haplotypes, keyed by the lower-cased SAMPLE field of a
+// "SAMPLE#PHASE#CONTIG" name.  Used when the per-haplotype table
+// (hgPangenomeAssemblies.js, keyed "sample#phase") has no entry - e.g. an
+// unexpected phase, an older reference name, or if that file is not loaded.
+// Overridable via window.pangenomeConfig.refAssemblies.
 var PG_REF_DB_DEFAULT = {
     "chm13": "hs1", "t2t-chm13": "hs1", "hs1": "hs1",
     "grch38": "hg38", "hg38": "hg38",
@@ -484,6 +485,21 @@ function refDbFor(sample) {
     return map[key] || null;
 }
 
+// Look up the UCSC assembly for one haplotype.  Prefers the generated
+// per-haplotype HPRC table (every sample haplotype, not just references), then
+// falls back to the reference-only map above.  Returns a browsable assembly id
+// (e.g. "hs1", "GCA_044165215.1") or a full URL for assemblies whose id is not
+// portable between browser servers (hub_<id>_ dbs), or null when unknown.
+function assemblyFor(sample, phase) {
+    var table = window.pangenomeAssemblies;
+    if (table) {
+        var key = (String(sample) + "#" + String(phase)).toLowerCase();
+        if (Object.prototype.hasOwnProperty.call(table, key) && table[key])
+            return table[key];
+    }
+    return refDbFor(sample);
+}
+
 // Reference bases consumed by a CIGAR (M/D/N/=/X), for the link's end coord.
 function cigarRefSpan(cigar) {
     if (!cigar) return 0;
@@ -496,15 +512,16 @@ function cigarRefSpan(cigar) {
     return span;
 }
 
-// If the surjection target is a UCSC-browsable reference, return {db, url}
-// pointing hgTracks at the surjected position; otherwise null.
+// If the surjection target is a haplotype we can browse - any HPRC sample
+// haplotype as well as the references - return {db, url, isRemote} pointing
+// hgTracks at the surjected position; otherwise null.
 function refBrowserInfo(sj) {
     if (!sj || sj.status !== "ok" || sj.target == null || sj.position == null)
         return null;
     var parts = String(sj.target).split("#");           // PanSN: SAMPLE#PHASE#CONTIG
     if (parts.length < 3) return null;
-    var db = refDbFor(parts[0]);
-    if (!db) return null;
+    var assembly = assemblyFor(parts[0], parts[1]);
+    if (!assembly) return null;
     var contig = parts[2];
     var offset = 0;
     if (parts.length > 3) {                              // optional subpath offset suffix
@@ -514,16 +531,32 @@ function refBrowserInfo(sj) {
     var start0 = offset + sj.position;                  // 0-based
     var end = start0 + (cigarRefSpan(sj.cigar) || 1);
     var pos = contig + ":" + (start0 + 1) + "-" + end;   // hgTracks is 1-based
-    return { db: db,
-             url: "../cgi-bin/hgTracks?db=" + encodeURIComponent(db) +
-                  "&position=" + encodeURIComponent(pos) };
+    var posParam = "position=" + encodeURIComponent(pos);
+
+    // A full URL means the assembly id only resolves on the server named in the
+    // HPRC table (a per-server hub id), so link there rather than locally.
+    if (/^https?:\/\//.test(assembly)) {
+        var sep = assembly.indexOf("?") >= 0 ? "&" : "?";
+        var dbMatch = assembly.match(/[?&]db=([^&]+)/);
+        return { db: dbMatch ? decodeURIComponent(dbMatch[1]) : assembly,
+                 url: assembly + sep + posParam,
+                 isRemote: true };
+    }
+    return { db: assembly,
+             url: "../cgi-bin/hgTracks?db=" + encodeURIComponent(assembly) + "&" + posParam,
+             isRemote: false };
 }
 
 function renderSurjection(sj) {
     var box = el("div", { class: "pgSection pgSurject" });
     box.appendChild(el("div", { class: "pgSectionLabel", text: "Surjection" }));
     if (!sj) {
-        box.appendChild(el("p", { class: "pgMuted", text: "not requested" }));
+        // Distinguish "we never asked" from "we asked and the server had nothing
+        // to surject" (the middleware sends null rather than empty_input when a
+        // read did not align).
+        var asked = !!(lastPayload && lastPayload.options && lastPayload.options.surject);
+        box.appendChild(el("p", { class: "pgMuted",
+            text: asked ? "no surjection returned for this alignment" : "not requested" }));
         return box;
     }
     if (sj.status !== "ok") {
@@ -546,15 +579,20 @@ function renderSurjection(sj) {
                 .map(function (v) { return v == null ? "" : v; }).join("\t");
         })
     ]));
-    // BLAT-style: if the target is a UCSC-browsable reference, link straight to
-    // that position in the Genome Browser.
+    // BLAT-style: link straight to this position in the Genome Browser, for any
+    // haplotype we know an assembly for (HPRC samples as well as references).
     var ref = refBrowserInfo(sj);
     if (ref) {
-        box.appendChild(el("div", { class: "pgSurjectLink" }, [
-            el("a", { href: ref.url,
-                title: "Show this position in the UCSC Genome Browser",
-                text: "→ View in UCSC Genome Browser (" + ref.db + ")" })
-        ]));
+        var a = el("a", { href: ref.url,
+            title: "Show " + sj.target + " at this position in the UCSC Genome Browser" +
+                   " (assembly " + ref.db + ")",
+            text: "→ View in UCSC Genome Browser (" + ref.db + ")" });
+        if (ref.isRemote) {
+            // Only resolves on genome.ucsc.edu, so open it there in a new tab.
+            a.setAttribute("target", "_blank");
+            a.setAttribute("rel", "noopener");
+        }
+        box.appendChild(el("div", { class: "pgSurjectLink" }, [a]));
     }
     return box;
 }
@@ -754,6 +792,7 @@ if (typeof module !== "undefined" && module.exports)
         validate: validate,
         cigarRefSpan: cigarRefSpan,
         refDbFor: refDbFor,
+        assemblyFor: assemblyFor,
         refBrowserInfo: refBrowserInfo,
         formEncode: formEncode,
         fmt: fmt,

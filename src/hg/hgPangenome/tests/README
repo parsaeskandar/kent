@@ -7,7 +7,11 @@ end-to-end layer runs with no middleware and no browser.
 
 Run everything that can run here:
 
-    ./runTests.sh
+    make test          # or: ./runTests.sh
+
+Layers whose tool is missing SKIP rather than fail, so this is safe on a build
+machine with no node (node is optional in kent - see NODEBIN in inc/common.mk)
+and with no CGI binary built.  "make help" lists the targets.
 
 Run just the unit layer:
 
@@ -32,7 +36,66 @@ loadClient.js   Loads js/hgPangenome.js (and the mock) into a node vm with a
                 returns early, which is what unit tests want; pass ids:[...]
                 for a working element tree (used by the render layer).
 unitTests.js    LAYER 1: pure-function unit tests.
-runTests.sh     Runs the layers.
+renderTests.js  LAYER 3: contract/rendering tests over canned responses.
+mockMiddleware.py
+                Stand-in middleware for Layer 2: configurable status/body/delay,
+                and records every request (method, path, headers, body) as JSON
+                lines so tests can assert what the CGI actually sent upstream.
+proxyTests.sh   LAYER 2: CGI proxy tests.
+runTests.sh     Runs the layers (skipping any whose tool is absent).
+makefile        Standard kent entry point: make test / testWithCgi /
+                updateAssemblies / help.
+
+The haplotype -> assembly table
+-------------------------------
+js/hgPangenomeAssemblies.js is generated from the HPRC browser index CSV, which
+is committed at hgPangenome/ucsc_browser_hprc_r2_v1.0.index.csv - so generating
+it needs no network access and is reproducible.  The generated file records the
+CSV's name, sha256 and upstream URL.  Regenerate with:
+
+    make updateAssemblies        # runs makeAssemblyMap.py, then the tests
+
+For a new HPRC release, add its index CSV beside the script and point
+DEFAULT_SRC (or the command line) at it.
+
+
+What Layer 2 covers (83 checks)
+-------------------------------
+Runs the compiled CGI as a real CGI (POST with a urlencoded body on stdin, GET
+with QUERY_STRING) against mockMiddleware.py.
+
+input caps       51 rejected / 50 accepted (boundary); over-long sequence
+                 rejected and one exactly at the limit accepted; non-ACGTN and
+                 RNA "U" rejected; lower case accepted; over-size body
+                 rejected; malformed JSON rejected without aborting the CGI;
+                 missing 'sequences', empty array, entry without a sequence,
+                 empty sequence.  Each rejection also asserts the request was
+                 NOT forwarded upstream.
+request shaping  forwarded once, as POST, to /api/v1/map, with
+                 Content-Type: application/json, payload byte-for-byte
+                 identical, Accept and User-Agent set; poll forwarded as GET to
+                 /api/v1/map/<job_id>; trailing slash in apiBase normalized;
+                 middleware answer passed through.
+auth             configured token sent as X-Pangenome-Token on both map and
+                 poll; no header at all when unconfigured.
+job_id guard     rejects "../../etc/passwd", "a/b", "a?x=1", "a&b", "a;b",
+                 "a b", a full URL, "$(id)", an over-long id and a missing id -
+                 and asserts none of them are forwarded; accepts the normal
+                 [A-Za-z0-9._-] charset.
+error mapping    400/401/403/429/500/503 surfaced as an error envelope naming
+                 the status; non-JSON 200 passed through; unreachable
+                 middleware reported clearly; a slow middleware times out
+                 instead of hanging; missing apiBase reported on map and poll.
+bot delay        with the bottleneck server pointed at a dead port, cmd=map
+                 consults it (fails closed) while cmd=poll does not and still
+                 works - i.e. submissions are rate-limited, polling is exempt.
+non-API paths    an unknown cmd neither forwards upstream nor emits an API
+                 error envelope.
+
+Isolation: the test hg.conf files are standalone (they do NOT include the site
+hg.conf), so Layer 2 never touches the shared bottleneck server, MySQL, or the
+real middleware.  The CGI is located via $PG_CGI, else ../hgPangenome, else the
+installed sandbox CGI; if none exists the layer SKIPs with instructions.
 
 
 What Layer 1 covers (62 assertions groups)
@@ -79,14 +142,60 @@ Bugs this layer has already caught
 2. refDbFor() looked names up on an object literal without hasOwnProperty, so
    a haplotype sample named "constructor" resolved to Object.prototype's
    member instead of "no such assembly".  Fixed with a hasOwnProperty guard.
+3. When the bottleneck (rate limiter) server was unreachable, the JSON API
+   path answered with an HTML 500 page, which the browser showed as raw
+   markup.  Fixed by catching the abort and emitting the error envelope, with
+   the host/port detail going to the error log rather than to the user.
+   Finding that also exposed a build problem: the tree's prebuilt libraries
+   (lib/$MACHTYPE/jkhgap.a, jkweb.a) were months older than the sources, so
+   the CGI linked an old botDelay whose behavior did not match botDelay.c.
+   Rebuild the libraries after a git pull:
+       (cd src/lib && make) ; (cd src/hg/lib && make)
+
+
+What Layer 3 covers (50 checks)
+-------------------------------
+Feeds the client one canned middleware response per shape (fixtures, not the
+pseudo-random in-browser mock) and asserts what the page shows.
+
+statuses         mapped / unmapped / error cards; mapped-with-no-alignments;
+                 missing score+MAPQ shown as a dash with no literal "null";
+                 singular vs plural haplotype wording.
+haplotypes       representative labelled inline as copyable text and flagged
+                 only when it really is a reference; others comma-separated;
+                 expander+search appears only for long lists and contains every
+                 name; label count; "none reported" when empty.
+surjection       ok shows target : position (strand) + CIGAR + scores;
+                 position 0 and MAPQ 0 shown as values, not as missing; all
+                 five failure states show a human-readable reason, no
+                 coordinates and no browser link; a null surjection says "not
+                 requested".
+browser links    CHM13 -> hs1 and GRCh38 -> hg38 with the 0-based -> 1-based
+                 conversion and CIGAR-derived end; no link for sample
+                 haplotypes.
+mosaic           no bar when num_segments = 1; bar + explanation when > 1; one
+                 labelled segment per entry; widths proportional to covered_bp;
+                 legend names each representative and haplotype count.
+placements       no expander for a single alignment; extra alignments counted
+                 under one; primary rendered first even if returned last.
+copy/download    surjection copy yields the tab-separated record; haplotype
+                 copy yields one name per line; download affordances present;
+                 no coordinate copy offered for a failed surjection.
+transports       job flow posts cmd=map to our own CGI (never to the
+                 middleware), form-encoded, shows a placeholder card and
+                 progress, polls with GET + job_id, renders the finished result,
+                 clears progress and does not duplicate cards; sync flow
+                 renders identically with no polling at all.
+partial failure  a mapped, an unmapped and an errored sequence render side by
+                 side, and the good one keeps its coordinate.
+server errors    an error envelope from the CGI is surfaced with a Retry.
+
+Clipboard assertions work because loadClient.js captures what the client's
+hidden-textarea copy would have put on the clipboard (document.copiedText).
 
 
 Still to come (see the layered plan)
-------------------------------------
-Layer 2  CGI/proxy tests: drive the compiled CGI with a mock middleware -
-         input caps, auth header, job-id charset guard, HTTP error mapping,
-         timeouts, passthrough, botDelay on cmd=map but not cmd=poll.
-Layer 3  Contract/rendering tests: every response shape and surjection status
+------------------------------------: every response shape and surjection status
          rendered correctly, job vs sync transport, incremental rendering,
          mosaic bar, copy/download text, config-injected-after-script.
 Layer 4  Ground-truth round-trips against the live middleware: cut reads from

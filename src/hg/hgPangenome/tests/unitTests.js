@@ -409,9 +409,17 @@ t.test('accession-style contig names are preserved and encoded', function () {
     t.contains(r.url, 'position=CM000663.2%3A6-15', 'accession contig');
 });
 
-t.test('no link for non-reference haplotypes', function () {
-    t.isNull(pg.refBrowserInfo(sj({ target: 'HG00097#1#CM094066.1' })), 'sample haplotype');
-    t.isNull(pg.refBrowserInfo(sj({ target: 'NA19338#1#CM087762.1' })), 'another sample');
+t.test('HPRC sample haplotypes now link too (not only references)', function () {
+    // Before the HPRC assembly table these returned null; every published
+    // haplotype is browsable now, so a link is expected.
+    var r = pg.refBrowserInfo(sj({ target: 'HG00097#1#CM094066.1' }));
+    t.ok(r, 'sample haplotype links');
+    t.eq(r.db, 'GCA_044165215.1', 'to its own assembly');
+    t.ok(pg.refBrowserInfo(sj({ target: 'NA19338#1#CM087762.1' })), 'another sample links');
+});
+
+t.test('no link for a haplotype absent from the HPRC table', function () {
+    t.isNull(pg.refBrowserInfo(sj({ target: 'NOTINTABLE#1#chr1' })), 'unknown sample');
 });
 
 t.test('no link unless the surjection succeeded', function () {
@@ -427,6 +435,82 @@ t.test('no link when required fields are missing', function () {
     t.isNull(pg.refBrowserInfo(sj({ target: null })), 'null target');
     t.isNull(pg.refBrowserInfo(sj({ target: 'chr10' })), 'not a PanSN name');
     t.isNull(pg.refBrowserInfo(sj({ target: 'CHM13#0' })), 'too few PanSN fields');
+});
+
+
+// ------------------------------------------------------- assemblyFor (HPRC)
+
+t.suite('assemblyFor - every HPRC haplotype, not just references');
+
+t.test('the generated HPRC table is loaded', function () {
+    t.ok(client.window.pangenomeAssemblies, 'window.pangenomeAssemblies present');
+    var n = Object.keys(client.window.pangenomeAssemblies || {}).length;
+    t.ok(n > 0, 'table is populated (' + n + ' haplotypes)');
+});
+
+t.test('sample haplotypes resolve to their GenArk assembly', function () {
+    t.eq(pg.assemblyFor('HG00097', '1'), 'GCA_044165215.1', 'HG00097 hap1');
+    t.eq(pg.assemblyFor('HG00097', '2'), 'GCA_044164745.1', 'HG00097 hap2');
+    t.eq(pg.assemblyFor('NA19338', '1'), 'GCA_042035195.1', 'NA19338 hap1');
+});
+
+t.test('lookup is case-insensitive', function () {
+    t.eq(pg.assemblyFor('hg00097', '1'), 'GCA_044165215.1', 'lower case sample');
+});
+
+t.test('the two haplotypes of a sample map to different assemblies', function () {
+    t.notOk(pg.assemblyFor('HG00408', '1') === pg.assemblyFor('HG00408', '2'),
+            'pat and mat differ');
+});
+
+t.test('references come from the same table', function () {
+    t.eq(pg.assemblyFor('CHM13', '0'), 'hs1', 'CHM13');
+    t.eq(pg.assemblyFor('GRCh38', '0'), 'hg38', 'GRCh38');
+});
+
+t.test('a non-portable hub assembly is kept as an absolute URL', function () {
+    var v = pg.assemblyFor('HG002', '1');
+    t.contains(v, 'https://genome.ucsc.edu', 'absolute');
+    t.contains(v, 'db=hub_', 'hub id db, which only resolves on that server');
+});
+
+t.test('an unknown sample has no assembly', function () {
+    t.isNull(pg.assemblyFor('NOSUCHSAMPLE', '1'), 'unknown sample');
+    t.isNull(pg.assemblyFor('HG00097', '9'), 'unknown phase for a known sample');
+});
+
+t.test('references still resolve when the table is absent (fallback)', function () {
+    var c = loader.load({ withAssemblies: false });
+    t.notOk(c.window.pangenomeAssemblies, 'table not loaded');
+    t.eq(c.api.assemblyFor('CHM13', '0'), 'hs1', 'CHM13 via reference fallback');
+    t.isNull(c.api.assemblyFor('HG00097', '1'), 'sample haplotype has no fallback');
+});
+
+t.suite('refBrowserInfo - links for sample haplotypes');
+
+t.test('a sample haplotype links to its GenArk assembly at the position', function () {
+    var r = pg.refBrowserInfo({ status: 'ok', target: 'HG00097#1#CM094066.1',
+                                position: 19113, strand: '+', cigar: '24M' });
+    t.ok(r, 'link built for a sample haplotype');
+    t.eq(r.db, 'GCA_044165215.1', 'GenArk assembly');
+    t.contains(r.url, 'db=GCA_044165215.1', 'db param');
+    t.contains(r.url, 'position=CM094066.1%3A19114-19137', '1-based locus with CIGAR end');
+    t.notOk(r.isRemote, 'served by the local browser');
+});
+
+t.test('a hub-id assembly links off-site and is flagged remote', function () {
+    var r = pg.refBrowserInfo({ status: 'ok', target: 'HG002#1#chr1',
+                                position: 100, strand: '+', cigar: '50M' });
+    t.ok(r, 'link built');
+    t.ok(r.isRemote, 'flagged remote');
+    t.contains(r.url, 'https://genome.ucsc.edu', 'absolute url');
+    t.contains(r.url, 'position=chr1%3A101-150', 'position appended');
+    t.contains(r.url, 'db=hub_', 'keeps the hub db');
+});
+
+t.test('an unknown sample still yields no link', function () {
+    t.isNull(pg.refBrowserInfo({ status: 'ok', target: 'NOSUCH#1#chr1',
+                                 position: 10, cigar: '10M' }), 'no link');
 });
 
 // ----------------------------------------------------------- fmt/formEncode
