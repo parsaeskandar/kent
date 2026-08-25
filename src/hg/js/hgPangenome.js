@@ -26,9 +26,9 @@ var CFG = {};
 var USE_MOCK = false;
 var TRANSPORT = "job";          // "job" | "sync"
 var POLL_INTERVAL = 1500;
+var HGSID = null;           // session, needed by commands that write the cart
 var MAX_SEQUENCES = 50;
 var MAX_MULTIMAPS = 1;
-var SURJECT_DEFAULT = true;
 
 function readConfig() {
     CFG = window.pangenomeConfig || {};
@@ -37,10 +37,9 @@ function readConfig() {
     POLL_INTERVAL = CFG.pollIntervalMs || 1500;
     MAX_SEQUENCES = CFG.maxSequences || 50;
     MAX_MULTIMAPS = CFG.maxMultimaps || 1;
-    SURJECT_DEFAULT = CFG.surjectDefault !== false;
+    HGSID = CFG.hgsid || null;
 }
 
-var HAP_PREVIEW = 6;        // haplotype names shown before the "N more" expander
 var POLL_MAX_ERRORS = 3;    // consecutive poll failures tolerated before giving up
 
 // ---- Transport --------------------------------------------------------------
@@ -74,6 +73,31 @@ PangenomeApi.prototype.submit = function (payload) {
 PangenomeApi.prototype.poll = function (jobId) {
     return fetch(this.self + "?cmd=poll&job_id=" + encodeURIComponent(jobId), {
         method: "GET", headers: { "Accept": "application/json" }
+    }).then(checkHttp);
+};
+
+// Ask the CGI to write the PSL/FASTA pair BLAT uses and hand back the browser
+// URL that draws this sequence on the target.
+PangenomeApi.prototype.alignTrack = function (payload) {
+    // This one writes to the cart, so it needs the session: without hgsid the
+    // CGI would build a throwaway cart and the browser would never see it.
+    var body = { cmd: "alignTrack", payload: JSON.stringify(payload) };
+    if (HGSID) body.hgsid = HGSID;
+    return fetch(this.self, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json" },
+        body: formEncode(body)
+    }).then(checkHttp);
+};
+
+// Re-place an alignment the server still holds onto another haplotype.  Much
+// cheaper than mapping the read again; answers {"status":"expired"} once the
+// job has aged out, and then the caller maps.
+PangenomeApi.prototype.surject = function (payload) {
+    return fetch(this.self, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json" },
+        body: formEncode({ cmd: "surject", payload: JSON.stringify(payload) })
     }).then(checkHttp);
 };
 
@@ -289,10 +313,14 @@ function renderResult(res) {
     }
 
     body.appendChild(renderSummary(res, primary));
-    body.appendChild(renderHaplotypes(res.name, primary.haplotypes));
+    body.appendChild(renderHaplotypes(res.name, primary.haplotypes,
+                                      primary.haplotype_coverage,
+                                      primary.alignments));
     if (primary.haplotypes && primary.haplotypes.num_segments > 1)
         body.appendChild(renderMosaic(res.query_length, primary.haplotypes.mosaic));
-    body.appendChild(renderSurjection(primary.surjection));
+    var sBox = renderSurjection(primary.surjection, res.name);
+    surjectBoxByName[res.name] = sBox;
+    body.appendChild(sBox);
 
     // Other placements.
     if (aligns.length > 1) {
@@ -302,7 +330,7 @@ function renderResult(res) {
             var a = aligns[i];
             var sub = el("div", { class: "pgOtherItem" });
             sub.appendChild(renderSummary(res, a, true));
-            sub.appendChild(renderSurjection(a.surjection));
+            sub.appendChild(renderSurjection(a.surjection, res.name));
             det.appendChild(sub);
         }
         body.appendChild(det);
@@ -320,33 +348,294 @@ function renderSummary(res, aln, isOther) {
     var hap = aln.haplotypes || {};
     var bits = [];
     if (!isOther && res.query_length != null) bits.push("length " + res.query_length);
-    bits.push("score " + fmt(aln.score));
-    bits.push("MAPQ " + fmt(aln.mapping_quality));
+    // No score or MAPQ here: the numbers worth reading are the surjected
+    // alignment's, and they are stated once, on its position line.
     bits.push("strand " + (aln.strand || "?"));
 
     var line = el("div", { class: "pgSummary" });
     line.appendChild(el("span", { class: "pgSummaryStats", text: bits.join("  ·  ") }));
 
     if (hap.count != null) {
-        var rep = hap.representative || "none";
+        var rep = hap.representative ? prettyHap(hap.representative).label : "none";
         line.appendChild(el("span", {
             class: "pgSummaryHap",
-            text: "carried by " + hap.count + " haplotype" + (hap.count === 1 ? "" : "s") +
+            text: "carried by " + hap.count + " assembl" + (hap.count === 1 ? "y" : "ies") +
                   " (representative: " + rep + ")"
         }));
     }
     return line;
 }
 
-function renderHaplotypes(seqName, hap) {
+// Haplotype names arrive in two shapes: the carrier list may be 3-field
+// ("CHM13#0#chr10") while haplotype_coverage is 2-field ("CHM13#0").  Compare on
+// sample#phase.
+function hapKey(name) {
+    var parts = String(name == null ? "" : name).split("#");
+    return parts.slice(0, 2).join("#").toLowerCase();
+}
+
+// Merge the exact-carrier list with the graded coverage list into display rows,
+// ordered by coverage (100% first).  haplotype_coverage is the interesting
+// ordering: every exact carrier visits all the read's nodes, so on its own the
+// carrier list has nothing to sort by - while coverage also surfaces near
+// misses (a haplotype differing at one variant is absent from "carried by" but
+// shows up here at, say, 99.8%).
+//
+// Rows: {name, coverage (or null), coveredBp (or null), isCarrier}
+function haplotypeRows(hap, coverage) {
+    var carriers = Object.create(null);
+    (hap && hap.names ? hap.names : []).forEach(function (n) {
+        carriers[hapKey(n)] = n;
+    });
+
+    var rows = [], seen = Object.create(null);
+    (coverage || []).forEach(function (c) {
+        var key = hapKey(c.haplotype);
+        if (seen[key]) return;
+        seen[key] = true;
+        rows.push({ name: carriers[key] || c.haplotype,
+                    coverage: typeof c.coverage === "number" ? c.coverage : null,
+                    coveredBp: typeof c.covered_bp === "number" ? c.covered_bp : null,
+                    isCarrier: !!carriers[key] });
+    });
+    // Carriers the coverage list did not mention (or an engine that predates the
+    // field) still belong in the list, after everything that has a score.
+    Object.keys(carriers).forEach(function (key) {
+        if (seen[key]) return;
+        rows.push({ name: carriers[key], coverage: null, coveredBp: null, isCarrier: true });
+    });
+
+    rows.sort(function (a, b) {
+        var ca = a.coverage == null ? -1 : a.coverage;
+        var cb = b.coverage == null ? -1 : b.coverage;
+        if (cb !== ca) return cb - ca;                       // 100% first
+        return a.name.localeCompare(b.name);                 // stable, readable
+    });
+    return rows;
+}
+
+// "100%", "99.8%", or "" when the engine did not score this haplotype.
+function fmtCoverage(row) {
+    if (row.coverage == null) return "";
+    var v = row.coverage;
+    return (Math.round(v * 10) / 10) + "%";
+}
+
+// PanSN ("HG00097#1#CM094066.1") is a storage convention, not something to put
+// in front of a user - the rest of the browser never shows it.  Break it into
+// the sample, the haplotype number and the sequence, and pair it with the
+// assembly the sequence actually belongs to.
+function prettyHap(name) {
+    var parts = String(name == null ? "" : name).split("#");
+    var sample = parts[0] || String(name);
+    var phase = parts.length > 1 ? parts[1] : null;
+    var contig = parts.length > 2 ? parts.slice(2).join("#").split("#")[0] : null;
+    var assembly = (phase != null) ? assemblyFor(sample, phase) : null;
+    // Parental origin where the assembly is trio-phased.  Just under half of
+    // HPRC r2 is not: those are named hap1/hap2 and carry no parental meaning,
+    // so calling them maternal or paternal would be inventing information.
+    var names0 = window.pangenomeAssemblyNames || {};
+    var aName = (assembly && Object.prototype.hasOwnProperty.call(names0, assembly))
+        ? names0[assembly] : null;
+    var parent = null;
+    if (aName) {
+        var pm = /[._](pat|mat)([._]|$)/.exec(aName);
+        if (pm) parent = (pm[1] === "pat") ? "paternal" : "maternal";
+    }
+    var label = sample;
+    if (phase != null && phase !== "0")
+        label += " " + (parent ? parent : "hap" + phase);
+    if (contig)
+        label += " " + contig;
+    // The published assembly name, where we have one - it is what the rest of
+    // the browser calls this assembly, so it belongs in the tooltip.
+    // A couple of haplotypes (HG002) are published as a genome.ucsc.edu URL
+    // carrying a hub id rather than a portable db.  The URL is how we link to
+    // them, but it is not an assembly identifier, so keep a clean one for the
+    // TSV: hub_4837794_HG002v1.1.PAT -> HG002v1.1.PAT.
+    var assemblyId = assembly;
+    if (assembly && /^https?:/.test(assembly)) {
+        var dbm = /[?&]db=([^&]+)/.exec(assembly);
+        assemblyId = dbm ? decodeURIComponent(dbm[1]).replace(/^hub_\d+_/, "") : null;
+    }
+    return { sample: sample, phase: phase, contig: contig, parent: parent,
+             assembly: assembly, assemblyId: assemblyId,
+             assemblyName: aName, label: label };
+}
+
+// ---- Per-haplotype alignments as a PSL track --------------------------------
+
+// The server names an alignment's target in one of two ways when the path is a
+// subpath: "SAMPLE#PHASE#CONTIG#12345" or "GRCh38#0#chr9[12345]".  Either way
+// the trailing number is an offset the reported coordinates are relative to.
+function resolveAlignment(a) {
+    var full = String(a.haplotype || "");
+    var offset = 0;
+    var m = /^(.*)\[(\d+)\]$/.exec(full);
+    if (m) { full = m[1]; offset = parseInt(m[2], 10); }
+    var parts = full.split("#");
+    if (parts.length >= 4 && /^\d+$/.test(parts[3])) {
+        offset = parseInt(parts[3], 10);
+        parts = parts.slice(0, 3);
+    }
+    if (parts.length < 3) return null;
+    var hap = parts[0] + "#" + parts[1];
+    return { hap: hap, contig: parts[2], offset: offset,
+             assembly: assemblyFor(parts[0], parts[1]),
+             tStart: offset + a.target_start, tEnd: offset + a.target_end };
+}
+
+// Expand a CIGAR into PSL blocks.  M/=/X advance both sides, I the query only,
+// D/N the target only.
+function cigarBlocks(cigar, qStart, tStart) {
+    var re = /(\d+)([MIDNSHP=X])/g, m;
+    var q = qStart, t = tStart;
+    var sizes = [], qs = [], ts = [];
+    var qIns = 0, qInsBases = 0, tIns = 0, tInsBases = 0;
+    while ((m = re.exec(String(cigar || ""))) !== null) {
+        var n = parseInt(m[1], 10), op = m[2];
+        if (op === "M" || op === "=" || op === "X") {
+            sizes.push(n); qs.push(q); ts.push(t);
+            q += n; t += n;
+        } else if (op === "I") { qIns++; qInsBases += n; q += n; }
+        else if (op === "D" || op === "N") { tIns++; tInsBases += n; t += n; }
+        else if (op === "S" || op === "H") { q += n; }
+    }
+    return { sizes: sizes, qStarts: qs, tStarts: ts,
+             qNumInsert: qIns, qBaseInsert: qInsBases,
+             tNumInsert: tIns, tBaseInsert: tInsBases };
+}
+
+// One PSL line for one alignment.  Counts come from the server rather than
+// being guessed - it reports matches and mismatches per edit.
+function pslLine(a, qName, qSize, tName, tSize) {
+    var r = resolveAlignment(a);
+    if (!r) return null;
+    var b = cigarBlocks(a.cigar, a.query_start, r.tStart);
+    if (b.sizes.length === 0) return null;
+    var matches = (a.matches != null) ? a.matches : (a.query_end - a.query_start);
+    var misMatches = (a.mismatches != null) ? a.mismatches : 0;
+    return [matches, misMatches, 0, 0,
+            b.qNumInsert, b.qBaseInsert, b.tNumInsert, b.tBaseInsert,
+            (a.strand === "-" ? "-" : "+"),
+            qName, qSize, a.query_start, a.query_end,
+            tName, tSize, r.tStart, r.tEnd,
+            b.sizes.length,
+            b.sizes.join(",") + ",",
+            b.qStarts.join(",") + ",",
+            b.tStarts.join(",") + ","].join("\t");
+}
+
+// Identity per haplotype, keyed by the 2-field name the server echoes back in
+// "requested".  Only the handful of haplotypes an alignment was asked for have
+// one; the rest of the carrier list is coverage-only, by design.
+// Ask the mapping server where one sequence lands on one haplotype, and put the
+// answer in the "Position on assembly" section.  One surjection, on demand.
+function showOnHaplotype(seqName, pretty) {
+    if (!lastPayload) return;
+    var box = surjectBoxByName[seqName];
+    if (!box) return;
+    var seq = null;
+    (lastPayload.sequences || []).forEach(function (sq) {
+        if (sq.name === seqName) seq = sq;
+    });
+    if (seq === null) seq = (lastPayload.sequences || [])[0];
+    if (!seq) return;
+
+    var hap = pretty.sample + (pretty.phase == null ? "" : "#" + pretty.phase);
+    clear(box);
+    box.appendChild(el("div", { class: "pgSectionLabel", text: "Position on assembly" }));
+    box.appendChild(el("div", { class: "pgProgress" }, [
+        el("span", { class: "pgSpinner" }),
+        el("span", { text: "placing this sequence on " +
+                           pretty.label + "…" })
+    ]));
+
+    // Ask for the surjection against this haplotype, plus its alignment so we
+    // can report identity alongside the coordinates.
+    // Re-place the alignment the server already has, rather than mapping the
+    // read a second time.  The fast path can miss - the job's alignments are
+    // only held for a while - so fall through to a fresh map when it does.
+    var remap = function () {
+        var payload = { sequences: [{ name: seq.name, sequence: seq.sequence }],
+                        options: { surject: true, surject_target: hap } };
+        return api.submit(payload).then(function (resp) {
+            if (resp && resp.status === "error")
+                throw new Error(resp.error || "server error");
+            if (!resp || !resp.job_id) throw new Error("no job id in response");
+            return waitForJob(resp.job_id);
+        }).then(function (job) {
+            var r = (job.results || [])[0] || {};
+            return (r.alignments || [])[0] || {};
+        });
+    };
+
+    var fast = lastJobId
+        ? api.surject({ tgt: hap, job_id: lastJobId, name: seq.name, index: 0 })
+              .then(function (resp) {
+                  if (!resp || resp.status === "expired") return remap();
+                  if (resp.status === "error")
+                      throw new Error(resp.error || "server error");
+                  // Shaped like one alignment, so the renderer below is shared.
+                  return { surjection: resp.surjection };
+              })
+        : remap();
+
+    fast.then(function (a) {
+        // Same renderer as the original result, so the section looks the same
+        // however it was filled.
+        var fresh = renderSurjection(a.surjection, seqName);
+        clear(box);
+        while (fresh.firstChild) box.appendChild(fresh.firstChild);
+        box.appendChild(el("div", { class: "pgMuted",
+            text: "on " + pretty.label +
+                  (pretty.assemblyId ? " — " + pretty.assemblyId : "") }));
+    }).catch(function (err) {
+        clear(box);
+        box.appendChild(el("div", { class: "pgSectionLabel",
+            text: "Position on assembly" }));
+        box.appendChild(el("p", { class: "pgMuted",
+            text: "could not place it on " + pretty.label + ": " + err.message }));
+    });
+}
+
+// Poll a job to completion and hand back the finished job object.
+function waitForJob(jobId) {
+    return new Promise(function (resolve, reject) {
+        var tries = 0;
+        (function tick() {
+            api.poll(jobId).then(function (job) {
+                if (job.status === "error")
+                    return reject(new Error(job.error || "job failed"));
+                if (job.status === "done") return resolve(job);
+                if (++tries > 200) return reject(new Error("timed out"));
+                setTimeout(tick, POLL_INTERVAL);
+            }).catch(reject);
+        }());
+    });
+}
+
+function identityByHap(alignments) {
+    var out = Object.create(null);
+    (alignments || []).forEach(function (a) {
+        if (a && a.identity != null && a.requested)
+            out[String(a.requested).toLowerCase()] = a.identity;
+    });
+    return out;
+}
+
+function renderHaplotypes(seqName, hap, coverage, alignments) {
     var box = el("div", { class: "pgSection pgHaps" });
     if (!hap || !hap.names || hap.names.length === 0) {
-        box.appendChild(el("div", { class: "pgSectionLabel", text: "Haplotypes" }));
+        box.appendChild(el("div", { class: "pgSectionLabel", text: "Assemblies" }));
         box.appendChild(el("p", { class: "pgMuted", text: "none reported" }));
         return box;
     }
+    var rows = haplotypeRows(hap, coverage);
+    var scored = rows.filter(function (r) { return r.coverage != null; }).length;
     box.appendChild(el("div", { class: "pgSectionLabel", text:
-        "Haplotypes (" + hap.names.length + ")" }));
+        "Assemblies (" + hap.names.length + " carrying" +
+        (scored ? "; " + scored + " scored by coverage, best first" : "") + ")" }));
 
     // Representative.  Rendered as one plain-text run so a selection copies as
     // e.g. "CHM13#0#chr10 — representative, reference".
@@ -354,51 +643,92 @@ function renderHaplotypes(seqName, hap) {
         var role = hap.representative_is_reference
             ? " — representative, reference" : " — representative";
         box.appendChild(el("div", { class: "pgHapRep" }, [
-            el("span", { class: "pgHapName", text: hap.representative }),
+            el("span", { class: "pgHapName", text: prettyHap(hap.representative).label }),
             el("span", { class: "pgRepRole", text: role })
         ]));
     }
 
-    var others = hap.names.filter(function (n) { return n !== hap.representative; });
+    // The scrolling list is the answer, so it is always here rather than
+    // hidden behind an expander: what the user wants is the list.
+    var toolbar = el("div", { class: "pgHapToolbar" });
+    var search = el("input", { type: "search", placeholder: "filter assemblies…",
+                               class: "pgHapSearch" });
+    toolbar.appendChild(search);
+    toolbar.appendChild(downloadMenu(seqName, hap, rows, alignments));
+    box.appendChild(toolbar);
 
-    // Preview of the first few, comma-separated as real text so it copies cleanly.
-    if (others.length > 0) {
-        var shown = others.slice(0, HAP_PREVIEW).join(", ");
-        if (others.length > HAP_PREVIEW) shown += ", …";
-        box.appendChild(el("div", { class: "pgHapPreview", text: shown }));
-    }
-
-    // Expander with searchable full list + download.
-    if (others.length > HAP_PREVIEW) {
-        var det = el("details", { class: "pgHapMore" });
-        det.appendChild(el("summary", { text: (others.length - HAP_PREVIEW) + " more" }));
-
-        var toolbar = el("div", { class: "pgHapToolbar" });
-        var search = el("input", { type: "search", placeholder: "filter haplotypes…", class: "pgHapSearch" });
-        toolbar.appendChild(search);
-        toolbar.appendChild(downloadMenu(seqName, hap));
-        det.appendChild(toolbar);
-
-        var list = el("div", { class: "pgHapList" });
-        hap.names.forEach(function (n) {
-            list.appendChild(el("div", { class: "pgHapListRow", text: n }));
+    var list = el("div", { class: "pgHapList" });
+    rows.forEach(function (r) {
+        var pct = fmtCoverage(r);
+        var pretty = prettyHap(r.name);
+        // Clicking asks where this sequence lands on this haplotype, and the
+        // answer replaces the "Position on assembly" section above.
+        var nameNode = el("a", { class: "pgHapListName", href: "#",
+            title: "Where does " + (seqName || "this sequence") + " land on " +
+                   pretty.label +
+                   (pretty.assemblyId ? " (" + pretty.assemblyId + ")" : "") + "?",
+            text: pretty.label });
+        var row = el("div", { class: "pgHapListRow" }, [nameNode]);
+        nameNode.addEventListener("click", function (e) {
+            e.preventDefault();
+            showOnHaplotype(seqName, pretty);
         });
-        det.appendChild(list);
+        if (pct)
+            row.appendChild(el("span", { class: "pgHapListPct", text: pct,
+                title: (r.coveredBp != null ? r.coveredBp + " bp of the alignment" : "") +
+                       (r.isCarrier ? "" : " (shares part of the path, not all of it)") }));
+        else if (!r.isCarrier)
+            row.appendChild(el("span", { class: "pgHapListNote",
+                text: "no coverage reported",
+                title: "shares nodes with the read but does not carry its exact path" }));
+        list.appendChild(row);
+    });
+    box.appendChild(list);
 
-        search.addEventListener("input", function () {
-            var q = search.value.toLowerCase();
-            Array.prototype.forEach.call(list.children, function (row) {
-                row.style.display = row.textContent.toLowerCase().indexOf(q) >= 0 ? "" : "none";
-            });
+    search.addEventListener("input", function () {
+        var q = search.value.toLowerCase();
+        Array.prototype.forEach.call(list.children, function (row) {
+            row.style.display = row.textContent.toLowerCase().indexOf(q) >= 0 ? "" : "none";
         });
-        box.appendChild(det);
-    } else {
-        box.appendChild(downloadMenu(seqName, hap));
-    }
+    });
+
     return box;
 }
 
-function downloadMenu(seqName, hap) {
+// The haplotype table as a plain TSV: no leading "#" on the header (that breaks
+// standard readers), no PanSN, and coverage and identity as fractions rather
+// than percentages so they can be used arithmetically.
+//
+// fraction_identity is always a column so the shape is stable for downstream
+// tools, but it is only filled for haplotypes an alignment was computed for -
+// the rest of the carrier list is coverage-only, and a blank is honest where a
+// guess would not be.
+function haplotypeTsv(rows, alignments) {
+    var ident = identityByHap(alignments);
+    var out = ["assembly\tassembly_name\tsample\thaplotype\tparental_origin\t" +
+               "sequence\tfraction_coverage\tfraction_identity\tcovered_bases"];
+    (rows || []).forEach(function (r) {
+        var p = prettyHap(r.name);
+        out.push([p.assemblyId == null ? "" : p.assemblyId,
+                  p.assemblyName == null ? "" : p.assemblyName,
+                  p.sample,
+                  p.phase == null ? "" : p.phase,
+                  p.parent == null ? "" : p.parent,
+                  p.contig == null ? "" : p.contig,
+                  r.coverage == null ? "" : (r.coverage / 100),
+                  identOf(ident, p),
+                  r.coveredBp == null ? "" : r.coveredBp].join("\t"));
+    });
+    return out.join("\n") + "\n";
+}
+
+function identOf(ident, p) {
+    if (p.phase == null) return "";
+    var key = (p.sample + "#" + p.phase).toLowerCase();
+    return Object.prototype.hasOwnProperty.call(ident, key) ? ident[key] : "";
+}
+
+function downloadMenu(seqName, hap, rows, alignments) {
     var wrap = el("span", { class: "pgDownload" });
     var mkBtn = function (label, handler) {
         var b = el("button", { type: "button", class: "pgDlBtn", text: label });
@@ -406,19 +736,20 @@ function downloadMenu(seqName, hap) {
         return b;
     };
     // Copy the full list to the clipboard, one name per line.
-    wrap.appendChild(copyLink("copy names", function () { return hap.names.join("\n"); }));
+    // Readable names here too - PanSN is a storage convention and does not
+    // belong in anything a user reads or pastes.  The TSV carries the machine
+    // readable columns.
+    var labels = function () {
+        return (hap.names || []).map(function (n) { return prettyHap(n).label; }).join("\n");
+    };
+    wrap.appendChild(copyLink("copy names", labels));
     wrap.appendChild(mkBtn("names.txt", function () {
-        downloadText(seqName + ".haplotypes.txt", hap.names.join("\n") + "\n");
+        downloadText(seqName + ".haplotypes.txt", labels() + "\n");
     }));
     wrap.appendChild(mkBtn("TSV", function () {
-        var rows = ["#haplotype\trole"];
-        hap.names.forEach(function (n) {
-            var role = n === hap.representative
-                ? (hap.representative_is_reference ? "representative,reference" : "representative")
-                : "member";
-            rows.push(n + "\t" + role);
-        });
-        downloadText(seqName + ".haplotypes.tsv", rows.join("\n") + "\n", "text/tab-separated-values");
+        downloadText(seqName + ".haplotypes.tsv",
+                     haplotypeTsv(rows, alignments),
+                     "text/tab-separated-values");
     }));
     return wrap;
 }
@@ -426,7 +757,7 @@ function downloadMenu(seqName, hap) {
 function renderMosaic(qlen, segments) {
     var box = el("div", { class: "pgSection pgMosaic" });
     box.appendChild(el("div", { class: "pgSectionLabel", text:
-        "Mosaic — no single haplotype spans this read" }));
+        "Mosaic — no single assembly spans this read" }));
     if (!segments || segments.length === 0) return box;
 
     var total = segments.reduce(function (s, seg) { return s + (seg.covered_bp || 0); }, 0) ||
@@ -437,7 +768,7 @@ function renderMosaic(qlen, segments) {
         var cell = el("div", {
             class: "pgMosaicSeg pgMosaicSeg" + (i % 4),
             title: (seg.covered_bp || 0) + " bp · " + (seg.haplotype_count || 0) +
-                   " haplotypes · rep " + (seg.representative || "?")
+                   " assemblies · rep " + (seg.representative || "?")
         });
         cell.style.width = pct.toFixed(2) + "%";
         cell.appendChild(el("span", { class: "pgMosaicSegLabel",
@@ -450,8 +781,9 @@ function renderMosaic(qlen, segments) {
     segments.forEach(function (seg, i) {
         legend.appendChild(el("span", { class: "pgMosaicKey" }, [
             el("span", { class: "pgMosaicSwatch pgMosaicSeg" + (i % 4) }),
-            el("span", { text: (seg.representative || "?") + " — " +
-                (seg.covered_bp || 0) + " bp, " + (seg.haplotype_count || 0) + " hap" })
+            el("span", { text: (seg.representative
+                    ? prettyHap(seg.representative).label : "?") + " — " +
+                (seg.covered_bp || 0) + " bp, " + (seg.haplotype_count || 0) + " assemblies" })
         ]));
     });
     box.appendChild(legend);
@@ -461,9 +793,9 @@ function renderMosaic(qlen, segments) {
 var SURJECT_MSG = {
     unknown_path: "target haplotype path is unknown to the graph",
     incompatible: "read is not compatible with the target haplotype",
-    surjection_failed: "surjection failed",
+    surjection_failed: "could not place the alignment on that assembly",
     empty_input: "no alignment to surject",
-    path_not_indexed: "target haplotype is not indexed for surjection"
+    path_not_indexed: "that assembly is not indexed, so no position can be reported"
 };
 
 // Fallback for reference haplotypes, keyed by the lower-cased SAMPLE field of a
@@ -512,24 +844,47 @@ function cigarRefSpan(cigar) {
     return span;
 }
 
-// If the surjection target is a haplotype we can browse - any HPRC sample
-// haplotype as well as the references - return {db, url, isRemote} pointing
-// hgTracks at the surjected position; otherwise null.
-function refBrowserInfo(sj) {
+// Work out where a surjection actually lands.
+//
+// The reported position is relative to the path named in "target", which may be
+// a SUBPATH: a 4th "#<offset>" field means the coordinates are offset that far
+// into the contig.  So the number the middleware reports is not the contig
+// coordinate, and showing it raw next to a browser view of the same place is
+// what makes the two look like they disagree.
+//
+// Returns {hapContig, contig, start0, end, offset, sample, phase} - 0-based
+// half-open on the contig - or null when the target is not a usable path.
+function resolveSurjection(sj) {
     if (!sj || sj.status !== "ok" || sj.target == null || sj.position == null)
         return null;
     var parts = String(sj.target).split("#");           // PanSN: SAMPLE#PHASE#CONTIG
     if (parts.length < 3) return null;
-    var assembly = assemblyFor(parts[0], parts[1]);
-    if (!assembly) return null;
-    var contig = parts[2];
     var offset = 0;
     if (parts.length > 3) {                              // optional subpath offset suffix
         if (/^\d+$/.test(parts[3])) offset = parseInt(parts[3], 10);
         else return null;                               // unknown subpath form -> don't guess
     }
-    var start0 = offset + sj.position;                  // 0-based
-    var end = start0 + (cigarRefSpan(sj.cigar) || 1);
+    var start0 = offset + sj.position;
+    return { sample: parts[0], phase: parts[1], contig: parts[2],
+             hapContig: parts.slice(0, 3).join("#"),
+             offset: offset, start0: start0,
+             end: start0 + (cigarRefSpan(sj.cigar) || 1) };
+}
+
+// 1234567 -> "1,234,567"
+function withCommas(n) {
+    return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+// If the surjection target is a haplotype we can browse - any HPRC sample
+// haplotype as well as the references - return {db, url, isRemote} pointing
+// hgTracks at the surjected position; otherwise null.
+function refBrowserInfo(sj) {
+    var r = resolveSurjection(sj);
+    if (!r) return null;
+    var assembly = assemblyFor(r.sample, r.phase);
+    if (!assembly) return null;
+    var contig = r.contig, start0 = r.start0, end = r.end;
     var pos = contig + ":" + (start0 + 1) + "-" + end;   // hgTracks is 1-based
     var posParam = "position=" + encodeURIComponent(pos);
 
@@ -547,52 +902,146 @@ function refBrowserInfo(sj) {
              isRemote: false };
 }
 
-function renderSurjection(sj) {
+// The sequence the user submitted under this name, for handing to the browser.
+function queryFor(seqName) {
+    var out = null;
+    ((lastPayload && lastPayload.sequences) || []).forEach(function (sq) {
+        if (sq.name === seqName) out = sq.sequence;
+    });
+    return out;
+}
+
+function renderSurjection(sj, seqName) {
     var box = el("div", { class: "pgSection pgSurject" });
-    box.appendChild(el("div", { class: "pgSectionLabel", text: "Surjection" }));
+    box.appendChild(el("div", { class: "pgSectionLabel", text: "Position on assembly" }));
     if (!sj) {
-        // Distinguish "we never asked" from "we asked and the server had nothing
-        // to surject" (the middleware sends null rather than empty_input when a
-        // read did not align).
-        var asked = !!(lastPayload && lastPayload.options && lastPayload.options.surject);
+        // A position is always asked for now, so a missing one means the server
+        // had nothing to place - it sends null rather than empty_input when a
+        // read did not align.
         box.appendChild(el("p", { class: "pgMuted",
-            text: asked ? "no surjection returned for this alignment" : "not requested" }));
+            text: "could not be placed on the chosen assembly" }));
         return box;
     }
     if (sj.status !== "ok") {
         box.appendChild(el("div", { class: "pgSurjectBad" }, [
             el("span", { class: "pgBadge pgError", text: sj.status }),
             el("span", { class: "pgMuted", text: " " + (SURJECT_MSG[sj.status] || "") +
-                (sj.target ? " (target " + sj.target + ")" : "") })
+                (sj.target ? " (on " + prettyHap(sj.target).label + ")" : "") })
         ]));
         return box;
     }
+    var r = resolveSurjection(sj);
+    // Show where this lands on the contig, the way the browser will display it,
+    // rather than the raw path-relative number.
+    var posText = r
+        ? prettyHap(r.hapContig).label + " : " + withCommas(r.start0 + 1) + "-" +
+          withCommas(r.end) + " (" + (sj.strand || "?") + ")"
+        : prettyHap(sj.target).label + " : " + fmt(sj.position) +
+          " (" + (sj.strand || "?") + ")";
+    var posNode = el("code", { class: "pgSurjectPos", text: posText });
+    if (r && r.offset)
+        posNode.setAttribute("title",
+            "the server reports " + sj.position + " relative to subpath offset " +
+            withCommas(r.offset) + "; " + withCommas(r.start0 + 1) +
+            " is the position on " + r.contig);
+
     box.appendChild(el("div", { class: "pgSurjectOk" }, [
-        el("code", { class: "pgSurjectPos",
-            text: sj.target + " : " + fmt(sj.position) + " (" + (sj.strand || "?") + ")" }),
+        posNode,
+        // The surjected alignment's own score and MAPQ, stated only here: the
+        // graph alignment carries a different pair, and showing both under the
+        // same words made two correct numbers look like a contradiction.  The
+        // CIGAR stays out of the page - it is in the copied record and drives
+        // the track.
         el("span", { class: "pgSurjectMeta", text:
-            "CIGAR " + (sj.cigar || "?") + "  ·  score " + fmt(sj.score) +
-            "  ·  MAPQ " + fmt(sj.mapping_quality) }),
-        // Copy a tab-separated record: target, position, strand, cigar, score, mapq.
+            "score " + fmt(sj.score) + "  ·  MAPQ " + fmt(sj.mapping_quality) }),
+        // Copy a tab-separated record.  The resolved contig coordinates come
+        // first (what you would paste anywhere else), with the full target path
+        // kept for provenance.
         copyLink("copy", function () {
-            return [sj.target, sj.position, sj.strand, sj.cigar, sj.score, sj.mapping_quality]
-                .map(function (v) { return v == null ? "" : v; }).join("\t");
+            var p = prettyHap(r ? r.hapContig : sj.target);
+            var vals = r
+                ? [p.assemblyId, p.sample, p.phase, r.contig, r.start0 + 1, r.end,
+                   sj.strand, sj.cigar, sj.score, sj.mapping_quality]
+                : [p.assemblyId, p.sample, p.phase, p.contig, sj.position, "",
+                   sj.strand, sj.cigar, sj.score, sj.mapping_quality];
+            return vals.map(function (v) { return v == null ? "" : v; }).join("\t");
         })
     ]));
     // BLAT-style: link straight to this position in the Genome Browser, for any
     // haplotype we know an assembly for (HPRC samples as well as references).
     var ref = refBrowserInfo(sj);
     if (ref) {
-        var a = el("a", { href: ref.url,
-            title: "Show " + sj.target + " at this position in the UCSC Genome Browser" +
-                   " (assembly " + ref.db + ")",
-            text: "→ View in UCSC Genome Browser (" + ref.db + ")" });
-        if (ref.isRemote) {
-            // Only resolves on genome.ucsc.edu, so open it there in a new tab.
-            a.setAttribute("target", "_blank");
-            a.setAttribute("rel", "noopener");
-        }
-        box.appendChild(el("div", { class: "pgSurjectLink" }, [a]));
+        // The same three links hgBlat offers, in the same order and with the
+        // same wording, so this reads the way a browser user already expects.
+        var row = el("div", { class: "pgSurjectLinks" });
+        var note = el("span", { class: "pgMuted" });
+        var cache = null;               // {url, details} once fetched
+
+        // One request serves all three links: the first click prepares the
+        // track and the rest reuse it.
+        var withLinks = function (then) {
+            if (cache) { then(cache); return; }
+            var query = queryFor(seqName);
+            if (!query || ref.isRemote) {
+                // Nothing to draw, or an assembly only genome.ucsc.edu can
+                // resolve: fall back to the position alone.
+                cache = { url: ref.url, details: null };
+                then(cache);
+                return;
+            }
+            note.textContent = " preparing…";
+            api.alignTrack({ db: ref.db, contig: r.contig, name: seqName,
+                             sequence: query, cigar: sj.cigar,
+                             strand: sj.strand || "+", start: r.start0 })
+                .then(function (resp) {
+                    if (!resp || resp.status === "error" || !resp.url)
+                        throw new Error((resp && resp.error) || "no url");
+                    note.textContent = "";
+                    cache = resp;
+                    then(cache);
+                })
+                .catch(function () {
+                    note.textContent = "";
+                    cache = { url: ref.url, details: null };
+                    then(cache);
+                });
+        };
+
+        var mkLink = function (label, title, newTab, pick) {
+            // A real href, not "#": copying the link or opening it in a new
+            // window has to work.  It points at the position on its own; a
+            // plain click upgrades to the URL that carries the alignment.
+            var a = el("a", { href: ref.url, title: title });
+            a.appendChild(document.createTextNode(label));
+            if (newTab) {
+                a.setAttribute("target", "_blank");
+                a.setAttribute("rel", "noopener");
+            }
+            a.addEventListener("click", function (e) {
+                e.preventDefault();
+                withLinks(function (c) {
+                    var href = pick(c);
+                    if (!href) return;
+                    if (newTab) window.open(href, "_blank", "noopener");
+                    else window.location = href;
+                });
+            });
+            row.appendChild(a);
+            row.appendChild(document.createTextNode(" "));
+            return a;
+        };
+
+        mkLink("browser", "Open a Genome Browser showing this match", false,
+               function (c) { return c.url; });
+        var nt = mkLink("new tab",
+               "Open a Genome Browser with this alignment, but in a new " +
+               "internet browser tab", true, function (c) { return c.url; });
+        nt.appendChild(el("span", { class: "pgExtLink" }));
+        mkLink("details",
+               "Show query sequence, genome hit and sequence alignment", true,
+               function (c) { return c.details || c.url; });
+        row.appendChild(note);
+        box.appendChild(row);
     }
     return box;
 }
@@ -643,16 +1092,25 @@ function showProgress(completed, total) {
 
 var api = null;             // created in init(), after readConfig()
 var lastPayload = null;
+var lastJobId = null;       // replayed by cmd=surject instead of mapping again
+var surjectBoxByName = {};   // card name -> its "Position on assembly" section
 var pollTimer = null;
 
 function collectOptions() {
     var target = ($("pgSurjectTarget").value || "").trim();
     var mm = parseInt($("pgMaxMultimaps").value, 10);
-    return {
+    var opts = {
         max_multimaps: (mm && mm > 0) ? mm : MAX_MULTIMAPS,
-        surject: !!$("pgSurject").checked,
+        // Always on: there is no useful result without a position.
+        surject: true,
         surject_target: target === "" ? null : target
     };
+    // Coverage is reported for every haplotype sharing any part of the path -
+    // a few hundred per alignment.  A configured cutoff trims that at the
+    // source rather than shipping it all and throwing most of it away.
+    if (typeof CFG.minHapCoverage === "number")
+        opts.min_haplotype_coverage = CFG.minHapCoverage;
+    return opts;
 }
 
 function onSubmit() {
@@ -695,6 +1153,7 @@ function run() {
         // The proxy returns {status:"error",error} when it cannot reach the middleware.
         if (resp && resp.status === "error") throw new Error(resp.error || "server error");
         if (!resp || !resp.job_id) throw new Error("no job id in response");
+        lastJobId = resp.job_id;
         pollJob(resp.job_id, total);
     }).catch(function (err) {
         showFatal("Could not submit: " + err.message, run);
@@ -760,15 +1219,25 @@ function onClear() {
 
 // ---- Init -------------------------------------------------------------------
 
+function wireHelp() {
+    var link = document.getElementById("pgSurjectHelp");
+    var box = document.getElementById("pgSurjectHelpBox");
+    if (!link || !box) return;
+    link.addEventListener("click", function (e) {
+        e.preventDefault();
+        box.style.display = (box.style.display === "none") ? "" : "none";
+    });
+}
+
 function init() {
     resultsEl = $("pgResults");
     statusEl = $("pgStatus");
     if (!resultsEl) return;   // not our page
 
-    readConfig();             // window.pangenomeConfig is defined by now
+    readConfig();
+    wireHelp();             // window.pangenomeConfig is defined by now
     api = makeApi();
 
-    if (!SURJECT_DEFAULT && $("pgSurject")) $("pgSurject").checked = false;
 
     $("pgSubmit").addEventListener("click", onSubmit);
     $("pgClear").addEventListener("click", onClear);
@@ -798,6 +1267,14 @@ if (typeof module !== "undefined" && module.exports)
         fmt: fmt,
         readConfig: readConfig,
         renderResult: renderResult,
+        haplotypeRows: haplotypeRows,
+        resolveSurjection: resolveSurjection,
+        prettyHap: prettyHap,
+        resolveAlignment: resolveAlignment,
+        cigarBlocks: cigarBlocks,
+        pslLine: pslLine,
+        haplotypeTsv: haplotypeTsv,
+        showOnHaplotype: showOnHaplotype,
         init: init
     };
 

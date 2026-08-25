@@ -18,7 +18,7 @@ var t = require('./testLib.js');
 var loader = require('./loadClient.js');
 
 var PAGE_IDS = ['pgResults', 'pgStatus', 'pgSeq', 'pgSurjectTarget', 'pgMaxMultimaps',
-                'pgSurject', 'pgSubmit', 'pgClear', 'pgFile'];
+                'pgSubmit', 'pgClear', 'pgFile'];
 
 // ---------------------------------------------------------------- fixtures
 
@@ -100,12 +100,12 @@ t.test('a mapped sequence shows name, status, score, MAPQ and strand', function 
 
 t.test('the summary states how many haplotypes carry the read', function () {
     var c = renderOne(result());
-    t.contains(text(c), 'carried by 12 haplotypes (representative: CHM13#0#chr10)', 'summary line');
+    t.contains(text(c), 'carried by 12 assemblies (representative: CHM13 chr10)', 'summary line');
 });
 
 t.test('a single carrying haplotype is not pluralized', function () {
     var c = renderOne(result({ alignments: [aln({ haplotypes: hap({ count: 1 }) })] }));
-    t.contains(text(c), 'carried by 1 haplotype (', 'singular');
+    t.contains(text(c), 'carried by 1 assembly (', 'singular');
 });
 
 t.test('an unmapped sequence says so and shows no coordinates', function () {
@@ -133,7 +133,8 @@ t.test('a mapped result with no alignments degrades gracefully', function () {
 });
 
 t.test('missing score/MAPQ render as a dash rather than blank or null', function () {
-    var c = renderOne(result({ alignments: [aln({ score: null, mapping_quality: null })] }));
+    var c = renderOne(result({ alignments: [aln({ surjection:
+        surj({ score: null, mapping_quality: null }) })] }));
     var s = text(c);
     t.contains(s, 'score —', 'score dash');
     t.contains(s, 'MAPQ —', 'mapq dash');
@@ -142,49 +143,149 @@ t.test('missing score/MAPQ render as a dash rather than blank or null', function
 
 // ================================================================== haplotypes
 
+t.suite('per-haplotype alignments');
+
+t.test('the map request does not ask for per-haplotype alignments', function () {
+    // each one is a surjection on the server, the slowest stage per read, and
+    // the identity they carry is not worth that on every submit
+    var c = startWithFetch({ submit: { job_id: 'j', status: 'queued' }, poll: [] });
+    var payload = JSON.parse(decodeURIComponent(
+        c.calls[0].opts.body.split('payload=')[1]));
+    t.notOk('alignments_top' in payload.options, 'no alignments_top');
+    t.notOk('alignments_for' in payload.options, 'no alignments_for');
+});
+
+
+t.test('clicking a haplotype targets the existing position section', function () {
+    // the answer belongs in "Position on haplotype", not printed into the
+    // scrolling list, so the section has to be reachable after render
+    var c = renderOne(result());
+    t.eq(typeof c.api.showOnHaplotype, 'function', 'the action exists');
+    t.contains(text(c), 'Position on assembly', 'and the section it fills is present');
+});
+
+
+t.test('a haplotype published only as a hub URL still yields a clean assembly id',
+       function () {
+    // HG002 is listed as a genome.ucsc.edu URL carrying a per-server hub id.
+    // That is how we link to it, but it is not an assembly identifier, and it
+    // must not end up in the TSV as a URL.
+    var c = loader.load({ ids: PAGE_IDS, readyState: 'loading' });
+    var p = c.api.prettyHap('HG002#1#chr1');
+    t.eq(p.assemblyId, 'HG002v1.1.PAT', 'hub_<id>_ stripped, no URL');
+    t.ok(/^https?:/.test(p.assembly), 'the URL is still there for linking');
+    var tsv = c.api.haplotypeTsv(
+        [{ name: 'HG002#1#chr1', coverage: 9, coveredBp: 222, isCarrier: false }], []);
+    t.notOk(/https?:/.test(tsv), 'no URL anywhere in the TSV');
+    t.contains(tsv, 'HG002v1.1.PAT', 'the assembly id instead');
+});
+
+
+t.test('the alignments section is not rendered on the page', function () {
+    // heavily soft-clipped alignments read as if they were full-length hits
+    // next to an unclipped one, so the section was removed; the PSL builders
+    // stay because the identity they carry still feeds the TSV
+    var c = renderOne(result({ alignments: [aln({})] }));
+    t.notOk(/Alignments/.test(text(c)), 'no Alignments heading');
+});
+
+
+t.test('a subpath offset written as #N is applied', function () {
+    var c = loader.load({ ids: PAGE_IDS, readyState: 'loading' });
+    var r = c.api.resolveAlignment({ haplotype: 'HG00097#1#CM094065.1#131188231',
+        target_start: 181, target_end: 481 });
+    t.eq(r.contig, 'CM094065.1', 'contig without the offset field');
+    t.eq(r.tStart, 131188412, 'offset added to the reported start');
+});
+
+t.test('a subpath offset written as [N] is applied too', function () {
+    // the server uses both spellings depending on the path
+    var c = loader.load({ ids: PAGE_IDS, readyState: 'loading' });
+    var r = c.api.resolveAlignment({ haplotype: 'GRCh38#0#chr9[68220865]',
+        target_start: 65025552, target_end: 65025852 });
+    t.eq(r.contig, 'chr9', 'bracket stripped');
+    t.eq(r.tStart, 133246417, 'offset added');
+});
+
+t.test('a gapped CIGAR becomes real PSL blocks', function () {
+    var c = loader.load({ ids: PAGE_IDS, readyState: 'loading' });
+    var line = c.api.pslLine({ haplotype: 'GRCh38#0#chr9', strand: '+',
+        query_start: 0, query_end: 300, target_start: 1000, target_end: 1305,
+        cigar: '150M5D150M', matches: 298, mismatches: 2 },
+        'r1', 300, 'chr9', 138394717);
+    var f = line.split('\t');
+    t.eq(f[0], '298', 'match count comes from the server, not a guess');
+    t.eq(f[1], '2', 'and so does the mismatch count');
+    t.eq(f[6], '1', 'one target-side insert');
+    t.eq(f[7], '5', 'of five bases');
+    t.eq(f[17], '2', 'two blocks');
+    t.eq(f[18], '150,150,', 'block sizes');
+});
+
 t.suite('haplotype presentation');
+
+t.test('a trio-phased haplotype is named by parental origin', function () {
+    var c = loader.load({ ids: PAGE_IDS, readyState: 'loading' });
+    t.eq(c.api.prettyHap('HG00408#1#CM0001.1').label,
+         'HG00408 paternal CM0001.1', 'paternal, not hap1');
+    t.eq(c.api.prettyHap('HG00408#2#CM0001.1').label,
+         'HG00408 maternal CM0001.1', 'and maternal for the other');
+});
+
+t.test('an unphased haplotype keeps hap1/hap2 rather than inventing a parent',
+       function () {
+    // just under half of HPRC r2 has no trio data - those really are only
+    // hap1 and hap2, and calling one of them maternal would be made up
+    var c = loader.load({ ids: PAGE_IDS, readyState: 'loading' });
+    t.eq(c.api.prettyHap('HG00235#1#CM0002.1').label,
+         'HG00235 hap1 CM0002.1', 'left as hap1');
+});
+
 
 t.test('the representative is labelled, and flagged when it is a reference', function () {
     var c = renderOne(result());
     var s = text(c);
-    t.contains(s, 'CHM13#0#chr10 — representative, reference', 'labelled inline as copyable text');
+    t.contains(s, 'CHM13 chr10 — representative, reference', 'labelled inline as copyable text');
 });
 
 t.test('a non-reference representative is not flagged as reference', function () {
     var c = renderOne(result({ alignments: [aln({ haplotypes: hap({
         representative: 'HG00097#1#CM094066.1', representative_is_reference: false }) })] }));
     var s = text(c);
-    t.contains(s, 'HG00097#1#CM094066.1 — representative', 'labelled');
+    t.contains(s, 'HG00097 hap1 CM094066.1 — representative', 'labelled');
     t.notOk(/representative, reference/.test(s), 'not called a reference');
 });
 
-t.test('non-representative haplotypes are listed comma-separated (so a selection copies cleanly)', function () {
+t.test('every haplotype is in the list, with no comma-run summary above it', function () {
     var c = renderOne(result());
-    var preview = byClass(c, 'pgHapPreview');
-    t.eq(preview.length, 1, 'one preview block');
-    t.contains(preview[0].textContent, 'GRCh38#0#chr10, HG00097#1#CM094066.1', 'comma separated');
+    t.eq(byClass(c, 'pgHapPreview').length, 0, 'no preview block');
+    var rows = byClass(c, 'pgHapListRow');
+    t.eq(rows.length, 3, 'all three names as rows');
+    t.contains(text(c), 'HG00097 hap1 CM094066.1', 'and they are the readable names');
 });
 
-t.test('a short list has no expander', function () {
+t.test('the list is there even for a short result, not behind an expander',
+       function () {
     var c = renderOne(result());
-    t.eq(byClass(c, 'pgHapMore').length, 0, 'no "N more" expander for 3 names');
+    t.eq(byClass(c, 'pgHapMore').length, 0, 'no expander');
+    t.eq(byClass(c, 'pgHapList').length, 1, 'the list itself is present');
+    t.eq(byClass(c, 'pgHapSearch').length, 1, 'and so is the filter');
 });
 
-t.test('a long list gets a searchable expander with every name', function () {
+t.test('a long list is all rows, filterable', function () {
     var many = [];
     for (var i = 0; i < 40; i++) many.push('HG' + (10000 + i) + '#1#chr10');
     many[0] = 'CHM13#0#chr10';
     var c = renderOne(result({ alignments: [aln({ haplotypes:
         hap({ count: 40, names: many }) })] }));
-    t.eq(byClass(c, 'pgHapMore').length, 1, 'expander present');
     var rows = byClass(c, 'pgHapListRow');
-    t.eq(rows.length, 40, 'all 40 names in the full list');
+    t.eq(rows.length, 40, 'all 40 names in the list');
     t.eq(byClass(c, 'pgHapSearch').length, 1, 'search box present');
 });
 
 t.test('the haplotype count in the label matches the names given', function () {
     var c = renderOne(result());
-    t.contains(text(c), 'Haplotypes (3)', 'label counts names');
+    t.contains(text(c), 'Assemblies (3 carrying', 'label counts carriers');
 });
 
 t.test('no haplotypes reported is stated, not left blank', function () {
@@ -198,23 +299,35 @@ t.test('no haplotypes reported is stated, not left blank', function () {
 
 t.suite('surjection - success');
 
-t.test('an ok surjection shows target, 0-based position, strand, CIGAR and scores', function () {
+t.test('an ok surjection shows position, strand and scores, but not the CIGAR', function () {
     var c = renderOne(result());
     var s = text(c);
-    t.contains(s, 'CHM13#0#chr10 : 4338779 (+)', 'target : position (strand)');
-    t.contains(s, 'CIGAR 20M', 'cigar');
+    t.contains(s, 'CHM13 chr10 : 4,338,780-4,338,799 (+)',
+               'resolved 1-based range, as the browser shows it');
+    t.notOk(/CIGAR/.test(s), 'the CIGAR is not put in front of the user');
     t.contains(s, 'score 290', 'score');
 });
 
 t.test('position 0 is displayed as a coordinate, not as missing', function () {
     var c = renderOne(result({ alignments: [aln({ surjection: surj({ position: 0 }) })] }));
-    t.contains(text(c), ': 0 (+)', 'zero shown');
+    t.contains(text(c), ': 1-20 (+)', 'position 0 becomes base 1, not a dash');
 });
 
 t.test('MAPQ 0 is displayed as 0, not as a dash', function () {
+    // on the position line, the only place score and MAPQ are shown
     var c = renderOne(result({ alignments: [aln({ surjection:
         surj({ mapping_quality: 0 }) })] }));
     t.contains(text(c), 'MAPQ 0', 'zero mapq');
+});
+
+t.test('score and MAPQ are stated once, and are the surjected ones', function () {
+    var c = renderOne(result({ alignments: [aln({ score: 5620, mapping_quality: 7,
+        surjection: surj({ score: 3062, mapping_quality: 9 }) })] }));
+    var s = text(c);
+    t.contains(s, 'score 3062', "the surjected alignment's score");
+    t.contains(s, 'MAPQ 9', 'and its MAPQ');
+    t.notOk(/score 5620/.test(s), "not the graph alignment's as well");
+    t.notOk(/MAPQ 7/.test(s), 'nor its MAPQ');
 });
 
 t.suite('surjection - failure modes');
@@ -222,9 +335,9 @@ t.suite('surjection - failure modes');
 var FAIL_STATES = {
     unknown_path: 'target haplotype path is unknown',
     incompatible: 'not compatible with the target haplotype',
-    surjection_failed: 'surjection failed',
+    surjection_failed: 'could not place the alignment',
     empty_input: 'no alignment to surject',
-    path_not_indexed: 'not indexed for surjection'
+    path_not_indexed: 'not indexed, so no position can be reported'
 };
 
 Object.keys(FAIL_STATES).forEach(function (state) {
@@ -239,9 +352,11 @@ Object.keys(FAIL_STATES).forEach(function (state) {
     });
 });
 
-t.test('an omitted surjection block says it was not requested', function () {
+t.test('an omitted surjection block says it could not be placed', function () {
+    // a position is always requested now, so "not requested" cannot happen
     var c = renderOne(result({ alignments: [aln({ surjection: null })] }));
-    t.contains(text(c), 'not requested', 'stated when surjection was never asked for');
+    t.contains(text(c), 'could not be placed', 'reports the real reason');
+    t.notOk(/not requested/.test(text(c)), 'never claims it was not asked for');
 });
 
 t.test('a null surjection after asking for one is not mislabelled "not requested"', function () {
@@ -255,13 +370,55 @@ t.test('a null surjection after asking for one is not mislabelled "not requested
         } });
     c.window.pangenomeConfig = { useMock: false, transport: 'job', pollIntervalMs: 5 };
     c.fireReady();
-    c.el.pgSurject.checked = true;
     c.el.pgSeq.value = '>r1\nACGTACGTACGT';
     c.el.pgSubmit.dispatch('click');          // records what we asked for
     c.api.renderResult(result({ alignments: [aln({ surjection: null })] }));
     var s = c.el.pgResults.textContent.replace(/\s+/g, ' ');
-    t.contains(s, 'no surjection returned', 'accurate wording');
+    t.contains(s, 'could not be placed on the chosen assembly', 'accurate wording');
     t.notOk(/not requested/.test(s), 'does not claim it was not requested');
+});
+
+
+t.suite('subpath offsets (the reported position is not the contig position)');
+
+function subSurj(over) {
+    // the real shape seen from the middleware: a 4th "#<offset>" field
+    var s = { status: 'ok', target: 'HG00235#2#CM094400.1#5127644', position: 795,
+              strand: '+', cigar: '3451M', score: 3461, mapping_quality: 20 };
+    Object.keys(over || {}).forEach(function (k) { s[k] = over[k]; });
+    return s;
+}
+
+t.test('the offset is added to the reported position', function () {
+    var c = renderOne(result());
+    var r = c.api.resolveSurjection(subSurj());
+    t.eq(r.contig, 'CM094400.1', 'contig');
+    t.eq(r.offset, 5127644, 'offset picked up');
+    t.eq(r.start0, 5128439, 'offset + position, still 0-based');
+    t.eq(r.end, 5131890, 'plus the CIGAR span');
+});
+
+t.test('the page shows the contig coordinate, matching the browser', function () {
+    var c = renderOne(result({ alignments: [aln({ surjection: subSurj() })] }));
+    var s = text(c);
+    // this is exactly what hgTracks displayed for the same result
+    t.contains(s, 'HG00235 hap2 CM094400.1 : 5,128,440-5,131,890 (+)', 'resolved and comma-formatted');
+    t.notOk(/: 795 /.test(s), 'the raw path-relative number is not shown as a coordinate');
+});
+
+t.test('the raw value stays available for anyone who needs it', function () {
+    var c = renderOne(result({ alignments: [aln({ surjection: subSurj() })] }));
+    var pos = byClass(c, 'pgSurjectPos')[0];
+    t.contains(pos.getAttribute('title'), 'reports 795', 'raw position in the tooltip');
+    t.contains(pos.getAttribute('title'), 'subpath offset 5,127,644', 'and the offset');
+});
+
+t.test('the browser link and the displayed coordinate agree', function () {
+    var c = renderOne(result({ alignments: [aln({ surjection: subSurj() })] }));
+    var l = links(c);
+    t.eq(l.length, 3, 'browser, new tab and details');
+    t.contains(l[0].getAttribute('href'), 'position=CM094400.1%3A5128440-5131890',
+               'same numbers as the line above it');
 });
 
 // ============================================================== browser links
@@ -271,11 +428,14 @@ t.suite('Genome Browser links');
 t.test('a CHM13 surjection links to hs1 at the converted coordinate', function () {
     var c = renderOne(result());
     var l = links(c);
-    t.eq(l.length, 1, 'one link');
+    t.eq(l.length, 3, 'browser, new tab and details');
+    t.deepEq(l.map(function (a) { return a.textContent.trim(); }),
+             ['browser', 'new tab', 'details'], "hgBlat's own labels, in order");
+    t.notOk(/blat/i.test(text(c)), 'and the word blat appears nowhere');
     t.contains(l[0].getAttribute('href'), 'db=hs1', 'assembly');
     // 0-based 4338779 -> 1-based 4338780; 20M -> end 4338799
     t.contains(l[0].getAttribute('href'), 'position=chr10%3A4338780-4338799', 'locus');
-    t.contains(l[0].textContent, 'UCSC Genome Browser', 'link text');
+    t.eq(l[1].getAttribute('target'), '_blank', 'the middle one opens a tab');
 });
 
 t.test('a GRCh38 surjection links to hg38', function () {
@@ -289,20 +449,20 @@ t.test('an HPRC sample-haplotype surjection links to its own assembly', function
     var c = renderOne(result({ alignments: [aln({ surjection:
         surj({ target: 'HG00097#1#CM094066.1', position: 19113, cigar: '24M' }) })] }));
     var l = links(c);
-    t.eq(l.length, 1, 'one link');
+    t.eq(l.length, 3, 'browser, new tab and details');
     t.contains(l[0].getAttribute('href'), 'db=GCA_044165215.1', 'sample assembly');
     t.contains(l[0].getAttribute('href'), 'position=CM094066.1%3A19114-19137', 'locus');
-    t.contains(l[0].textContent, 'GCA_044165215.1', 'assembly named in the link text');
+    t.eq(l[0].textContent.trim(), 'browser', 'plain label, no assembly in it');
 });
 
 t.test('a hub-only assembly opens on genome.ucsc.edu in a new tab', function () {
     var c = renderOne(result({ alignments: [aln({ surjection:
         surj({ target: 'HG002#1#chr1', position: 100, cigar: '50M' }) })] }));
     var l = links(c);
-    t.eq(l.length, 1, 'one link');
+    t.eq(l.length, 3, 'browser, new tab and details');
     t.contains(l[0].getAttribute('href'), 'https://genome.ucsc.edu', 'absolute url');
-    t.eq(l[0].getAttribute('target'), '_blank', 'opens in a new tab');
-    t.eq(l[0].getAttribute('rel'), 'noopener', 'safe rel');
+    t.eq(l[1].getAttribute('target'), '_blank', 'opens in a new tab');
+    t.eq(l[1].getAttribute('rel'), 'noopener', 'safe rel');
 });
 
 t.test('a haplotype absent from the HPRC table gets no link', function () {
@@ -333,7 +493,7 @@ t.test('num_segments = 1 shows no mosaic bar', function () {
 t.test('num_segments > 1 shows the bar and explains what it means', function () {
     var c = renderOne(mosaicResult());
     t.eq(byClass(c, 'pgMosaicBar').length, 1, 'bar present');
-    t.contains(text(c), 'no single haplotype spans this read', 'explanation');
+    t.contains(text(c), 'no single assembly spans this read', 'explanation');
 });
 
 t.test('one segment is drawn per mosaic entry, labelled with its bp span', function () {
@@ -361,8 +521,109 @@ t.test('segment widths are proportional to covered_bp', function () {
 t.test('each segment names its representative and haplotype count', function () {
     var c = renderOne(mosaicResult());
     var s = text(c);
-    t.contains(s, 'CHM13#0#chr10 — 1500 bp, 6 hap', 'segment 1 legend');
-    t.contains(s, 'HG01234#2#CM0987.1 — 1000 bp, 9 hap', 'segment 2 legend');
+    t.contains(s, 'CHM13 chr10 — 1500 bp, 6 assemblies', 'segment 1 legend');
+    t.contains(s, 'HG01234 hap2 CM0987.1 — 1000 bp, 9 assemblies', 'segment 2 legend');
+});
+
+
+t.suite('coverage cutoff in the request');
+
+t.test('no cutoff is sent unless one is configured', function () {
+    var c = startWithFetch({ submit: { job_id: 'j', status: 'queued' }, poll: [] });
+    var payload = JSON.parse(decodeURIComponent(
+        c.calls[0].opts.body.split('payload=')[1]));
+    t.notOk('min_haplotype_coverage' in payload.options,
+            'middleware default is left alone');
+});
+
+t.test('a configured cutoff is sent, so the payload is trimmed at the source', function () {
+    var c = startWithFetch({ submit: { job_id: 'j', status: 'queued' }, poll: [] },
+                           { useMock: false, transport: 'job', pollIntervalMs: 5,
+                             minHapCoverage: 50 });
+    var payload = JSON.parse(decodeURIComponent(
+        c.calls[0].opts.body.split('payload=')[1]));
+    t.eq(payload.options.min_haplotype_coverage, 50, 'cutoff forwarded');
+});
+
+// ====================================================== coverage-ordered list
+
+t.suite('haplotypes ordered by coverage');
+
+var COV = [
+    { haplotype: 'HG01234#2', coverage: 41.2, covered_bp: 1422 },
+    { haplotype: 'CHM13#0', coverage: 100.0, covered_bp: 3451 },
+    { haplotype: 'GRCh38#0', coverage: 99.8, covered_bp: 3444 },
+    { haplotype: 'HG00097#1', coverage: 100.0, covered_bp: 3451 }
+];
+
+function rowsFor(coverage, names) {
+    var c = loader.load({ ids: PAGE_IDS, readyState: 'loading' });
+    c.window.pangenomeConfig = { useMock: true };
+    c.fireReady();
+    return c.api.haplotypeRows({ names: names || [], representative: null }, coverage);
+}
+
+t.test('rows come back best-covered first, regardless of input order', function () {
+    var r = rowsFor(COV);
+    t.deepEq(r.map(function (x) { return x.name; }),
+             ['CHM13#0', 'HG00097#1', 'GRCh38#0', 'HG01234#2'],
+             '100s first, then 99.8, then 41.2');
+});
+
+t.test('ties are broken by name so the order is stable', function () {
+    var r = rowsFor(COV);
+    t.eq(r[0].name, 'CHM13#0', 'first of the two 100% entries');
+    t.eq(r[1].name, 'HG00097#1', 'second');
+});
+
+t.test('exact carriers are marked, near misses are not', function () {
+    // GRCh38 matches at 99.8% but does not carry the read's exact path, so it
+    // is absent from the carrier list - the case the new field exists for.
+    var r = rowsFor(COV, ['CHM13#0#chr10', 'HG00097#1#CM094066.1']);
+    var byName = {};
+    r.forEach(function (x) { byName[x.name] = x; });
+    // a carrier keeps its own full name (which names the contig); a haplotype
+    // known only from coverage is shown by its 2-field name
+    t.ok(byName['CHM13#0#chr10'].isCarrier, 'CHM13 carries it');
+    t.ok(byName['HG00097#1#CM094066.1'].isCarrier, 'HG00097 carries it');
+    t.notOk(byName['GRCh38#0'].isCarrier, 'GRCh38 is a partial match only');
+});
+
+t.test('a 3-field carrier name matches its 2-field coverage entry', function () {
+    var r = rowsFor([{ haplotype: 'CHM13#0', coverage: 100, covered_bp: 10 }],
+                    ['CHM13#0#chr10']);
+    t.eq(r.length, 1, 'one row, not two');
+    t.eq(r[0].name, 'CHM13#0#chr10', 'shown with the contig the carrier list gave');
+    t.eq(r[0].coverage, 100, 'scored');
+    t.ok(r[0].isCarrier, 'and recognized as the carrier');
+});
+
+t.test('carriers the coverage list omits still appear, after the scored ones', function () {
+    var r = rowsFor([{ haplotype: 'CHM13#0', coverage: 100, covered_bp: 10 }],
+                    ['CHM13#0#chr10', 'HG09999#1#chrX']);
+    t.eq(r.length, 2, 'both present');
+    t.eq(r[0].name, 'CHM13#0#chr10', 'scored one first');
+    t.isNull(r[1].coverage, 'unscored');
+});
+
+t.test('an engine without the field falls back to the carrier list', function () {
+    var r = rowsFor([], ['CHM13#0#chr10', 'HG00097#1#CM094066.1']);
+    t.eq(r.length, 2, 'still listed');
+    t.ok(r.every(function (x) { return x.coverage === null && x.isCarrier; }),
+         'no scores, all carriers');
+});
+
+t.test('the rendered list shows percentages, best first', function () {
+    var c = renderOne(result({ alignments: [aln({
+        haplotypes: hap({ count: 2, names: ['CHM13#0#chr10', 'HG00097#1#CM094066.1'],
+                          representative: null }),
+        haplotype_coverage: COV })] }));
+    var s = text(c);
+    t.contains(s, 'CHM13 chr10100%', 'top entry with its percentage');
+    t.contains(s, 'GRCh3899.8%', 'one decimal kept');
+    t.ok(s.indexOf('CHM13 chr10100%') < s.indexOf('HG01234 hap241.2%'),
+         'ordered by coverage in the output');
+    t.contains(s, 'scored by coverage, best first', 'the label says so');
 });
 
 // ======================================================== other placements
@@ -386,7 +647,8 @@ t.test('the primary alignment is shown first even when returned out of order', f
         aln({ primary: false, score: 111, surjection: surj({ position: 999 }) }),
         aln({ primary: true, score: 290, surjection: surj({ position: 4338779 }) })] }));
     var s = text(c);
-    t.ok(s.indexOf('4338779') < s.indexOf('999'), 'primary rendered before the secondary');
+    t.ok(s.indexOf('4,338,780') < s.indexOf('1,000-1,019'),
+         'primary rendered before the secondary');
 });
 
 // ================================================== copy and download text
@@ -401,14 +663,15 @@ t.test('a copy link is offered for the surjection record', function () {
 t.test('copying the surjection yields a tab-separated record', function () {
     var c = renderOne(result());
     buttons(c, 'copy')[0].dispatch('click');
-    t.eq(c.document.copiedText, ['CHM13#0#chr10', 4338779, '+', '20M', 290, 60].join('\t'),
-         'target, position, strand, cigar, score, mapq');
+    t.eq(c.document.copiedText,
+         ['hs1', 'CHM13', '0', 'chr10', 4338780, 4338799, '+', '20M', 290, 60].join('\t'),
+         'assembly, sample, haplotype and contig - no PanSN');
 });
 
 t.test('copying the haplotype list yields one name per line', function () {
     var c = renderOne(result());
     buttons(c, 'copy names')[0].dispatch('click');
-    t.eq(c.document.copiedText, 'CHM13#0#chr10\nGRCh38#0#chr10\nHG00097#1#CM094066.1',
+    t.eq(c.document.copiedText, 'CHM13 chr10\nGRCh38 chr10\nHG00097 hap1 CM094066.1',
          'newline separated, representative first');
 });
 
@@ -495,7 +758,8 @@ setTimeout(function () {
 
     t.test('the finished result is rendered and progress cleared', function () {
         t.contains(text(jobPage), 'r1', 'result rendered');
-        t.contains(text(jobPage), 'CHM13#0#chr10 : 4338779 (+)', 'surjection rendered');
+        t.contains(text(jobPage), 'CHM13 chr10 : 4,338,780-4,338,799 (+)',
+                   'surjection rendered');
         t.eq(jobPage.el.pgStatus.style.display, 'none', 'progress hidden');
     });
 
@@ -520,7 +784,8 @@ setTimeout(function () {
         });
 
         t.test('the same renderer output is produced for both transports', function () {
-            t.contains(text(syncPage), 'CHM13#0#chr10 : 4338779 (+)', 'surjection rendered');
+            t.contains(text(syncPage), 'CHM13 chr10 : 4,338,780-4,338,799 (+)',
+                       'surjection rendered');
         });
 
         // ---- partial failure ----
@@ -546,7 +811,7 @@ setTimeout(function () {
             });
 
             t.test('the successful result still shows its coordinate', function () {
-                t.contains(text(mixed), '4338779', 'coordinate present');
+                t.contains(text(mixed), '4,338,780', 'coordinate present');
             });
 
             // ---- server-side error envelope ----

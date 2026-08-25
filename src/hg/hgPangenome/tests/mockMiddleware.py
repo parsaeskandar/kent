@@ -67,6 +67,21 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get('Content-Length') or 0)
         body = self.rfile.read(n).decode('utf-8', 'replace') if n else ''
         self._capture(body)
+        if self.path.endswith('/liftover/targets'):
+            # Which haplotypes contain this region.  Deliberately lower-cased,
+            # as the published contract shows, so the client is exercised
+            # against names that differ from /api/v1/haplotypes.
+            self._respond(json.dumps({'haplotypes': ['chm13#0', 'hg01234#2']}))
+            return
+        if self.path.endswith('/liftover'):
+            # Coordinate translation: 0..N intervals, each naming its full
+            # 3-field contig path, 0-based half-open, with a real strand.
+            self._respond(json.dumps({'intervals': [
+                {'haplotype': 'HG01234#2#CM0987.1',
+                 'start': 20551, 'end': 20575, 'strand': '+'},
+                {'haplotype': 'HG01234#2#CM0988.1',
+                 'start': 400, 'end': 410, 'strand': '-'}]}))
+            return
         n_seqs = 0
         try:
             n_seqs = len(json.loads(body).get('sequences', []))
@@ -77,6 +92,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._capture(None)
+        if self.path.endswith('/haplotypes'):
+            self._respond(json.dumps({'haplotypes':
+                ['grch38#0', 'chm13#0', 'hg00097#1', 'hg00097#2']}))
+            return
         job_id = self.path.rsplit('/', 1)[-1]
         self._respond(json.dumps({
             'job_id': job_id, 'status': 'done',

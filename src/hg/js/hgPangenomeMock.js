@@ -38,6 +38,14 @@ function cleanResult(name, qlen) {
                 coverage_percent: 100,
                 num_segments: 1
             },
+            haplotype_coverage: [
+                { haplotype: "CHM13#0", coverage: 100.0, covered_bp: qlen },
+                { haplotype: "HG00097#1", coverage: 100.0, covered_bp: qlen },
+                { haplotype: "GRCh38#0", coverage: 99.8,
+                  covered_bp: Math.round(qlen * 0.998) },
+                { haplotype: "HG01234#2", coverage: 41.2,
+                  covered_bp: Math.round(qlen * 0.412) }
+            ],
             surjection: {
                 status: "ok",
                 target: "CHM13#0#chr10",
@@ -167,6 +175,19 @@ PangenomeMock.prototype.submit = function (payload) {
     job.timer = window.setTimeout(step, 400);
 
     return Promise.resolve({ job_id: jobId, status: "queued", n_sequences: seqs.length });
+};
+
+// The mock cannot write files, so it reports that plainly rather than
+// pretending; the caller falls back to the position-only jump.
+PangenomeMock.prototype.alignTrack = function () {
+    return Promise.resolve({ status: "error",
+        error: "the mock transport cannot build an alignment track" });
+};
+
+// The mock has no server-side alignment cache, so it always reports the fast
+// path as a miss and lets the caller map again.
+PangenomeMock.prototype.surject = function () {
+    return Promise.resolve({ status: "expired" });
 };
 
 PangenomeMock.prototype.poll = function (jobId) {

@@ -82,6 +82,7 @@ function findAll(node, pred, out) {
  *   readyState: 'complete' (default) or 'loading'
  *   withMock:   also load hgPangenomeMock.js (default true)
  *   fetch:      a fetch stub function
+ *   script:     which client to load (default 'hgPangenome.js')
  */
 function load(options) {
     options = options || {};
@@ -152,8 +153,9 @@ function load(options) {
         vm.runInContext(fs.readFileSync(path.join(JS_DIR, 'hgPangenomeMock.js'), 'utf8'),
                         sandbox, { filename: 'hgPangenomeMock.js' });
 
-    vm.runInContext(fs.readFileSync(path.join(JS_DIR, 'hgPangenome.js'), 'utf8'),
-                    sandbox, { filename: 'hgPangenome.js' });
+    var clientScript = options.script || 'hgPangenome.js';
+    vm.runInContext(fs.readFileSync(path.join(JS_DIR, clientScript), 'utf8'),
+                    sandbox, { filename: clientScript });
 
     // The CGI emits window.pangenomeConfig in an inline script AFTER the
     // <script src> tags, so set it here, then fire DOMContentLoaded.

@@ -1138,6 +1138,16 @@ tg->canPack = TRUE;
 tg->visibility = tvPack;
 tg->longLabel = "Your Sequence from Blat Search";
 tg->shortLabel = "Blat Sequence";
+/* A tool other than hgBlat can put its own name on this track: it writes "ss"
+ * into the cart and these two alongside it.  hgBlat never sets them, so its
+ * own labels are untouched.  They are cleared with "ss" (see web.c) so a label
+ * cannot outlive the results it belongs to. */
+char *ssShort = cartOptionalString(cart, "ssShortLabel");
+char *ssLong = cartOptionalString(cart, "ssLongLabel");
+if (isNotEmpty(ssShort))
+    tg->shortLabel = cloneString(ssShort);
+if (isNotEmpty(ssLong))
+    tg->longLabel = cloneString(ssLong);
 tg->loadItems = loadUserPsl;
 tg->mapItemName = lfMapNameFromExtra;
 tg->priority = 103;

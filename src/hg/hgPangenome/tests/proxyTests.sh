@@ -125,6 +125,21 @@ print("cmd=map&payload=" + urllib.parse.quote(os.environ["BODY_PAYLOAD"]))')
         "$CGI" 2>"$TMP/stderr.txt"
 }
 
+
+# POST an arbitrary cmd with a JSON payload (cgi_post is map-specific).
+cgi_post_cmd() {                     # cgi_post_cmd <conf> <cmd> <payload-json>
+    local conf="$1" cmdName="$2" payload="$3"
+    local body
+    body=$(BODY_CMD="$cmdName" BODY_PAYLOAD="$payload" python3 -c '
+import os, urllib.parse
+print("cmd=" + os.environ["BODY_CMD"] + "&payload=" + urllib.parse.quote(os.environ["BODY_PAYLOAD"]))')
+    printf '%s' "$body" | env -i \
+        HGDB_CONF="$conf" REMOTE_ADDR=127.0.0.1 \
+        REQUEST_METHOD=POST CONTENT_TYPE=application/x-www-form-urlencoded \
+        CONTENT_LENGTH=${#body} \
+        "$CGI" 2>&1
+}
+
 # Invoke the CGI as a real browser GET (QUERY_STRING).
 cgi_get() {                          # cgi_get <conf> <query-string>
     local conf="$1" qs="$2"
@@ -340,6 +355,27 @@ for code in 400 401 403 429 500 503; do
     check_contains "HTTP $code names the status code" "$out" "HTTP $code"
 done
 
+# an HTML error page from a proxy must not be quoted back at the user
+start_mock --status 503 --body '<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML 2.0//EN"><html><head><title>503 Service Unavailable</title></head><body><h1>Service Unavailable</h1></body></html>' --content-type text/html
+CONF2=$(conf_default)
+out=$(cgi_post "$CONF2" '{"sequences":[{"name":"r","sequence":"ACGT"}],"options":{}}')
+check_contains     "HTML 503 reported as unavailable" "$out" "mapping service is unavailable"
+check_contains     "HTML 503 names the status" "$out" "503"
+check_not_contains "HTML 503 quotes no markup" "$out" "DOCTYPE"
+check_not_contains "HTML 503 quotes no tags" "$out" "<html>"
+
+start_mock --status 502 --body '<html><body>Bad Gateway</body></html>' --content-type text/html
+CONF2=$(conf_default)
+out=$(cgi_post "$CONF2" '{"sequences":[{"name":"r","sequence":"ACGT"}],"options":{}}')
+check_contains     "HTML 502 blamed on the proxy hop" "$out" "through its proxy"
+check_not_contains "HTML 502 quotes no markup" "$out" "<html>"
+
+# a JSON error body is still worth showing verbatim
+start_mock --status 400 --body '{"status":"error","error":"unknown source haplotype"}'
+CONF2=$(conf_default)
+out=$(cgi_post "$CONF2" '{"sequences":[{"name":"r","sequence":"ACGT"}],"options":{}}')
+check_contains "a JSON upstream error is still quoted" "$out" "unknown source haplotype"
+
 start_mock --status 200 --body 'this is not json' --content-type text/plain
 CONF2=$(conf_default)
 out=$(cgi_post "$CONF2" '{"sequences":[{"name":"r","sequence":"ACGT"}],"options":{}}')
@@ -398,6 +434,222 @@ section "non-API requests do not enter the proxy"
 out=$(cgi_get "$CONF" "cmd=bogus&job_id=job1")
 check_eq           "unknown cmd is not forwarded upstream" "$(mock_count)" "0"
 check_not_contains "unknown cmd does not emit an API error envelope" "$out" '"status":"error"'
+
+
+# ======================================= G. coordinate translation (liftover)
+section "coordinate translation: cmd=liftover and cmd=haplotypes"
+
+# earlier sections restarted the mock on other ports; get a fresh one and
+# rebuild the confs that point at it
+start_mock
+CONF=$(conf_default)
+mk_conf "$TMP/tok.conf" "pangenome.apiBase=http://127.0.0.1:$PORT" \
+                        "pangenome.apiToken=test-token-abc123"
+
+LIFT_OK='{"src":"HG00097#1#CM094066.1","start":19113,"end":19137,"tgt":"HG01234#2"}'
+
+: > "$REC"
+out=$(cgi_post_cmd "$CONF" liftover "$LIFT_OK")
+check_eq       "liftover forwarded once" "$(mock_count)" "1"
+check_eq       "liftover forwarded as POST" "$(mock_field method)" "POST"
+check_eq       "liftover hits /api/v1/liftover" "$(mock_field path)" "/api/v1/liftover"
+check_eq       "liftover sent as application/json" "$(mock_field content_type)" "application/json"
+check_eq       "liftover payload forwarded byte-for-byte" "$(mock_field body)" "$LIFT_OK"
+check_contains "liftover intervals passed through" "$out" '"intervals"'
+check_contains "interval keeps its full 3-field contig" "$out" 'HG01234#2#CM0987.1'
+check_contains "a reverse-strand piece survives" "$out" '"strand": "-"'
+
+# an array of targets is a legal payload too (one request, many haplotypes)
+: > "$REC"
+LIFT_MULTI='{"src":"HG00097#1#CM094066.1","start":10,"end":20,"tgt":["chm13#0","grch38#0"]}'
+out=$(cgi_post_cmd "$CONF" liftover "$LIFT_MULTI")
+check_eq "array tgt accepted and forwarded" "$(mock_field body)" "$LIFT_MULTI"
+
+section "liftover input validation (server-side, before forwarding)"
+
+lift_reject() {                      # lift_reject <label> <payload> <expected text>
+    : > "$REC"
+    local o
+    o=$(cgi_post_cmd "$CONF" liftover "$2")
+    check_contains "$1" "$o" "$3"
+    check_eq       "$1 - not forwarded" "$(mock_count)" "0"
+}
+
+lift_reject "src must be a full contig path" \
+    '{"src":"HG00097#1","start":1,"end":2,"tgt":"chm13#0"}' "full contig path"
+lift_reject "missing src rejected" \
+    '{"start":1,"end":2,"tgt":"chm13#0"}' "missing 'src'"
+lift_reject "missing start/end rejected" \
+    '{"src":"a#1#c","tgt":"chm13#0"}' "missing 'start' or 'end'"
+lift_reject "non-numeric coordinates rejected" \
+    '{"src":"a#1#c","start":"x","end":"y","tgt":"chm13#0"}' "must be numbers"
+lift_reject "end must exceed start" \
+    '{"src":"a#1#c","start":50,"end":50,"tgt":"chm13#0"}' "greater than"
+lift_reject "negative start rejected" \
+    '{"src":"a#1#c","start":-5,"end":10,"tgt":"chm13#0"}' "negative"
+lift_reject "over-span rejected at the 10Mb cap" \
+    '{"src":"a#1#c","start":0,"end":10000001,"tgt":"chm13#0"}' "limit 10000000"
+lift_reject "missing tgt rejected" \
+    '{"src":"a#1#c","start":1,"end":2}' "'tgt' must be"
+lift_reject "empty tgt array rejected" \
+    '{"src":"a#1#c","start":1,"end":2,"tgt":[]}' "empty"
+# each target is a separate traversal upstream; a request naming them all can
+# take the mapping service down, so the cap is enforced here too
+many=$(python3 -c 'import json;print(json.dumps(["h%d#1" % i for i in range(11)]))')
+lift_reject "more than 10 targets rejected" \
+    "{\"src\":\"a#1#c\",\"start\":1,\"end\":2,\"tgt\":$many}" \
+    "too many target haplotypes: 11 (limit is 10 per conversion)"
+
+: > "$REC"
+ten=$(python3 -c 'import json;print(json.dumps(["h%d#1" % i for i in range(10)]))')
+out=$(cgi_post_cmd "$CONF" liftover "{\"src\":\"a#1#c\",\"start\":1,\"end\":2,\"tgt\":$ten}")
+check_eq "exactly 10 targets accepted (boundary)" "$(mock_count)" "1"
+
+lift_reject "malformed JSON rejected without aborting" \
+    '{"src":' "invalid JSON payload"
+
+: > "$REC"
+out=$(cgi_post_cmd "$CONF" liftover '{"src":"a#1#c","start":0,"end":10000000,"tgt":"chm13#0"}')
+check_eq "exactly at the span cap is accepted" "$(mock_count)" "1"
+
+section "reachable-targets query (cmd=liftoverTargets)"
+
+: > "$REC"
+TARGETS_OK='{"src":"HG00097#1#CM094066.1","start":19113,"end":19137}'
+out=$(cgi_post_cmd "$CONF" liftoverTargets "$TARGETS_OK")
+check_eq       "forwarded to /api/v1/liftover/targets" "$(mock_field path)" "/api/v1/liftover/targets"
+check_eq       "forwarded as POST" "$(mock_field method)" "POST"
+check_eq       "payload forwarded byte-for-byte" "$(mock_field body)" "$TARGETS_OK"
+check_contains "reachable list passed through" "$out" '"haplotypes"'
+
+# no tgt is required here, but the source and range still are
+: > "$REC"
+out=$(cgi_post_cmd "$CONF" liftoverTargets '{"src":"HG00097#1","start":1,"end":2}')
+check_contains "src must still be a full contig path" "$out" "full contig path"
+check_eq       "not forwarded" "$(mock_count)" "0"
+
+: > "$REC"
+out=$(cgi_post_cmd "$CONF" liftoverTargets '{"src":"a#1#c","start":0,"end":10000001}')
+check_contains "span cap still enforced" "$out" "limit 10000000"
+check_eq       "not forwarded" "$(mock_count)" "0"
+
+: > "$REC"
+out=$(cgi_post_cmd "$CONF" liftoverTargets '{"src":"a#1#c","start":5,"end":5}')
+check_contains "empty range still rejected" "$out" "greater than"
+
+section "haplotype list"
+
+: > "$REC"
+out=$(cgi_get "$CONF" "cmd=haplotypes")
+check_eq       "haplotypes forwarded as GET" "$(mock_field method)" "GET"
+check_eq       "haplotypes hits /api/v1/haplotypes" "$(mock_field path)" "/api/v1/haplotypes"
+check_contains "haplotype list passed through" "$out" '"haplotypes"'
+check_contains "names match our assembly-table keys" "$out" 'hg00097#1'
+
+# auth + failure behaviour apply to the new routes too
+: > "$REC"
+cgi_post_cmd "$TMP/tok.conf" liftover "$LIFT_OK" > /dev/null
+check_eq "token sent on liftover" "$(mock_field token)" "test-token-abc123"
+: > "$REC"
+cgi_get "$TMP/tok.conf" "cmd=haplotypes" > /dev/null
+check_eq "token sent on haplotypes" "$(mock_field token)" "test-token-abc123"
+
+out=$(cgi_post_cmd "$TMP/dead.conf" liftover "$LIFT_OK")
+check_contains "unreachable middleware reported on liftover" "$out" "could not reach mapping server"
+out=$(cgi_post_cmd "$TMP/noapi.conf" liftover "$LIFT_OK")
+check_contains "missing apiBase reported on liftover" "$out" "apiBase is not configured"
+
+section "alignments per sequence (server-side ceiling)"
+
+: > "$REC"
+out=$(cgi_post_cmd "$CONF" map \
+  '{"sequences":[{"name":"a","sequence":"ACGT"}],"options":{"max_multimaps":11}}')
+check_contains "more than the ceiling rejected" "$out" \
+    "too many alignments per sequence: 11 (limit is 10)"
+check_eq "and not forwarded" "$(mock_count)" "0"
+
+: > "$REC"
+out=$(cgi_post_cmd "$CONF" map \
+  '{"sequences":[{"name":"a","sequence":"ACGT"}],"options":{"max_multimaps":10}}')
+check_eq "exactly the ceiling accepted (boundary)" "$(mock_count)" "1"
+
+section "alignTrack: a hostile query name cannot corrupt the files"
+
+# the name comes from the user's own FASTA header and lands in a FASTA line, a
+# PSL column and hgc's whitespace-split "i=" parameter
+ql_name_probe=$(cgi_post_cmd "$CONF" alignTrack \
+  '{"db":"noSuchDb","contig":"c","name":"a b","sequence":"ACGT","cigar":"4M","start":0}')
+case "$ql_name_probe" in
+    *'"status"'*) check_contains "unknown assembly still reported cleanly" \
+                      "$ql_name_probe" "no sequence sizes available" ;;
+    *) echo "  SKIP: alignTrack needs a cart-capable hg.conf" ;;
+esac
+
+section "quickLift annotation lifting (validation)"
+
+# cmd=quickLift is the one command that builds a track hub, so unlike the rest
+# it runs inside the cart shell and needs a central database.  The isolated
+# hg.conf these tests use deliberately has none, so the shell aborts before any
+# of our code runs.  Probe for that and skip rather than report failures the
+# developer cannot act on.
+# Borrow database settings from a real hg.conf; the rest of the suite stays
+# hermetic, only this section needs one.  Probe by actually running the command
+# rather than by inspecting the file - credentials often live in an included
+# private file we cannot read from here.
+ql_ok=0
+QCONF=""
+for cand in "${HGDB_CONF:-}" "${HOME:-}/.hg.conf" "${HOME:-}/hg.conf" \
+            /usr/local/apache/cgi-bin-$(id -un)/hg.conf \
+            /usr/local/apache/cgi-bin/hg.conf; do
+    [ -n "$cand" ] && [ -r "$cand" ] || continue
+    abs=$(cd "$(dirname "$cand")" && pwd)/$(basename "$cand")
+    # Borrow the database settings but not the site's front-door defences:
+    # with a bottleneck server and a Cloudflare site key configured, a
+    # cookie-less request like ours is answered with a captcha page instead of
+    # reaching the command at all.
+    { echo "include $abs"
+      echo "delete cloudFlareSiteKey bottleneck.host bottleneck.port"
+      echo "pangenome.apiBase=http://127.0.0.1:$PORT"
+      echo "pangenome.timeoutSecs=10"; } > "$TMP/quicklift.conf"
+    case "$(cgi_post_cmd "$TMP/quicklift.conf" quickLift '{}' 2>/dev/null)" in
+        *'"status"'*) ql_ok=1; QCONF="$TMP/quicklift.conf"; break ;;
+    esac
+done
+
+if [ "$ql_ok" -eq 0 ]; then
+    echo "  SKIP: no hg.conf with a reachable central database"
+else
+    ql_reject() {                    # ql_reject <label> <payload> <expected text>
+        : > "$REC"
+        local o
+        o=$(cgi_post_cmd "$QCONF" quickLift "$2")
+        check_contains "$1" "$o" "$3"
+        # nothing about quickLift should ever reach the mapping server: the
+        # page already has the blocks, that is the whole point of passing them
+        # back instead of translating twice
+        check_eq "$1 - middleware untouched" "$(mock_count)" "0"
+    }
+
+    ql_reject "malformed JSON rejected without aborting" \
+        'not json' "invalid JSON payload"
+    ql_reject "missing assemblies rejected" \
+        '{"src":"HG00097#1#CM094066.1","position":"chr1:1-2"}' \
+        "missing or malformed source"
+    # srcDb/tgtDb become file paths and a hub genome line, so anything that is
+    # not shaped like a db name is refused outright
+    ql_reject "assembly name with a slash rejected" \
+        '{"srcDb":"../../etc","tgtDb":"hs1","src":"a#1#c","position":"c:1-2"}' \
+        "missing or malformed source"
+    ql_reject "missing position rejected" \
+        '{"srcDb":"hs1","tgtDb":"GCA_044165735.1","src":"HG00097#1#CM094066.1"}' \
+        "missing source path or target position"
+    ql_reject "two-field src rejected" \
+        '{"srcDb":"hs1","tgtDb":"GCA_044165735.1","src":"HG00097#1","position":"c:1-2"}' \
+        "full contig path"
+    ql_reject "unknown assembly reported, not crashed on" \
+        '{"srcDb":"noSuchDb","tgtDb":"alsoNoSuchDb","src":"a#1#c","position":"c:1-2"}' \
+        "no sequence sizes available"
+fi
 
 # --------------------------------------------------------------------- report
 

@@ -1203,7 +1203,7 @@ return ci->size;
 void hNibForChrom(char *db, char *chromName, char retNibName[HDB_MAX_PATH_STRING])
 /* Get .nib file associated with chromosome. */
 {
-if (startsWith("GC", db))
+if (trackHubDatabase(db) || startsWith("GC", db))
     {
     struct trackHubGenome *genome = trackHubGetGenome(db);
 

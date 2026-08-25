@@ -81,8 +81,15 @@ def load_rows(src):
 
 
 def build(rows):
-    """Return {"sample#phase": db} keyed lower-case, plus stats."""
+    """Return ({"sample#phase": db}, {db: assembly_name}) plus stats.
+
+    The assembly name is kept in its own table keyed by db rather than folded
+    into the first one: it is a property of the assembly, not of the haplotype,
+    so this way the two haplotypes of a sample cannot disagree about it, and
+    every existing caller of pangenomeAssemblies keeps working unchanged.
+    """
     out = {}
+    names = {}
     skipped = []
     for row in rows:
         sample = (row.get('sample_id') or '').strip()
@@ -96,7 +103,10 @@ def build(rows):
             skipped.append(row)          # conflicting duplicate; keep the first
             continue
         out[key] = db
-    return out, skipped
+        name = (row.get('assembly_name') or '').strip()
+        if name and db not in names:
+            names[db] = name
+    return out, names, skipped
 
 
 def main():
@@ -108,7 +118,7 @@ def main():
 
     rows, raw = load_rows(args.src)
     src_sha = hashlib.sha256(raw.encode()).hexdigest()
-    table, skipped = build(rows)
+    table, names, skipped = build(rows)
     if not table:
         sys.exit('no usable rows found in %s' % args.src)
 
@@ -131,12 +141,20 @@ def main():
     lines.append(' * release; %d haplotypes here (%d named db, %d GenArk accessions,'
                  % (len(table), len(plain), len(table) - len(plain) - len(urls)))
     lines.append(' * %d non-portable hub URLs kept absolute).' % len(urls))
+    lines.append(' * A second table gives each assembly its published name, for display.')
     lines.append(' */')
     lines.append('')
     lines.append('window.pangenomeAssemblies = {')
     for i, key in enumerate(sorted(table)):
         comma = ',' if i < len(table) - 1 else ''
         lines.append('    "%s": "%s"%s' % (key, table[key], comma))
+    lines.append('};')
+    lines.append('')
+    lines.append('window.pangenomeAssemblyNames = {')
+    keys = sorted(names)
+    for i, db in enumerate(keys):
+        comma = ',' if i < len(keys) - 1 else ''
+        lines.append('    "%s": "%s"%s' % (db, names[db], comma))
     lines.append('};')
     lines.append('')
 

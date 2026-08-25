@@ -50,6 +50,12 @@ echo "# Layer 3: contract/rendering tests (canned fixtures)       #"
 echo "############################################################"
 runJs renderTests.js
 
+echo
+echo "############################################################"
+echo "# Coordinate conversion page (canned responses)             #"
+echo "############################################################"
+runJs convertTests.js
+
 # --- Layer 4 hook (needs the live middleware) ---
 # [ -f e2eTests.sh ] && { ./e2eTests.sh || fail=1; }
 

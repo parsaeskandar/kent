@@ -91,6 +91,9 @@
     padding: 1px 8px; border-bottom: 1px solid #eeeeee;
 }
 .pgHapListRow:hover { background: #fdffb7; }
+.pgHapListName { display: inline-block; min-width: 24em; }
+.pgHapListPct  { color: #444444; }
+.pgHapListNote { color: #666666; font-style: italic; margin-left: 8px; }
 
 /* ---- Downloads: plain UCSC-blue text links, not buttons ---- */
 
@@ -146,3 +149,59 @@
 .pgOther { margin-top: 8px; }
 .pgOther > summary { cursor: pointer; color: #121E9A; }
 .pgOtherItem { padding: 6px 0 6px 10px; border-left: 2px solid #dddddd; margin-top: 6px; }
+
+/* ---- Coordinate conversion page ---- */
+
+.pgcSrcHap { font-family: Monaco, 'andale mono', 'lucida console', monospace; font-weight: bold; }
+.pgcTargets { min-width: 22em; font-family: Monaco, 'andale mono', 'lucida console', monospace;
+              font-size: 0.85em; margin-top: 3px; }
+.pgcFrom { margin: 6px 0 10px; font-size: 0.9em; }
+.pgcInterval { padding: 3px 0; border-bottom: 1px solid #eef0f2; }
+.pgcInterval:last-child { border-bottom: none; }
+.pgcViewLink { margin-left: 12px; color: #121E9A; }
+
+/* Carrying the source's annotations onto the target (QuickLift). */
+.pgcAnnot {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid #cccccc;
+}
+.pgcAnnot .pgDlBtn {
+    margin-right: 6px;
+}
+#pgcHideRow {
+    margin-top: 4px;
+    margin-left: 18px;
+}
+
+/* The "?" beside an option, and the note it reveals. */
+.pgHelp {
+    display: inline-block;
+    width: 1.1em;
+    height: 1.1em;
+    line-height: 1.1em;
+    text-align: center;
+    border: 1px solid #121E9A;
+    border-radius: 50%;
+    font-size: 0.85em;
+    font-weight: bold;
+    text-decoration: none;
+}
+.pgHelpBox {
+    background-color: #fffee8;
+    border: 1px solid #cccccc;
+    padding: 8px 10px;
+    margin: 6px 0;
+    max-width: 60em;
+}
+
+/* The browser / new tab / details row on a mapped position, laid out the way
+ * hgBlat's results table does it. */
+.pgSurjectLinks { margin-top: 2px; }
+.pgSurjectLinks a { margin-right: 6px; }
+/* The little "opens elsewhere" arrow hgBlat puts on its new-tab link. */
+.pgExtLink::after {
+    content: "\2197";
+    font-size: 0.85em;
+    padding-left: 2px;
+}
