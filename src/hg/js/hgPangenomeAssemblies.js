@@ -6,7 +6,7 @@
  * link a surjection to the Genome Browser for any haplotype.
  *
  * Source: ucsc_browser_hprc_r2_v1.0.index.csv
- *   sha256 46effe014811b7e29acd065f5c3d86fa3d38ee6ba1773a7ea64e4d3a112ba1fc
+ *   sha256 efa250ce8ffe1e0774d856e8f62db8b2027fa006d840e058562f11afb43c209e
  *   from https://github.com/human-pangenomics/hprc_intermediate_assembly/blob/main/data_tables/browser/ucsc_browser_hprc_r2_v1.0.index.csv
  * Regenerate with hgPangenome/makeAssemblyMap.py when HPRC publishes a new
  * release; 466 haplotypes here (2 named db, 462 GenArk accessions,
@@ -161,8 +161,8 @@ window.pangenomeAssemblies = {
     "hg01969#2": "GCA_042037555.1",
     "hg01975#1": "GCA_046000135.1",
     "hg01975#2": "GCA_045999905.1",
-    "hg01978#1": "GCA_018472845.2",
-    "hg01978#2": "GCA_018472865.2",
+    "hg01978#1": "GCA_018472865.2",
+    "hg01978#2": "GCA_018472845.2",
     "hg01981#1": "GCA_042027505.1",
     "hg01981#2": "GCA_042027065.1",
     "hg01993#1": "GCA_042028705.1",
@@ -205,8 +205,8 @@ window.pangenomeAssemblies = {
     "hg02165#2": "GCA_042032115.1",
     "hg02178#1": "GCA_042077705.1",
     "hg02178#2": "GCA_042077755.1",
-    "hg02257#1": "GCA_018466835.2",
-    "hg02257#2": "GCA_018466845.2",
+    "hg02257#1": "GCA_018466845.2",
+    "hg02257#2": "GCA_018466835.2",
     "hg02258#1": "GCA_041899975.1",
     "hg02258#2": "GCA_041900135.1",
     "hg02273#1": "GCA_042031155.1",
@@ -305,8 +305,8 @@ window.pangenomeAssemblies = {
     "hg03471#2": "GCA_042034105.1",
     "hg03486#1": "GCA_018503245.2",
     "hg03486#2": "GCA_018503525.2",
-    "hg03516#1": "GCA_018469415.2",
-    "hg03516#2": "GCA_018469425.2",
+    "hg03516#1": "GCA_018469425.2",
+    "hg03516#2": "GCA_018469415.2",
     "hg03521#1": "GCA_044166285.1",
     "hg03521#2": "GCA_044166645.1",
     "hg03540#1": "GCA_018473315.2",
@@ -484,8 +484,8 @@ window.pangenomeAssemblies = {
 };
 
 window.pangenomeAssemblyNames = {
-    "GCA_018466835.2": "HG02257_pat_hprc_r2_v1.1.0",
-    "GCA_018466845.2": "HG02257_mat_hprc_r2_v1.1.0",
+    "GCA_018466835.2": "HG02257_mat_hprc_r2_v1.1.0",
+    "GCA_018466845.2": "HG02257_pat_hprc_r2_v1.1.0",
     "GCA_018466855.2": "HG02559_pat_hprc_r2_v1.0.1",
     "GCA_018466985.2": "HG02559_mat_hprc_r2_v1.0.1",
     "GCA_018467005.2": "HG02486_pat_hprc_r2_v1.0.1",
@@ -493,8 +493,8 @@ window.pangenomeAssemblyNames = {
     "GCA_018467155.2": "HG01891_mat_hprc_r2_v1.0.1",
     "GCA_018467165.2": "HG01891_pat_hprc_r2_v1.0.1",
     "GCA_018469405.2": "HG01258_mat_hprc_r2_v1.0.1",
-    "GCA_018469415.2": "HG03516_pat_hprc_r2_v1.1.0",
-    "GCA_018469425.2": "HG03516_mat_hprc_r2_v1.1.0",
+    "GCA_018469415.2": "HG03516_mat_hprc_r2_v1.1.0",
+    "GCA_018469425.2": "HG03516_pat_hprc_r2_v1.1.0",
     "GCA_018469665.2": "HG01123_mat_hprc_r2_v1.0.1",
     "GCA_018469675.2": "HG01258_pat_hprc_r2_v1.0.1",
     "GCA_018469685.2": "HG01361_mat_hprc_r2_v1.0.1",
@@ -536,9 +536,9 @@ window.pangenomeAssemblyNames = {
     "GCA_018472765.3": "HG00735_mat_hprc_r2_v1.0.1",
     "GCA_018472825.2": "HG03579_mat_hprc_r2_v1.0.1",
     "GCA_018472835.2": "HG03579_pat_hprc_r2_v1.0.1",
-    "GCA_018472845.2": "HG01978_pat_hprc_r2_v1.1.0",
+    "GCA_018472845.2": "HG01978_mat_hprc_r2_v1.1.0",
     "GCA_018472855.2": "HG03453_mat_hprc_r2_v1.0.1",
-    "GCA_018472865.2": "HG01978_mat_hprc_r2_v1.1.0",
+    "GCA_018472865.2": "HG01978_pat_hprc_r2_v1.1.0",
     "GCA_018473295.2": "HG03540_mat_hprc_r2_v1.0.1",
     "GCA_018473305.2": "HG03453_pat_hprc_r2_v1.0.1",
     "GCA_018473315.2": "HG03540_pat_hprc_r2_v1.0.1",

@@ -137,6 +137,17 @@ function load(options) {
         clearTimeout: clearTimeout,
         URL: { createObjectURL: function () { return 'blob:test'; }, revokeObjectURL: function () {} }
     };
+    // Beacons are how the page asks for a wider chain on its way out; tests
+    // read sandbox.beacons to see what was sent.
+    sandbox.beacons = [];
+    sandbox.Blob = function (parts) { this.parts = parts; };
+    sandbox.navigator = {
+        sendBeacon: function (url, blob) {
+            sandbox.beacons.push({ url: url,
+                body: blob && blob.parts ? String(blob.parts[0]) : String(blob) });
+            return true;
+        }
+    };
     sandbox.self = sandbox.window;
     vm.createContext(sandbox);
 

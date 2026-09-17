@@ -17,7 +17,7 @@ var loader = require('./loadClient.js');
 var PAGE_IDS = ['pgcForm', 'pgcSrcHap', 'pgcSrcDb', 'pgcSrcNote', 'pgcPos', 'pgcFilter',
                 'pgcTargetCount', 'pgcTargets', 'pgcSubmit', 'pgcClear',
                 'pgcReachable', 'pgcAllHaps', 'pgcContigs', 'pgcContigHint',
-                'pgcStatus', 'pgcResults'];
+                'pgcStatus', 'pgcResults', 'pgcQuickLift', 'pgcHideTracks'];
 
 // Load the convert page's client with a stubbed fetch.
 function startPage(opts) {
@@ -31,10 +31,16 @@ function startPage(opts) {
             calls.push({ url: String(url), opts: o });
             var u = String(url), b = (o && o.body) || '';
             var body;
-            if (u.indexOf('hubApi/list/chromosomes') >= 0)
-                body = opts.contigs || { chromosomes: {
-                    'CM094060.1': 251561931, 'CM094061.1': 242754100,
-                    'CM094066.1': 134577915 } };
+            if (u.indexOf('cmd=contigs') >= 0)
+                // Both spellings, as the real endpoint returns: these hubs set
+                // "chromAuthority ucsc", so the browser shows chr1 where the
+                // graph says CM094060.1.
+                body = opts.contigs || { contigs: [
+                    { name: 'CM094060.1', display: 'chr1', size: 251561931 },
+                    { name: 'CM094061.1', display: 'chr2', size: 242754100 },
+                    { name: 'CM094066.1', display: 'chr7', size: 134577915 },
+                    { name: 'JBIREP010000009.1',
+                      display: 'chrUn_JBIREP010000009v1', size: 133758036 } ] };
             else if (u.indexOf('cmd=haplotypes') >= 0)
                 body = opts.haplotypes || { haplotypes: ['GRCh38#0', 'CHM13#0',
                                             'HG00097#1', 'HG00097#2', 'HG01234#2'] };
@@ -62,6 +68,9 @@ function startPage(opts) {
         maxLiftTargets: 3,
         wideRegionBp: opts.wideRegionBp === undefined ? 100000 : opts.wideRegionBp
     };
+    Object.keys(opts.config || {}).forEach(function (k) {
+        c.window.pangenomeConfig[k] = opts.config[k];
+    });
     c.fireReady();
     c.calls = calls;
     return c;
@@ -283,6 +292,19 @@ var altSource2 = startPage();
 var nonPangenome = startPage({ db: 'mm39', position: '' });
 var noContext = startPage({ db: '', position: '' });
 var noPosition = startPage({ db: 'GCA_044165215.1', position: '' });
+// An assembly served through a hub reaches the cart decorated: hs1 is
+// "hub_25071_hs1" from the curated hub.  The regression this guards: the page
+// did not recognise the decorated name, decided nothing usable was carried
+// over, and replaced the position the user asked about with its own example.
+var hubDecorated = startPage({ db: 'hub_25071_hs1',
+                               position: 'chr10:42477211-42540362' });
+// HG01234#2 rather than a name the stub graph does not list: the point is the
+// guard, and an absent target would make both tests pass for the wrong reason.
+var hubHandoff = startPage({ db: 'hub_25071_hs1',
+                             position: 'chr10:42477211-42540362',
+                             config: { presetTarget: 'HG01234#2' } });
+var exampleHandoff = startPage({ db: 'hub_25071_hs1', position: '',
+                                 config: { presetTarget: 'HG01234#2' } });
 
 setTimeout(function () {
     t.suite('page setup');
@@ -307,11 +329,43 @@ setTimeout(function () {
         t.contains(nonPangenome.el.pgcSrcNote.textContent, 'not part of the pangenome', 'reason');
     });
 
-    t.test('a pangenome assembly with no position falls back as a pair', function () {
-        // a position only means something on its own assembly, so both move
-        t.eq(noPosition.el.pgcSrcDb.value, 'hs1', 'assembly moved too');
-        t.eq(noPosition.el.pgcPos.value, 'chr9:145458455-145495201', 'with its position');
+    t.test('a pangenome assembly with no position keeps the assembly', function () {
+        // Only the missing half is filled in.  Moving the assembly as well
+        // would answer about a different genome than the one asked for.
+        t.eq(noPosition.el.pgcSrcDb.value, 'GCA_044165215.1', 'assembly kept');
+        t.eq(noPosition.el.pgcPos.value, 'chr9:145458455-145495201', 'position filled in');
         t.contains(noPosition.el.pgcSrcNote.textContent, 'no position was carried over', 'reason');
+    });
+
+    t.test('a hub-decorated assembly is recognised, and the position is untouched',
+           function () {
+        t.eq(hubDecorated.el.pgcPos.value, 'chr10:42477211-42540362',
+             'the position asked about, not the example');
+        t.eq(hubDecorated.el.pgcSrcHap.value, 'CHM13#0',
+             'hub_25071_hs1 resolves to CHM13');
+        t.notOk(/starting example/.test(hubDecorated.el.pgcSrcNote.textContent),
+                'and nothing claims it is an example');
+    });
+
+    t.test('the hand-off converts the region it was given', function () {
+        var reqs = hubHandoff.calls.filter(function (c) {
+            return String((c.opts && c.opts.body) || '').indexOf('cmd=liftover') >= 0;
+        });
+        t.eq(reqs.length, 1, 'auto-submitted once');
+        var payload = decodeURIComponent(String(reqs[0].opts.body));
+        t.contains(payload, '42477210', 'chr10 start, 0-based');
+        t.notOk(/145458454|145458455/.test(payload), 'not the example region on chr9');
+    });
+
+    t.test('an example position is never auto-converted', function () {
+        // Filling the field in is a convenience; converting it and heading the
+        // answer "Converted from ..." is a wrong answer to the question asked.
+        var reqs = exampleHandoff.calls.filter(function (c) {
+            return String((c.opts && c.opts.body) || '').indexOf('cmd=liftover') >= 0;
+        });
+        t.eq(reqs.length, 0, 'no conversion ran');
+        t.eq(exampleHandoff.el.pgcPos.value, 'chr9:145458455-145495201',
+             'the example is offered, not acted on');
     });
 
     t.test('a complete inherited source is left alone', function () {
@@ -380,18 +434,106 @@ setTimeout(function () {
     });
 
 
+    // ---- chain padding ------------------------------------------------------
+    //
+    // The chain is what lets the lifted tracks draw, so where it stops the
+    // annotations stop.  Two requests: a narrow chain on the click, so following
+    // the link is not slow, then a wider one asked for on the way out.
+    //
+    // Both stages are asynchronous, and this harness asserts synchronously, so
+    // the driving happens in timers and the suite runs once it has settled -
+    // the same shape as the other multi-step suites in this file.
+    function padPage() {
+        return startPage({ liftover: { blocks: [
+            { haplotype: 'CHM13#0#chr9', source_start: 100, source_end: 200,
+              target_start: 500, target_end: 600, strand: '+' }] } });
+    }
+    var padA = padPage(), padB = padPage(), padNoBeacon = padPage();
+    var padPages = [padA, padB, padNoBeacon];
+    setTimeout(function () {
+        /* The destination list is fetched, so a page cannot be converted until
+         * that promise has settled - hence the wait before driving it. */
+        padPages.forEach(function (c) {
+            c.window.pangenomeConfig.hgsid = 'SID1';
+            c.el.pgcQuickLift.checked = true;
+            convert(c, 'CM094066.1:101-200', ['CHM13#0']);
+        });
+        setTimeout(function () {
+        padPages.forEach(function (c) {
+            c.link = c.findAll(c.el.pgcResults, function (n) {
+                return n.tagName === 'A';
+            })[0];
+        });
+        padNoBeacon.sandbox.navigator = undefined;
+        padPages.forEach(function (c) {
+            if (c.link) c.link.dispatch('click');
+        });
+        setTimeout(function () {
+            t.suite('chain padding');
+
+            t.test('the click sends the interval and target, not just the blocks',
+                   function () {
+                // Without these the server can only build a chain as wide as the
+                // blocks the page holds, which is exactly the interval converted.
+                t.ok(padA.link, 'a result link was rendered');
+                if (!padA.link) return;
+                var ql = padA.calls.filter(function (x) {
+                    return String((x.opts && x.opts.body) || '')
+                             .indexOf('cmd=quickLift') >= 0;
+                });
+                t.eq(ql.length, 1, 'one quickLift request');
+                if (!ql.length) return;
+                var p = JSON.parse(decodeURIComponent(
+                    String(ql[0].opts.body).split('payload=')[1].split('&')[0]));
+                t.eq(p.srcStart, 100, 'source start sent');
+                t.eq(p.srcEnd, 200, 'source end sent');
+                t.eq(p.tgt, 'CHM13#0', 'and the single target the chain is for');
+                // Posting the blocks put an unbounded array in the body and blew
+                // past cheapcgi's 1 MB cap on a big conversion, which aborts as
+                // HTML.  The server fetches its own.
+                t.notOk('blocks' in p, 'the blocks are not posted back');
+            });
+
+            t.test('a wider chain is asked for on the way out, without the blocks',
+                   function () {
+                var b = padB.sandbox.beacons;
+                t.eq(b.length, 1, 'exactly one beacon');
+                if (!b.length) return;
+                t.contains(b[0].body, 'cmd=extendChain', 'asks to extend');
+                var p = JSON.parse(decodeURIComponent(
+                    b[0].body.split('payload=')[1].split('&')[0]));
+                t.notOk('blocks' in p, 'no blocks: the server fetches its own');
+                t.eq(p.srcStart, 100, 'but it knows the interval');
+                t.eq(p.tgt, 'CHM13#0', 'and the target');
+                t.ok(b[0].body.indexOf('hgsid=SID1') >= 0,
+                     'and the cart it belongs to');
+            });
+
+            t.test('no beacon where the browser has none', function () {
+                // It runs as the page is being replaced; naming a missing
+                // navigator would throw and take the navigation with it.
+                t.eq(padNoBeacon.sandbox.beacons.length, 0,
+                     'nothing sent, nothing thrown');
+            });
+        }, 0);
+        }, 0);
+    }, 0);
+
     t.suite('telling the user which contigs exist');
 
     t.test('the hint names the largest sequences of the chosen source', function () {
+        // Named the way the browser names them: an accession the user has never
+        // seen is no help when they are copying a position out of hgTracks.
         var h = page.el.pgcContigHint.textContent;
-        t.contains(h, '3 sequences', 'count');
-        t.contains(h, 'CM094060.1 (252 Mb)', 'largest first, with size');
+        t.contains(h, '4 sequences', 'count');
+        t.contains(h, 'chr1 (252 Mb)', 'largest first, with size');
         t.contains(h, 'start typing', 'says how to use it');
     });
 
     t.test('they are offered as autocomplete on the position box', function () {
         var opts = page.el.pgcContigs.children.map(function (o) { return o.value; });
-        t.deepEq(opts, ['CM094060.1', 'CM094061.1', 'CM094066.1'], 'biggest first');
+        t.deepEq(opts, ['chr1', 'chr2', 'chr7', 'chrUn_JBIREP010000009v1'],
+                 'biggest first, in the browser\'s names');
     });
 
     t.test('a contig from the wrong haplotype is caught before the request', function () {
@@ -403,17 +545,49 @@ setTimeout(function () {
         c.el.pgcSubmit.dispatch('click');
         t.eq(posts(c).length, 0, 'nothing sent');
         t.contains(c.el.pgcStatus.textContent, 'is not a sequence of', 'says why');
-        t.contains(c.el.pgcStatus.textContent, 'CM094060.1', 'and what is valid');
+        t.contains(c.el.pgcStatus.textContent, 'chr1', 'and what is valid');
     });
 
     t.test('a near match is suggested rather than just rejected', function () {
         var c = badContig;
-        t.contains(c.api.contigProblem('CM094066'), 'Did you mean CM094066.1',
-                   'suggests the close name');
+        // Both spellings, so a partial accession is answered in terms the user
+        // can connect to what they typed.
+        t.contains(c.api.contigProblem('CM094066'), 'Did you mean chr7 (CM094066.1)',
+                   'suggests the close name, under both names');
+    });
+
+    t.test("the browser's own name for a sequence is accepted", function () {
+        // The bug this fixes: a position copied out of hgTracks names the
+        // sequence chrUn_JBIREP010000009v1, which the graph has never heard of,
+        // and the page rejected it as not being a sequence of the assembly.
+        t.isNull(page.api.contigProblem('chrUn_JBIREP010000009v1'),
+                 'no complaint about the browser spelling');
+        t.isNull(page.api.contigProblem('chr1'), 'nor a plain chromosome name');
+        t.eq(page.api.nativeContig('chrUn_JBIREP010000009v1'), 'JBIREP010000009.1',
+             'and it is translated to the accession the graph knows');
+        t.eq(page.api.nativeContig('CM094060.1'), 'CM094060.1',
+             'an accession is left alone');
+        t.eq(page.api.nativeContig('nonsense'), 'nonsense',
+             'an unknown name passes through for the server to judge');
     });
 
     t.test('a valid contig passes straight through', function () {
         t.isNull(page.api.contigProblem('CM094066.1'), 'no complaint');
+    });
+
+    t.test('the source path is built from the accession, not what was typed',
+           function () {
+        // buildSource is what feeds the request, so this is the assertion that
+        // matters: whichever name goes in the box, the graph is asked in its
+        // own naming.
+        page.el.pgcPos.value = 'chrUn_JBIREP010000009v1:1-1000';
+        var a = page.api.buildSource();
+        t.isNull(a.error || null, 'accepted');
+        t.eq(a.src, 'HG00097#1#JBIREP010000009.1', 'translated in the src path');
+        t.eq(a.contig, 'JBIREP010000009.1', 'and in the contig it reports');
+        page.el.pgcPos.value = 'CM094060.1:1-1000';
+        t.eq(page.api.buildSource().src, 'HG00097#1#CM094060.1',
+             'an accession is passed through unchanged');
     });
 
     t.suite('too many targets at once');
@@ -446,6 +620,7 @@ setTimeout(function () {
     });
 
     t.suite('the conversion request');
+
 
     // requests (the pages were given time above via their own fetch stubs)
     var one = startPage(), many = startPage(), badPos = startPage(), noTgt = startPage();
@@ -566,6 +741,12 @@ setTimeout(function () {
         var mixed = startPage({ liftover: { intervals: [
             { haplotype: 'chm13#0#chr10', start: 10, end: 20, strand: '+' }] } });
         var errPage = startPage({ liftover: { status: 'error', error: 'unknown source haplotype' } });
+        // arrives the way hgConvert hands off: destination already chosen
+        var autoPage = startPage({ config: { presetTarget: 'CHM13#0',
+                                            presetAnnot: 'on', presetHide: 'off' },
+            liftover: { blocks: [{ haplotype: 'chm13#0#chr10',
+                source_start: 0, source_end: 20,
+                target_start: 10, target_end: 30, strand: '+' }] } });
 
         setTimeout(function () {
             convert(single, 'CM094066.1:19114-19137', ['CHM13#0']);
@@ -576,6 +757,27 @@ setTimeout(function () {
 
             setTimeout(function () {
                 t.suite('rendering translated intervals');
+
+                t.test('the options chosen in hgConvert are honoured here',
+                       function () {
+                    // they mean the same thing on both pages, so resetting them
+                    // would undo a choice the user just made
+                    t.eq(autoPage.el.pgcQuickLift.checked, true,
+                         'annotations box carried over');
+                    t.eq(autoPage.el.pgcHideTracks.checked, false,
+                         'and so did hide-default-tracks');
+                });
+
+                t.test('arriving from hgConvert converts without a second Submit',
+                       function () {
+                    // hgConvert already collected the source, the position and
+                    // the destination and the user pressed Submit there; asking
+                    // again would make the hand-off look broken
+                    var posts = autoPage.calls.filter(function (x) {
+                        return x.opts.method === 'POST'; });
+                    t.ok(posts.length > 0, 'a conversion was sent on its own');
+                });
+
 
                 t.test("a single interval renders as a position link with hgConvert-style percentages",
                        function () {

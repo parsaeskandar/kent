@@ -23,6 +23,7 @@
 #include "net.h"
 #include "genark.h"
 #include "trackHub.h"
+#include "hgConfig.h"
 #include "hubConnect.h"
 #include "quickLift.h"
 #include "chromAlias.h"
@@ -63,6 +64,135 @@ struct dbDb *toDb =  genarkLiftOverDb(name);
 if (toDb == NULL)
     errAbort("Can't find %s in matchingDb", name);
 return toDb;
+}
+
+/* ---- Pangenome destinations ---------------------------------------------
+ *
+ * Assemblies reachable through the pangenome graph rather than through a
+ * liftOver chain.  They are offered in the same dropdown so the user does not
+ * have to know which mechanism applies; picking one hands off to hgPangenome,
+ * which does the translation.
+ *
+ * The list is read from the published HPRC index named by hg.conf
+ * "pangenome.assemblyIndex".  With that setting absent - which is the case on
+ * any install that has not enabled the tool - nothing here does anything, so
+ * hgConvert behaves exactly as before.
+ */
+
+struct pgAsm
+    {
+    struct pgAsm *next;
+    char *db;           /* GenArk accession, e.g. GCA_044165215.1 */
+    char *hap;          /* PanSN name, e.g. HG00097#1 */
+    char *label;        /* published assembly name */
+    };
+
+static struct pgAsm *pangenomeAssemblies()
+/* Read the HPRC index, or NULL when the tool is not configured here. */
+{
+static struct pgAsm *cached = NULL;
+static boolean tried = FALSE;
+if (tried)
+    return cached;
+tried = TRUE;
+
+char *indexFile = cfgOption("pangenome.assemblyIndex");
+if (isEmpty(indexFile) || !fileExists(indexFile))
+    return NULL;
+
+struct lineFile *lf = lineFileOpen(indexFile, TRUE);
+char *line;
+boolean first = TRUE;
+while (lineFileNextReal(lf, &line))
+    {
+    if (first)                  /* header row */
+        { first = FALSE; continue; }
+    char *row[8];
+    int n = chopByChar(line, ',', row, ArraySize(row));
+    if (n < 4)
+        continue;
+    /* browser column is a URL ending in the accession, or carrying db= */
+    char *browser = row[3];
+    char *db = NULL;
+    char *eq = strstr(browser, "db=");
+    if (eq != NULL)
+        db = cloneString(eq + 3);
+    else
+        {
+        char *slash = strrchr(browser, '/');
+        if (slash != NULL)
+            db = cloneString(slash + 1);
+        }
+    if (isEmpty(db) || !startsWith("GC", db))
+        continue;               /* references and hub URLs are not ours to add */
+    struct pgAsm *a;
+    AllocVar(a);
+    a->db = db;
+    char buf[256];
+    safef(buf, sizeof(buf), "%s#%s", row[0], row[1]);
+    a->hap = cloneString(buf);
+    /* Name it the way the pangenome convert page does: the sample, then the
+     * parental origin where the assembly is trio-phased.  Just under half of
+     * HPRC r2 is not, and those stay hap1/hap2 rather than being given a
+     * parent they do not have. */
+    char *asmName = row[2];
+    char *parent = NULL;
+    if (stringIn("_pat_", asmName) || endsWith(asmName, ".pat"))
+        parent = "paternal";
+    else if (stringIn("_mat_", asmName) || stringIn(".mat_", asmName))
+        parent = "maternal";
+    if (parent != NULL)
+        safef(buf, sizeof(buf), "%s %s", row[0], parent);
+    else if (sameString(row[1], "0"))
+        safef(buf, sizeof(buf), "%s", row[0]);
+    else
+        safef(buf, sizeof(buf), "%s hap%s", row[0], row[1]);
+    a->label = cloneString(buf);
+    slAddHead(&cached, a);
+    }
+lineFileClose(&lf);
+slReverse(&cached);
+return cached;
+}
+
+static struct pgAsm *pangenomeFind(char *db)
+/* The pangenome entry for this destination, or NULL if it is an ordinary one. */
+{
+struct pgAsm *a;
+for (a = pangenomeAssemblies(); a != NULL; a = a->next)
+    if (sameString(a->db, db))
+        return a;
+return NULL;
+}
+
+static struct dbDb *pangenomeAddToList(struct dbDb *dbList)
+/* Append the pangenome assemblies to the destination list, skipping any the
+ * chain table already offers - a real chain is the better route where one
+ * exists, and the user should not be given the same assembly twice. */
+{
+struct pgAsm *a;
+struct hash *have = hashNew(10);
+struct dbDb *db;
+for (db = dbList; db != NULL; db = db->next)
+    hashStore(have, db->name);
+for (a = pangenomeAssemblies(); a != NULL; a = a->next)
+    {
+    if (hashLookup(have, a->db) != NULL)
+        continue;
+    struct dbDb *new;
+    AllocVar(new);
+    new->name = cloneString(a->db);
+    char buf[512];
+    safef(buf, sizeof(buf), "%s (pangenome)", a->label);
+    new->description = cloneString(buf);
+    new->organism = cloneString("Human");
+    new->genome = cloneString("Human");
+    new->scientificName = cloneString("Homo sapiens");
+    new->active = 1;
+    slAddTail(&dbList, new);
+    }
+hashFree(&have);
+return dbList;
 }
 
 static void askForDestination(struct liftOverChain *liftOver, char *fromPos,
@@ -139,6 +269,7 @@ hPrintf("<div class='currentSelection' id='toGenomeLabel'>%s</div>\n", selectedL
 puts("<div class='fieldRow'>\n");
 puts("<span class='fieldLabel'>Assembly:</span>\n");
 dbList = hGetLiftOverToDatabases(liftOver->fromDb);
+dbList = pangenomeAddToList(dbList);
 printAllAssemblyListHtmlParm(liftOver->toDb, dbList, "hglft_toDbSelect", TRUE, "change", onChangeToOrg);
 puts("</div>\n");
 
@@ -359,6 +490,18 @@ if (toDb != NULL)
     for (this = chainList; this != NULL; this = this->next)
         if (sameString(toDb, this->toDb))
             return this;
+    /* A pangenome destination has no chain, so the scan above finds nothing and
+     * the scoring below would quietly replace the user's choice with some
+     * chain-backed assembly.  Stand in for it so the form keeps the selection
+     * and Submit can hand off. */
+    if (pangenomeFind(toDb) != NULL)
+        {
+        struct liftOverChain *pg;
+        AllocVar(pg);
+        pg->fromDb = cloneString(fromDb);
+        pg->toDb = cloneString(toDb);
+        return pg;
+        }
     }
 
 if (toOrg == NULL)
@@ -616,7 +759,34 @@ jsInline("drawCustom();\n");
 static void doConvert(char *fromPos)
 /* Actually do the conversion */
 {
-struct dbDb *fromDb = hDbDb(trackHubSkipHubName(database)), *toDb = hDbDb(cartString(cart, HGLFT_TODB_VAR));
+/* A pangenome destination has no liftOver chain, so none of the code below
+ * applies to it.  Hand it to hgPangenome, which translates through the graph,
+ * carrying the position and the assembly the user picked.  Everything else
+ * takes the ordinary chain path, unchanged. */
+char *toName = cartString(cart, HGLFT_TODB_VAR);
+struct pgAsm *pg = pangenomeFind(toName);
+if (pg != NULL)
+    {
+    char url[2048];
+    /* Carry the two checkboxes over as well: they mean the same thing on the
+     * other page, and having them reset would undo a choice the user just
+     * made. */
+    boolean wantAnnot = cartUsualBoolean(cart, "doQuickLift", FALSE);
+    boolean wantHide = cartUsualBoolean(cart, "hideTracksOnConvert", TRUE);
+    safef(url, sizeof(url),
+          "../cgi-bin/hgPangenome?page=convert&hgsid=%s&db=%s&position=%s&pgTarget=%s"
+          "&pgAnnot=%s&pgHide=%s",
+          cartSessionId(cart), cgiEncode(trackHubSkipHubName(database)),
+          cgiEncode(fromPos), cgiEncode(pg->hap),
+          wantAnnot ? "on" : "off", wantHide ? "on" : "off");
+    cartSetString(cart, "position", fromPos);
+    hPrintf("<script>window.location='%s';</script>\n", url);
+    hPrintf("<p>Handing off to TagAlong&#8230; "
+            "<a href='%s'>continue</a> if you are not redirected.</p>\n", url);
+    return;
+    }
+
+struct dbDb *fromDb = hDbDb(trackHubSkipHubName(database)), *toDb = hDbDb(toName);
 #ifdef NOTNOW
 boolean doSegments = TRUE;
 #endif
@@ -791,7 +961,13 @@ else
     struct dbDb *dbList, *fromDb, *toDb;
     dbList = hDbDbListMaybeCheck(FALSE);
     fromDb = matchingDb(dbList, choice->fromDb);
-    toDb = matchingDb(dbList, choice->toDb);
+    /* A pangenome destination has no dbDb row of its own, and matchingDb() dies
+     * rather than returning NULL.  Stand in with the source's record - the only
+     * field askForDestination reads from it is the organism. */
+    if (pangenomeFind(choice->toDb) != NULL)
+        toDb = fromDb;
+    else
+        toDb = matchingDb(dbList, choice->toDb);
     askForDestination(choice, fromPos, fromDb, toDb);
     liftOverChainFreeList(&liftOverList);
     }

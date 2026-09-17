@@ -316,8 +316,6 @@ function renderResult(res) {
     body.appendChild(renderHaplotypes(res.name, primary.haplotypes,
                                       primary.haplotype_coverage,
                                       primary.alignments));
-    if (primary.haplotypes && primary.haplotypes.num_segments > 1)
-        body.appendChild(renderMosaic(res.query_length, primary.haplotypes.mosaic));
     var sBox = renderSurjection(primary.surjection, res.name);
     surjectBoxByName[res.name] = sBox;
     body.appendChild(sBox);
@@ -375,13 +373,22 @@ function hapKey(name) {
 }
 
 // Merge the exact-carrier list with the graded coverage list into display rows,
-// ordered by coverage (100% first).  haplotype_coverage is the interesting
+// ordered by identity (best first).  haplotype_coverage is the interesting
 // ordering: every exact carrier visits all the read's nodes, so on its own the
-// carrier list has nothing to sort by - while coverage also surfaces near
-// misses (a haplotype differing at one variant is absent from "carried by" but
-// shows up here at, say, 99.8%).
+// carrier list has nothing to sort by - while the graded list also surfaces
+// near misses (a haplotype differing at one variant is absent from "carried
+// by" but shows up here).
 //
-// Rows: {name, coverage (or null), coveredBp (or null), isCarrier}
+// Identity is the ordering, matching the engine, which now ranks its list that
+// way too.  Sort here regardless: we splice in carriers the engine never
+// scored, so the merged list is ours to order and cannot inherit its position.
+//
+// The two agree where the sequence matches exactly - matched_bp is then just
+// covered_bp - and separate once there are mismatches, which is the case worth
+// ranking on.
+//
+// Rows: {name, coverage, coveredBp, identity, matchedBp, isCarrier};
+// every field but name and isCarrier is null when the engine did not report it.
 function haplotypeRows(hap, coverage) {
     var carriers = Object.create(null);
     (hap && hap.names ? hap.names : []).forEach(function (n) {
@@ -396,29 +403,41 @@ function haplotypeRows(hap, coverage) {
         rows.push({ name: carriers[key] || c.haplotype,
                     coverage: typeof c.coverage === "number" ? c.coverage : null,
                     coveredBp: typeof c.covered_bp === "number" ? c.covered_bp : null,
+                    identity: typeof c.identity === "number" ? c.identity : null,
+                    matchedBp: typeof c.matched_bp === "number" ? c.matched_bp : null,
                     isCarrier: !!carriers[key] });
     });
     // Carriers the coverage list did not mention (or an engine that predates the
     // field) still belong in the list, after everything that has a score.
     Object.keys(carriers).forEach(function (key) {
         if (seen[key]) return;
-        rows.push({ name: carriers[key], coverage: null, coveredBp: null, isCarrier: true });
+        rows.push({ name: carriers[key], coverage: null, coveredBp: null,
+                    identity: null, matchedBp: null, isCarrier: true });
     });
 
     rows.sort(function (a, b) {
+        var ia = a.identity == null ? -1 : a.identity;
+        var ib = b.identity == null ? -1 : b.identity;
+        if (ib !== ia) return ib - ia;                       // best match first
+        // An engine that reports coverage but not identity still sorts
+        // sensibly, and so do two haplotypes matching equally well.
         var ca = a.coverage == null ? -1 : a.coverage;
         var cb = b.coverage == null ? -1 : b.coverage;
-        if (cb !== ca) return cb - ca;                       // 100% first
+        if (cb !== ca) return cb - ca;
         return a.name.localeCompare(b.name);                 // stable, readable
     });
     return rows;
 }
 
-// "100%", "99.8%", or "" when the engine did not score this haplotype.
-function fmtCoverage(row) {
-    if (row.coverage == null) return "";
-    var v = row.coverage;
-    return (Math.round(v * 10) / 10) + "%";
+// "100%", "99.4%", or "" when the engine did not score this haplotype.
+//
+// Identity is the only number in the list.  Coverage answers a different
+// question - how much of the sequence is reachable here at all - and for a
+// clean match the two are the same figure, so printing both mostly gave the
+// same number twice.  Coverage is still in the hover and in the TSV.
+function fmtIdentity(row) {
+    if (row.identity == null) return "";
+    return (Math.round(row.identity * 10) / 10) + "%";
 }
 
 // PanSN ("HG00097#1#CM094066.1") is a storage convention, not something to put
@@ -465,20 +484,35 @@ function prettyHap(name) {
 
 // ---- Per-haplotype alignments as a PSL track --------------------------------
 
-// The server names an alignment's target in one of two ways when the path is a
-// subpath: "SAMPLE#PHASE#CONTIG#12345" or "GRCh38#0#chr9[12345]".  Either way
-// the trailing number is an offset the reported coordinates are relative to.
-function resolveAlignment(a) {
-    var full = String(a.haplotype || "");
+// The server names a path in one of two ways when it is a SUBPATH:
+// "SAMPLE#PHASE#CONTIG#12345" or "GRCh38#0#chr9[12345]".  Either way the
+// trailing number is an offset the reported coordinates are relative to, and
+// the contig name is what is left once it is removed.
+//
+// One parser, used by both the alignment and the surjection readers.  They used
+// to have one each, and only the alignment one knew the bracket form - so a
+// surjection onto a subpath showed "chr8[1407250]" as the contig name, linked
+// to a sequence no assembly has, and reported a position missing the offset.
+//
+// Returns {parts, offset} with parts = [sample, phase, contig], or null.
+function splitSubpath(name) {
+    var full = String(name == null ? "" : name);
     var offset = 0;
     var m = /^(.*)\[(\d+)\]$/.exec(full);
     if (m) { full = m[1]; offset = parseInt(m[2], 10); }
     var parts = full.split("#");
-    if (parts.length >= 4 && /^\d+$/.test(parts[3])) {
+    if (parts.length >= 4) {
+        if (!/^\d+$/.test(parts[3])) return null;   // unknown form -> do not guess
         offset = parseInt(parts[3], 10);
-        parts = parts.slice(0, 3);
     }
     if (parts.length < 3) return null;
+    return { parts: parts.slice(0, 3), offset: offset };
+}
+
+function resolveAlignment(a) {
+    var sp = splitSubpath(a.haplotype);
+    if (sp === null) return null;
+    var parts = sp.parts, offset = sp.offset;
     var hap = parts[0] + "#" + parts[1];
     return { hap: hap, contig: parts[2], offset: offset,
              assembly: assemblyFor(parts[0], parts[1]),
@@ -632,10 +666,10 @@ function renderHaplotypes(seqName, hap, coverage, alignments) {
         return box;
     }
     var rows = haplotypeRows(hap, coverage);
-    var scored = rows.filter(function (r) { return r.coverage != null; }).length;
+    var scored = rows.filter(function (r) { return r.identity != null; }).length;
     box.appendChild(el("div", { class: "pgSectionLabel", text:
         "Assemblies (" + hap.names.length + " carrying" +
-        (scored ? "; " + scored + " scored by coverage, best first" : "") + ")" }));
+        (scored ? "; " + scored + " scored by identity, best first" : "") + ")" }));
 
     // Representative.  Rendered as one plain-text run so a selection copies as
     // e.g. "CHM13#0#chr10 — representative, reference".
@@ -659,7 +693,7 @@ function renderHaplotypes(seqName, hap, coverage, alignments) {
 
     var list = el("div", { class: "pgHapList" });
     rows.forEach(function (r) {
-        var pct = fmtCoverage(r);
+        var pct = fmtIdentity(r);
         var pretty = prettyHap(r.name);
         // Clicking asks where this sequence lands on this haplotype, and the
         // answer replaces the "Position on assembly" section above.
@@ -673,13 +707,24 @@ function renderHaplotypes(seqName, hap, coverage, alignments) {
             e.preventDefault();
             showOnHaplotype(seqName, pretty);
         });
-        if (pct)
+        if (pct) {
+            // Coverage belongs in the hover: it is the answer to a different
+            // question (is the path reachable here at all) and it is 100% for
+            // nearly every row, so on the page it only competes with identity.
+            var note = [];
+            if (r.matchedBp != null)
+                note.push(r.matchedBp + " bp matching");
+            if (r.coverage != null)
+                note.push((Math.round(r.coverage * 10) / 10) + "% of the sequence covered" +
+                          (r.coveredBp != null ? " (" + r.coveredBp + " bp)" : ""));
+            if (!r.isCarrier)
+                note.push("shares part of the path, not all of it");
             row.appendChild(el("span", { class: "pgHapListPct", text: pct,
-                title: (r.coveredBp != null ? r.coveredBp + " bp of the alignment" : "") +
-                       (r.isCarrier ? "" : " (shares part of the path, not all of it)") }));
+                title: note.join(" · ") }));
+        }
         else if (!r.isCarrier)
             row.appendChild(el("span", { class: "pgHapListNote",
-                text: "no coverage reported",
+                text: "no identity reported",
                 title: "shares nodes with the read but does not carry its exact path" }));
         list.appendChild(row);
     });
@@ -699,10 +744,18 @@ function renderHaplotypes(seqName, hap, coverage, alignments) {
 // standard readers), no PanSN, and coverage and identity as fractions rather
 // than percentages so they can be used arithmetically.
 //
-// fraction_identity is always a column so the shape is stable for downstream
-// tools, but it is only filled for haplotypes an alignment was computed for -
-// the rest of the carrier list is coverage-only, and a blank is honest where a
-// guess would not be.
+// fraction_identity is what the page now ranks on; it comes from the graded
+// list, falling back to a computed alignment where the engine did not grade
+// this haplotype.  It stays a column even when neither is available, so the
+// shape is stable for downstream tools, and a blank is honest where a guess
+// would not be.
+// A percentage as a fraction, without the float dust: 99.4/100 is
+// 0.9940000000000001 in IEEE, which is not something to write into a file
+// people load into a spreadsheet.
+function pctToFraction(v) {
+    return v == null ? "" : String(Math.round(v * 1e6) / 1e8);
+}
+
 function haplotypeTsv(rows, alignments) {
     var ident = identityByHap(alignments);
     var out = ["assembly\tassembly_name\tsample\thaplotype\tparental_origin\t" +
@@ -715,8 +768,8 @@ function haplotypeTsv(rows, alignments) {
                   p.phase == null ? "" : p.phase,
                   p.parent == null ? "" : p.parent,
                   p.contig == null ? "" : p.contig,
-                  r.coverage == null ? "" : (r.coverage / 100),
-                  identOf(ident, p),
+                  pctToFraction(r.coverage),
+                  r.identity == null ? identOf(ident, p) : pctToFraction(r.identity),
                   r.coveredBp == null ? "" : r.coveredBp].join("\t"));
     });
     return out.join("\n") + "\n";
@@ -752,42 +805,6 @@ function downloadMenu(seqName, hap, rows, alignments) {
                      "text/tab-separated-values");
     }));
     return wrap;
-}
-
-function renderMosaic(qlen, segments) {
-    var box = el("div", { class: "pgSection pgMosaic" });
-    box.appendChild(el("div", { class: "pgSectionLabel", text:
-        "Mosaic — no single assembly spans this read" }));
-    if (!segments || segments.length === 0) return box;
-
-    var total = segments.reduce(function (s, seg) { return s + (seg.covered_bp || 0); }, 0) ||
-                qlen || 1;
-    var bar = el("div", { class: "pgMosaicBar" });
-    segments.forEach(function (seg, i) {
-        var pct = 100 * (seg.covered_bp || 0) / total;
-        var cell = el("div", {
-            class: "pgMosaicSeg pgMosaicSeg" + (i % 4),
-            title: (seg.covered_bp || 0) + " bp · " + (seg.haplotype_count || 0) +
-                   " assemblies · rep " + (seg.representative || "?")
-        });
-        cell.style.width = pct.toFixed(2) + "%";
-        cell.appendChild(el("span", { class: "pgMosaicSegLabel",
-            text: (seg.covered_bp || 0) + " bp" }));
-        bar.appendChild(cell);
-    });
-    box.appendChild(bar);
-
-    var legend = el("div", { class: "pgMosaicLegend" });
-    segments.forEach(function (seg, i) {
-        legend.appendChild(el("span", { class: "pgMosaicKey" }, [
-            el("span", { class: "pgMosaicSwatch pgMosaicSeg" + (i % 4) }),
-            el("span", { text: (seg.representative
-                    ? prettyHap(seg.representative).label : "?") + " — " +
-                (seg.covered_bp || 0) + " bp, " + (seg.haplotype_count || 0) + " assemblies" })
-        ]));
-    });
-    box.appendChild(legend);
-    return box;
 }
 
 var SURJECT_MSG = {
@@ -857,13 +874,9 @@ function cigarRefSpan(cigar) {
 function resolveSurjection(sj) {
     if (!sj || sj.status !== "ok" || sj.target == null || sj.position == null)
         return null;
-    var parts = String(sj.target).split("#");           // PanSN: SAMPLE#PHASE#CONTIG
-    if (parts.length < 3) return null;
-    var offset = 0;
-    if (parts.length > 3) {                              // optional subpath offset suffix
-        if (/^\d+$/.test(parts[3])) offset = parseInt(parts[3], 10);
-        else return null;                               // unknown subpath form -> don't guess
-    }
+    var sp = splitSubpath(sj.target);                   // PanSN, maybe a subpath
+    if (sp === null) return null;
+    var parts = sp.parts, offset = sp.offset;
     var start0 = offset + sj.position;
     return { sample: parts[0], phase: parts[1], contig: parts[2],
              hapContig: parts.slice(0, 3).join("#"),
@@ -1097,13 +1110,15 @@ var surjectBoxByName = {};   // card name -> its "Position on assembly" section
 var pollTimer = null;
 
 function collectOptions() {
-    var target = ($("pgSurjectTarget").value || "").trim();
     var mm = parseInt($("pgMaxMultimaps").value, 10);
     var opts = {
         max_multimaps: (mm && mm > 0) ? mm : MAX_MULTIMAPS,
         // Always on: there is no useful result without a position.
         surject: true,
-        surject_target: target === "" ? null : target
+        // Null means the representative assembly.  The user chooses a different
+        // one by clicking it in the assembly list, which re-surjects against the
+        // job we already have - so there is nothing to ask for up front.
+        surject_target: null
     };
     // Coverage is reported for every haplotype sharing any part of the path -
     // a few hundred per alignment.  A configured cutoff trims that at the
@@ -1211,7 +1226,6 @@ function onFile(evt) {
 function onClear() {
     $("pgSeq").value = "";
     $("pgFile").value = "";
-    $("pgSurjectTarget").value = "";
     clear(resultsEl);
     cardsByName = {};
     hideStatus();
@@ -1219,23 +1233,12 @@ function onClear() {
 
 // ---- Init -------------------------------------------------------------------
 
-function wireHelp() {
-    var link = document.getElementById("pgSurjectHelp");
-    var box = document.getElementById("pgSurjectHelpBox");
-    if (!link || !box) return;
-    link.addEventListener("click", function (e) {
-        e.preventDefault();
-        box.style.display = (box.style.display === "none") ? "" : "none";
-    });
-}
-
 function init() {
     resultsEl = $("pgResults");
     statusEl = $("pgStatus");
     if (!resultsEl) return;   // not our page
 
     readConfig();
-    wireHelp();             // window.pangenomeConfig is defined by now
     api = makeApi();
 
 
@@ -1268,6 +1271,7 @@ if (typeof module !== "undefined" && module.exports)
         readConfig: readConfig,
         renderResult: renderResult,
         haplotypeRows: haplotypeRows,
+        splitSubpath: splitSubpath,
         resolveSurjection: resolveSurjection,
         prettyHap: prettyHap,
         resolveAlignment: resolveAlignment,

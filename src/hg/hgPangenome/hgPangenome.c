@@ -57,7 +57,18 @@
  *                            the middleware's own default.  The default returns
  *                            a few hundred haplotypes per alignment, so set this
  *                            if those payloads become a problem.
- *   pangenome.maxLiftSpan    max bp per coordinate translation; default 10000000
+ *   pangenome.maxLiftSpan    max bp per coordinate translation; default 1000000
+ *   pangenome.maxLiftTargetMb  max (span in Mb) x (targets) per request; default
+ *                            5.  The service traverses once per target and
+ *                            serves one request at a time, so the product is
+ *                            the real cost - capping span and targets
+ *                            separately let 10 Mb x 10 targets through.
+ *   pangenome.maxChainSpan   max bp we may fetch to build a chain; default
+ *                            10000000.  Separate from maxLiftSpan on purpose:
+ *                            that limits what a user may ask for, this limits
+ *                            what the server fetches for padding.
+ *   pangenome.maxBlocks      max blocks accepted in one translation; default
+ *                            200000
  *   pangenome.defaultSrcDb   assembly the conversion page falls back to when it
  *                            has no usable source; default hs1
  *   pangenome.defaultPosition   position to go with it; default is hs1's own
@@ -70,6 +81,14 @@
  *   pangenome.minTargetCoverage  when ranking conversion destinations, drop
  *                            haplotypes below this percentage (incidental repeat
  *                            matches); default 10
+ *   pangenome.chainPadNear   bp either side of the converted interval that the
+ *                            first chain reaches; default 250000, raised to 5x
+ *                            the interval, capped by chainPadNearMax
+ *   pangenome.chainPadNearMax  ceiling for that; default 1000000
+ *   pangenome.chainPadWide   bp either side for the wider chain fetched after
+ *                            the user follows the link; default 5000000.  Both
+ *                            are clamped so interval+2*pad fits maxLiftSpan.
+ *                            Set either to 0 to switch that stage off.
  *   pangenome.wideRegionBp   warn that a conversion may be incomplete at or above
  *                            this many bp; default 100000
  *   pangenome.maxLiftTargets max target haplotypes in one conversion; default 10.
@@ -405,6 +424,26 @@ if (errCatchStart(errCatch))
             safef(msg, sizeof(msg), "range is %ld bp (limit %ld)", end - start, maxSpan);
             result = msg;
             }
+        /* Span and target count are each capped above, but the work is their
+         * product: the mapping service traverses the graph once per target and
+         * handles one request at a time, so 10 targets x 10 Mb is a hundred
+         * target-megabases and about two minutes during which nobody else is
+         * served.  Capping each half separately is what allowed that. */
+        else if (needTgt)
+            {
+            long targets = (tgtEl != NULL && tgtEl->type == jsonList)
+                           ? slCount(tgtEl->val.jeList) : 1;
+            long budgetMb = atol(cfgOr("pangenome.maxLiftTargetMb", "5"));
+            long askedMb = ((end - start) * targets + 999999) / 1000000;
+            if (budgetMb > 0 && askedMb > budgetMb)
+                {
+                safef(msg, sizeof(msg),
+                      "%ld bp x %ld assemblies is %ld megabase-assemblies "
+                      "(limit %ld); convert a smaller range or fewer assemblies",
+                      end - start, targets, askedMb, budgetMb);
+                result = msg;
+                }
+            }
         }
     }
 errCatchEnd(errCatch);
@@ -476,7 +515,7 @@ if (sameString(cmd, "map"))
     /* Server-side input caps (do not trust the browser).  These must stay in
      * sync with the middleware's limits; keep them in hg.conf. */
     /* Limits agreed with the middleware team; keep both sides identical. */
-    int maxSeqs = atoi(cfgOr("pangenome.maxSequences", "50"));
+    int maxSeqs = atoi(cfgOr("pangenome.maxSequences", "10"));
     int maxSeqLen = atoi(cfgOr("pangenome.maxSeqLen", "100000"));      /* 100 kb / read */
     int maxBytes = atoi(cfgOr("pangenome.maxRequestBytes", "10000000")); /* 10 MB body */
     if (strlen(payload) > (size_t)maxBytes)
@@ -516,7 +555,7 @@ else if (sameString(cmd, "liftoverTargets"))
         emitJsonError("missing 'payload'");
         return;
         }
-    long maxSpan = atol(cfgOr("pangenome.maxLiftSpan", "10000000"));
+    long maxSpan = atol(cfgOr("pangenome.maxLiftSpan", "1000000"));
     char *bad = pgValidateLiftover(payload, maxSpan, FALSE, 0);
     if (bad != NULL)
         {
@@ -569,8 +608,8 @@ else /* cmd == "liftover" */
         emitJsonError("missing 'payload'");
         return;
         }
-    long maxSpan = atol(cfgOr("pangenome.maxLiftSpan", "10000000"));
-    int maxTargets = atoi(cfgOr("pangenome.maxLiftTargets", "10"));
+    long maxSpan = atol(cfgOr("pangenome.maxLiftSpan", "1000000"));
+    int maxTargets = atoi(cfgOr("pangenome.maxLiftTargets", "5"));
     char *bad = pgValidateLiftover(payload, maxSpan, TRUE, maxTargets);
     if (bad != NULL)
         {
@@ -861,6 +900,13 @@ static struct pgBlock *pgParseBlocks(struct jsonElement *root, long qSize,
                                      char **retError)
 /* Turn the middleware's "blocks" array into chain-space blocks. */
 {
+/* A chain is built in memory, one node per block, so an unbounded array is an
+ * unbounded allocation.  The cap is far above anything a legal request
+ * produces (a 10 Mb span runs ~2,500 blocks) and exists only to stop a
+ * hand-made payload. */
+long maxBlocks = atol(cfgOr("pangenome.maxBlocks", "200000"));
+long blockCount = 0;
+
 struct jsonElement *blocksEl = jsonFindNamedField(root, "", "blocks");
 if (blocksEl == NULL || blocksEl->type != jsonList)
     {
@@ -911,6 +957,11 @@ for (ref = jsonListVal(blocksEl, "blocks"); ref != NULL; ref = ref->next)
     if (b->tEnd <= b->tStart || b->qEnd <= b->qStart || b->qStart < 0)
         {
         *retError = "a block has an empty or out-of-range coordinate span";
+        return NULL;
+        }
+    if (++blockCount > maxBlocks)
+        {
+        *retError = "too many blocks in this translation";
         return NULL;
         }
     slAddHead(&list, b);
@@ -1081,34 +1132,72 @@ return startsWithWord("bigBed", type) || startsWithWord("bigGenePred", type) ||
 /* Settings that would either fight the lift or describe the source's own
  * layout, so they are not copied into the stanza. */
 static char *pgSkipSettings[] = {"track", "type", "shortLabel", "longLabel",
-    "visibility", "parent", "superTrack", "compositeTrack", "container",
-    "subTrack", "view", "subGroups", "priority", "group", "html",
+    "visibility", "parent", "subTrack", "priority", "group", "html",
     "quickLiftUrl", "quickLiftDb", "quickLifted", "avoidHandler"};
 
-static void pgWriteTrackStanza(FILE *f, struct trackDb *tdb, char *srcDb,
-                               char *chainRel, int priority)
-/* One flat stanza for a track we are carrying over.  Containers are dropped
- * and their children written standalone: the point is to show the source's
- * genes on the target, and a composite's grouping does not survive the move
- * in any useful way. */
+static void pgWriteTrackStanza(struct dyString *dy, struct trackDb *tdb, char *srcDb,
+                               char *chainRel, int priority, boolean isChild)
+/* One stanza for a track we are carrying over.
+ *
+ * Names go in with the source hub's prefix stripped, the way
+ * dumpTdbAndChildren() writes them for quickLift: our hub's own prefix is added
+ * to "track" and "parent" alike when the file is read, so the two only line up
+ * if neither carries a prefix of its own going in. */
 {
-fprintf(f, "\ntrack %s\n", tdb->track);
-fprintf(f, "shortLabel %s\n", isEmpty(tdb->shortLabel) ? tdb->track : tdb->shortLabel);
-fprintf(f, "longLabel %s\n",
+dyStringPrintf(dy, "\ntrack %s\n", trackHubSkipHubName(tdb->track));
+dyStringPrintf(dy, "shortLabel %s\n",
+               isEmpty(tdb->shortLabel) ? tdb->track : tdb->shortLabel);
+dyStringPrintf(dy, "longLabel %s\n",
         isEmpty(tdb->longLabel) ? (isEmpty(tdb->shortLabel) ? tdb->track
                                                             : tdb->shortLabel)
                                 : tdb->longLabel);
-fprintf(f, "type %s\n", tdb->type);
-fprintf(f, "group genes\n");
-fprintf(f, "visibility pack\n");
-fprintf(f, "priority %d\n", priority);
+if (!isEmpty(tdb->type))
+    dyStringPrintf(dy, "type %s\n", tdb->type);
+/* How the container names this track tells us what kind of container it is.
+ * "parent <name> on|off" is a composite or a view, which owns its subtracks'
+ * visibility; a bare "parent <name>" is a superTrack, whose members each keep
+ * a visibility of their own. */
+char *parentKey = "parent";
+char *parentVal = trackDbLocalSetting(tdb, "parent");
+if (parentVal == NULL)
+    {
+    parentKey = "subTrack";
+    parentVal = trackDbLocalSetting(tdb, "subTrack");
+    }
+char parentBuf[512];
+boolean ownsVisibility = FALSE;      /* true when the container decides for us */
+if (isChild && parentVal != NULL)
+    {
+    safef(parentBuf, sizeof(parentBuf), "%s", trackHubSkipHubName(parentVal));
+    char *sp = skipToSpaces(parentBuf);
+    if (sp != NULL)
+        {
+        *sp = '\0';
+        ownsVisibility = TRUE;
+        }
+    }
+/* Group and priority place a track in the browser's track list, which only
+ * top-level tracks appear in; a subtrack is placed by its container. */
+if (!isChild)
+    {
+    dyStringPrintf(dy, "group genes\n");
+    dyStringPrintf(dy, "priority %d\n", priority);
+    }
+if (!ownsVisibility)
+    dyStringPrintf(dy, "visibility %s\n", hStringFromTv(tdb->visibility));
 /* Marks the track as one this hub is lifting.  "quickLifted" also relaxes the
  * hub's type check, which is what lets a plain genePred through. */
-fprintf(f, "quickLifted on\n");
-fprintf(f, "avoidHandler on\n");
-fprintf(f, "quickLiftUrl %s\n", chainRel);
-fprintf(f, "quickLiftDb %s\n", srcDb);
+dyStringPrintf(dy, "quickLifted on\n");
+dyStringPrintf(dy, "avoidHandler on\n");
+dyStringPrintf(dy, "quickLiftUrl %s\n", chainRel);
+dyStringPrintf(dy, "quickLiftDb %s\n", srcDb);
+/* Point at the container by the same name we wrote for it.  Where the setting
+ * carries an on/off flag it becomes "on": we only get here for a subtrack the
+ * user has left selected, whatever trackDb defaulted it to. */
+if (isChild && parentVal != NULL)
+    dyStringPrintf(dy, "%s %s%s\n", parentKey, parentBuf, ownsVisibility ? " on" : "");
 /* Everything else the source track declared - filters, colours, label fields,
+ * the subGroup and composite declarations that hold the container together,
  * and bigDataUrl where there is one. */
 struct hashEl *el, *list = hashElListHash(tdb->settingsHash);
 slSort(&list, hashElCmp);
@@ -1119,7 +1208,7 @@ for (el = list; el != NULL; el = el->next)
     char *val = (char *)el->val;
     if (val == NULL || strchr(val, '\n') != NULL)  /* multi-line will not survive */
         continue;
-    fprintf(f, "%s %s\n", el->name, val);
+    dyStringPrintf(dy, "%s %s\n", el->name, val);
     }
 hashElFreeList(&list);
 }
@@ -1189,15 +1278,6 @@ slPairFreeList(&vars);
 hDisconnectCentral(&conn);
 }
 
-static boolean pgUserChose(struct trackDb *tdb)
-/* Did the user switch this track on themselves?  A cart entry that is not
- * "hide" is a deliberate act, and outranks the filters that only exist to keep
- * an untouched default set sensible. */
-{
-char *cartVis = cartOptionalString(cart, tdb->track);
-return (cartVis != NULL && differentWord(cartVis, "hide"));
-}
-
 static boolean pgVisibleInCart(struct trackDb *tdb)
 /* Is this track showing for this user?  The cart wins and trackDb is only the
  * fallback - the same rule as checkCartVisibility() in trackHub.c, which is how
@@ -1207,7 +1287,15 @@ static boolean pgVisibleInCart(struct trackDb *tdb)
 {
 char *cartVis = cartOptionalString(cart, tdb->track);
 if (cartVis != NULL)
-    tdb->visibility = hTvFromString(cartVis);
+    {
+    /* A superTrack is stored as "show"/"hide" rather than as a visibility, and
+     * hTvFromString() aborts on anything it does not recognise. */
+    if (sameWord(cartVis, "show"))
+        return TRUE;
+    enum trackVisibility vis = hTvFromStringNoAbort(cartVis);
+    if ((int)vis >= 0)
+        tdb->visibility = vis;
+    }
 return (tdb->visibility != tvHide);
 }
 
@@ -1233,59 +1321,159 @@ safef(option, sizeof(option), "%s_sel", tdb->track);
 return cartUsualBoolean(cart, option, enabled);
 }
 
-static void pgEmitLeaves(FILE *f, struct trackDb *tdb, char *srcDb, char *chainRel,
-                         struct hash *written, struct dyString *shown,
-                         struct dyString *skipped, int *pPriority, boolean chosen)
-/* Write a stanza for every real data track at or under tdb.
- *
- * Containers must be descended, not emitted: a composite or a view has no data
- * of its own, and a stanza for one sends hgTracks looking for a table that was
- * never there ("table wgEncodeGencodeV50ViewGenes doesn't exist").  The nesting
- * can be more than one deep - GENCODE is composite, then view, then the actual
- * tracks - so recurse rather than stepping down a single level. */
+static char *pgParentName(struct trackDb *tdb)
+/* The container this track belongs to, or NULL.  The setting is "<track> on"
+ * or "<track> off", so take the first word. */
 {
-/* A container holds no data of its own.  Test the declarations rather than
- * tdbIsContainer(): the track list we are handed is flat, so a composite or a
- * view often arrives with an empty subtracks list and would otherwise look like
- * a leaf - which is how "table wgEncodeGencodeV50ViewGenes doesn't exist" got
- * onto the page. */
-boolean isContainer = tdbIsContainer(tdb) ||
-    trackDbSetting(tdb, "compositeTrack") != NULL ||
-    trackDbSetting(tdb, "superTrack") != NULL ||
-    trackDbSetting(tdb, "container") != NULL ||
-    trackDbSetting(tdb, "view") != NULL;
-if (isContainer)
-    {
-    if (!pgVisibleInCart(tdb))
-        return;                 /* the whole container is off */
-    struct trackDb *child;
-    for (child = tdb->subtracks; child != NULL; child = child->next)
-        if (pgSubtrackOn(child))
-            pgEmitLeaves(f, child, srcDb, chainRel, written, shown, skipped,
-                         pPriority, chosen || pgUserChose(child));
-    return;
-    }
+char *setting = trackDbSetting(tdb, "parent");
+if (isEmpty(setting))
+    setting = trackDbSetting(tdb, "subTrack");
+if (isEmpty(setting))
+    return NULL;
+static char buf[256];
+safef(buf, sizeof(buf), "%s", setting);
+char *sp = skipToSpaces(buf);
+if (sp != NULL)
+    *sp = '\0';
+return buf;
+}
 
-/* Compare undecorated: an assembly served from a hub offers the same track
- * both natively and as hub_<id>_<track>, and those are one track to the user. */
-char *bare = trackHubSkipHubName(tdb->track);
-if (hashLookup(written, bare) != NULL)
-    return;
-hashAdd(written, bare, NULL);
+static boolean pgIsContainer(struct trackDb *tdb)
+/* Does this track hold other tracks rather than data of its own?  Test the
+ * declarations rather than tdbIsContainer(): the track list we are handed is
+ * flat, so a composite or a view often arrives with an empty subtracks list and
+ * would otherwise look like a leaf - which is how "table
+ * wgEncodeGencodeV50ViewGenes doesn't exist" got onto the page. */
+{
+/* Local settings only.  trackDbSetting() inherits from the container, so a
+ * plain subtrack of a composite answers "yes" to compositeTrack and to view,
+ * and every leaf under NCBI RefSeq and T2T Encode was descended into as though
+ * it held tracks of its own - finding none, and dropping the lot. */
+return tdbIsContainer(tdb) ||
+    trackDbLocalSetting(tdb, "compositeTrack") != NULL ||
+    trackDbLocalSetting(tdb, "superTrack") != NULL ||
+    trackDbLocalSetting(tdb, "container") != NULL ||
+    trackDbLocalSetting(tdb, "view") != NULL;
+}
 
-/* bigWig lifts cleanly enough, but a wiggle of read depth or conservation is a
- * measurement of the source, not a feature to point at on the target - and the
- * sources carry dozens of them. */
-/* bigWig lifts perfectly well; it is left out of the default set only because
- * the sources carry dozens of them.  Asked for explicitly, it comes. */
-boolean ok = pgLiftableType(tdb->type) &&
-             (chosen || !startsWithWord("bigWig", tdb->type));
-struct dyString *into = ok ? shown : skipped;
+static boolean pgIsSuperTrack(struct trackDb *tdb)
+/* Is this a superTrack rather than a composite?  The declaration reads
+ * "superTrack on" or "superTrack on show"; a member of one reads
+ * "superTrack <containerName>". */
+{
+char *setting = trackDbLocalSetting(tdb, "superTrack");
+return (setting != NULL && startsWithWord("on", setting));
+}
+
+static void pgNote(struct dyString *into, struct trackDb *tdb)
+/* Add a track's label to one of the lists we report back. */
+{
+if (into == NULL)
+    return;
 if (into->stringSize > 0)
     dyStringAppend(into, ", ");
 dyStringAppend(into, isEmpty(tdb->shortLabel) ? tdb->track : tdb->shortLabel);
-if (ok)
-    pgWriteTrackStanza(f, tdb, srcDb, chainRel, (*pPriority)++);
+}
+
+static struct dyString *pgEmitTree(struct trackDb *tdb, char *srcDb, char *chainRel,
+                                   struct hash *written, struct hash *children,
+                                   struct dyString *shown, struct dyString *skipped,
+                                   int *pPriority, boolean isChild, boolean report)
+/* Stanzas for this track and everything selected underneath it, or NULL if it
+ * carries nothing.
+ *
+ * Containers are kept, not flattened.  Emitting only the leaves loses a
+ * composite whose children are not individually selected in this session -
+ * NCBI RefSeq and CHM13 unique both went missing that way - and it loses the
+ * grouping the user is used to on the source.  quickLift's dumpTdbAndChildren()
+ * writes the container and recurses; so do we.
+ *
+ * The stanzas are built up in memory rather than written straight out because a
+ * container is only worth writing once we know something came back from below
+ * it: a stanza for an empty composite is a track the browser draws as a broken
+ * heading. */
+{
+char *bare = trackHubSkipHubName(tdb->track);
+/* Compare undecorated: an assembly served from a hub offers the same track
+ * both natively and as hub_<id>_<track>, and those are one track to the user. */
+if (hashLookup(written, bare) != NULL)
+    return NULL;
+
+if (pgIsContainer(tdb))
+    {
+    /* Only a top-level container answers for its own visibility.  A view has
+     * none of its own - it is a heading inside a composite - so testing it
+     * threw away every leaf under T2T Encode's four views.  For anything below
+     * the top the container loop has already applied the right test, either
+     * subtrack selection or, under a superTrack, visibility. */
+    if (!isChild && !pgVisibleInCart(tdb))
+        return NULL;
+    hashAdd(written, bare, NULL);
+    /* A superTrack is only a heading: its members each stand on their own in
+     * the browser's track list, so they are what we report, and each keeps its
+     * own visibility.  A composite is the opposite - it is the track the user
+     * turned on, and its subtracks are its parts. */
+    boolean isSuper = pgIsSuperTrack(tdb);
+    struct dyString *kids = dyStringNew(0);
+    /* Children reach us two ways: nested under subtracks when the list came
+     * built as a tree, and as their own top-level entries with a "parent"
+     * setting when it did not. */
+    struct slRef *refs = NULL, *ref;
+    struct hashEl *hel;
+    for (hel = hashLookup(children, tdb->track); hel != NULL; hel = hashLookupNext(hel))
+        refAdd(&refs, hel->val);
+    struct trackDb *child;
+    for (child = tdb->subtracks; child != NULL; child = child->next)
+        refAdd(&refs, child);
+    slReverse(&refs);
+    for (ref = refs; ref != NULL; ref = ref->next)
+        {
+        child = ref->val;
+        if (isSuper ? !pgVisibleInCart(child) : !pgSubtrackOn(child))
+            continue;
+        struct dyString *sub = pgEmitTree(child, srcDb, chainRel, written, children,
+                                          shown, skipped, pPriority, TRUE,
+                                          report && isSuper);
+        if (sub != NULL)
+            {
+            dyStringAppend(kids, sub->string);
+            dyStringFree(&sub);
+            }
+        }
+    slFreeList(&refs);
+    if (kids->stringSize == 0)
+        {
+        /* Showing on the source, nothing to show on the target.  Say so rather
+         * than letting it disappear: a track the user can see on the source and
+         * cannot find afterwards needs an explanation. */
+        dyStringFree(&kids);
+        if (report && !isSuper)
+            pgNote(skipped, tdb);
+        return NULL;
+        }
+    struct dyString *dy = dyStringNew(0);
+    pgWriteTrackStanza(dy, tdb, srcDb, chainRel, (*pPriority)++, isChild);
+    dyStringAppend(dy, kids->string);
+    dyStringFree(&kids);
+    if (report && !isSuper)
+        pgNote(shown, tdb);
+    return dy;
+    }
+
+hashAdd(written, bare, NULL);
+/* Type is the only filter on a leaf: quickLift lifts bigWig too, and a wiggle
+ * that is showing on the source is one the user chose to look at. */
+if (!pgLiftableType(tdb->type))
+    {
+    if (report)
+        pgNote(skipped, tdb);
+    return NULL;
+    }
+struct dyString *dy = dyStringNew(0);
+pgWriteTrackStanza(dy, tdb, srcDb, chainRel, (*pPriority)++, isChild);
+if (report)
+    pgNote(shown, tdb);
+return dy;
 }
 
 static char *pgWriteQuickLiftHub(char *srcDb, char *srcHap, char *tgtDb, char *chainBb,
@@ -1307,8 +1495,14 @@ struct grp *grpList = NULL;
 cartTrackDbInit(cart, &tdbList, &grpList, FALSE);
 
 char *hubPath = pgHubName(trackHubSkipHubName(srcDb), tgtDb);
-FILE *f = mustOpen(hubPath, "w");
-chmod(hubPath, 0666);
+/* Write to one side and rename into place.  The wider chain is fetched while
+ * the browser is already showing this hub, so hgTracks can be reading the file
+ * at the moment we rewrite it; rename(2) swaps it in one step, where writing
+ * over it in place would let a request see half a hub. */
+char hubTmp[PATH_LEN];
+safef(hubTmp, sizeof(hubTmp), "%s.tmp", hubPath);
+FILE *f = mustOpen(hubTmp, "w");
+chmod(hubTmp, 0666);
 
 /* Name the chain relative to the hub - they land in the same trash directory.
  * Every setting whose name ends in "Url" is resolved against the hub's own
@@ -1340,40 +1534,64 @@ fprintf(f, "genome %s\n", tgtDb);
  * we attach the assemblies, and the track list grows a second copy - and a
  * repeated stanza would be a repeated track in the browser. */
 struct hash *written = hashNew(8);
+/* Name index, so a subtrack can find the container it belongs to and a
+ * container the subtracks that belong to it.  Containers have to be gathered
+ * by walking tdb->parent as well as by reading the list: a superTrack's members
+ * are hoisted to the top of the list and the superTrack itself never appears
+ * there, so looking only at list members loses it and treats every member as a
+ * track of its own. */
+struct hash *byName = hashNew(12);
+struct hash *children = hashNew(12);
+struct trackDb *ix, *up;
+for (ix = tdbList; ix != NULL; ix = ix->next)
+    for (up = ix; up != NULL; up = up->parent)
+        if (hashLookup(byName, up->track) == NULL)
+            hashAdd(byName, up->track, up);
+for (ix = tdbList; ix != NULL; ix = ix->next)
+    {
+    char *parent = pgParentName(ix);
+    if (parent != NULL && hashLookup(byName, parent) != NULL)
+        hashAdd(children, parent, ix);
+    }
 int priority = 10;
 for (tdb = tdbList; tdb != NULL; tdb = tdb->next)
     {
-    /* Read the group from the track's own setting: tdb->grp is a placeholder
-     * this early, and on a hub-served assembly it never becomes the real
-     * group name at all. */
-    char *grp = trackDbSetting(tdb, "group");
-    if (isEmpty(grp))
-        grp = tdb->grp;
     /* Carry across what the user is actually looking at on the source - the
-     * set the browser lists as "Visible Tracks" - narrowed to the groups that
-     * describe features of the sequence.  Alignments and comparative tracks
-     * (compGeno) describe the source's relationship to some third assembly, so
-     * they mean nothing once moved. */
+     * set the browser lists as "Visible Tracks".  No group filter: quickLift
+     * carries whatever is showing, and so do we.  Filtering by group as well
+     * dropped tracks that were plainly on whenever they were on by trackDb
+     * default rather than by a click, which is not a distinction the user
+     * makes or sees. */
     if (!pgVisibleInCart(tdb))
-        continue;
-    /* The group filter keeps an untouched default sensible; it has no business
-     * overriding a track the user deliberately switched on. */
-    if (!pgUserChose(tdb) &&
-        !(sameOk(grp, "genes") || sameOk(grp, "rna") || sameOk(grp, "map")))
         continue;
     /* The ideogram describes the source's own chromosomes, so it means nothing
      * on the target.  trackHub.c's validateOneTdb() leaves it out for the same
      * reason. */
     if (sameString(trackHubSkipHubName(tdb->track), "cytoBandIdeo"))
         continue;
-    /* Only top-level tracks: a subtrack is reached through its container
-     * below, and taking it here as well would both duplicate it and ignore
-     * whether the container it lives in is showing at all. */
-    if (!isEmpty(trackDbSetting(tdb, "parent")) ||
-        !isEmpty(trackDbSetting(tdb, "subTrack")))
-        continue;
-    pgEmitLeaves(f, tdb, srcDb, chainRel, written, shown, skipped, &priority,
-                 pgUserChose(tdb));
+    /* Start from the top of whatever this track hangs off, so the container
+     * comes out above its children rather than the children standing alone. */
+    struct trackDb *root = tdb;
+    int depth = 0;
+    while (depth++ < 10)
+        {
+        struct trackDb *above = root->parent;
+        if (above == NULL)
+            {
+            char *name = pgParentName(root);
+            above = (name == NULL) ? NULL : hashFindVal(byName, name);
+            }
+        if (above == NULL)
+            break;
+        root = above;
+        }
+    struct dyString *dy = pgEmitTree(root, srcDb, chainRel, written, children,
+                                     shown, skipped, &priority, FALSE, TRUE);
+    if (dy != NULL)
+        {
+        fputs(dy->string, f);
+        dyStringFree(&dy);
+        }
     }
 
 /* The track that draws the insertion, deletion and mismatch marks.  Same
@@ -1396,6 +1614,13 @@ fprintf(f, "visibility dense\n");
 fprintf(f, "priority 1\n");
 
 carefulClose(&f);
+if (rename(hubTmp, hubPath) != 0)
+    {
+    /* Nothing has been swapped in, so the hub already on disk is still whole
+     * and still correct - just not yet widened. */
+    unlink(hubTmp);
+    return NULL;
+    }
 return cloneString(hubPath);
 }
 
@@ -1467,7 +1692,185 @@ else
     cartSetString(cart, "db", savedDb);
 }
 
-static void doQuickLift()
+/* How far either side of the converted interval the chain should reach.
+ *
+ * The chain is what lets the lifted tracks be drawn, so wherever it stops the
+ * annotations stop with it.  Zooming out is safe - the covered band keeps
+ * drawing and the rest is simply empty - so this is really about how far the
+ * user can pan before the tracks go blank.
+ *
+ * Two sizes, because the cost is real: the mapping service takes about a second
+ * per megabase and serves one request at a time, so a wide chain bought up
+ * front would be charged to every conversion, including the many that are never
+ * panned.  The near pad is what the first request pays for; the wide pad is
+ * fetched afterwards, off the click, and replaces it. */
+static long pgChainPad(long span, boolean wide)
+{
+/* Deliberately not maxLiftSpan.  That caps what a *user* may ask to translate
+ * and is set low to protect a service that handles one request at a time; this
+ * caps what *we* fetch to build a chain, which is a different question.  Tying
+ * the two together silently shrank the wide chain to nothing the moment
+ * maxLiftSpan was lowered, and panning quietly stopped working. */
+long maxSpan = atol(cfgOr("pangenome.maxChainSpan", "10000000"));
+long pad = wide ? atol(cfgOr("pangenome.chainPadWide", "5000000"))
+                : atol(cfgOr("pangenome.chainPadNear", "250000"));
+if (pad <= 0 || span <= 0)
+    return 0;
+/* Proportional for the near pad, so a gene-sized conversion gets room to pan
+ * in window-widths rather than in a fixed number of bases that means something
+ * quite different at either end of the zoom range. */
+if (!wide)
+    {
+    long proportional = span * 5;
+    if (proportional > pad)
+        pad = proportional;
+    long ceiling = atol(cfgOr("pangenome.chainPadNearMax", "1000000"));
+    if (pad > ceiling)
+        pad = ceiling;
+    }
+/* The service refuses anything wider than maxLiftSpan, so the pad has to fit
+ * inside what is left once the interval itself is counted. */
+long room = (maxSpan - span) / 2;
+if (room < 0)
+    room = 0;
+if (pad > room)
+    pad = room;
+return pad;
+}
+
+static struct jsonElement *pgFetchBlocks(char *srcPath, char *tgt, long start,
+                                         long end, char **retError)
+/* Ask the mapping service for the block-level translation of one interval, and
+ * return its parsed response - the same shape the page posts to us, so the
+ * caller can hand it straight to pgParseBlocks. */
+{
+char *apiBase = cloneString(cfgOr("pangenome.apiBase", ""));
+if (isEmpty(apiBase))
+    { *retError = "pangenome.apiBase is not configured"; return NULL; }
+if (endsWith(apiBase, "/"))
+    apiBase[strlen(apiBase) - 1] = '\0';
+int timeout = atoi(cfgOr("pangenome.timeoutSecs", "120"));
+char *token = cfgOr("pangenome.apiToken", "");
+
+struct dyString *body = dyStringNew(256);
+dyStringPrintf(body, "{\"src\":\"%s\",\"start\":%ld,\"end\":%ld,"
+                     "\"tgt\":\"%s\",\"blocks\":true}",
+               jsonStringEscape(srcPath), start, end, jsonStringEscape(tgt));
+char url[2048];
+safef(url, sizeof(url), "%s/api/v1/liftover", apiBase);
+struct pgResp r = pgHttp(url, body->string, timeout, token);
+dyStringFree(&body);
+static char why[512];
+if (r.transportErr)
+    {
+    safef(why, sizeof(why), "could not reach the mapping server: %s",
+          r.errMsg ? r.errMsg : "unknown error");
+    *retError = why;
+    return NULL;
+    }
+if (r.code >= 400)
+    {
+    /* Quote the upstream body when it is JSON - "service starting; indexes not
+     * loaded yet" is the difference between "try again shortly" and "this
+     * region cannot be lifted", and the user cannot tell those apart from a
+     * generic failure. */
+    char *body = skipLeadingSpaces(r.body->string);
+    if (body[0] == '{' || body[0] == '[')
+        safef(why, sizeof(why), "mapping server returned HTTP %ld: %s", r.code, body);
+    else
+        safef(why, sizeof(why), "mapping server returned HTTP %ld", r.code);
+    *retError = why;
+    return NULL;
+    }
+
+struct jsonElement *root = NULL;
+struct errCatch *errCatch = errCatchNew();
+if (errCatchStart(errCatch))
+    root = jsonParse(r.body->string);
+errCatchEnd(errCatch);
+if (errCatch->gotError || root == NULL)
+    { errCatchFree(&errCatch); *retError = "unreadable reply"; return NULL; }
+errCatchFree(&errCatch);
+return root;
+}
+
+static void doContigs()
+/* The sequences of one assembly, under both the names it is known by.
+ *
+ * The graph names sequences by accession (JBIREP010000009.1) but the browser
+ * labels them the UCSC way (chrUn_JBIREP010000009v1), because these assembly
+ * hubs set "chromAuthority ucsc".  A user who copies a position out of the
+ * browser therefore hands us a name the graph has never heard of, and the page
+ * used to reject it as not being a sequence of the assembly at all.
+ *
+ * Both names come from the assembly's own chromAlias bigBed.  Note this reads
+ * the file directly rather than going through chromAliasSetup(): that resolves
+ * a hub-served assembly through the hubs loaded in this process and would mean
+ * attaching the hub - a cart write - just to spell a contig name.  The
+ * database argument to chromAliasSetupBb() is unused, which is what makes the
+ * direct route available. */
+{
+char *db = cgiOptionalString("db");
+if (!pgValidDb(db))
+    {
+    emitJsonError("missing or malformed assembly");
+    return;
+    }
+struct hash *sizes = pgChromSizes(db);
+if (sizes == NULL)
+    {
+    emitJsonError("no sequence sizes available for %s", db);
+    return;
+    }
+/* Without an alias file every sequence is simply its own display name, which
+ * is the right answer for an assembly whose native names are already the ones
+ * the browser shows. */
+char *aliasBb = pgAssemblyFile(db, ".chromAlias.bb");
+boolean haveAlias = FALSE;
+if (aliasBb != NULL)
+    {
+    struct errCatch *errCatch = errCatchNew();
+    if (errCatchStart(errCatch))
+        {
+        chromAliasSetupBb(NULL, aliasBb);
+        haveAlias = TRUE;
+        }
+    errCatchEnd(errCatch);
+    if (errCatch->gotError)
+        {
+        haveAlias = FALSE;
+        fprintf(stderr, "hgPangenome: could not read %s: %s\n", aliasBb,
+                trimSpaces(errCatch->message->string));
+        }
+    errCatchFree(&errCatch);
+    }
+
+struct dyString *out = dyStringNew(16 * 1024);
+dyStringAppend(out, "{\"contigs\":[");
+struct hashEl *el, *list = hashElListHash(sizes);
+slSort(&list, hashElCmp);
+boolean first = TRUE;
+for (el = list; el != NULL; el = el->next)
+    {
+    char *display = el->name;
+    if (haveAlias)
+        {
+        char *ucsc = chromAliasFindSingleAlias(el->name, "ucsc");
+        if (!isEmpty(ucsc))
+            display = ucsc;
+        }
+    dyStringPrintf(out, "%s{\"name\":\"%s\",\"display\":\"%s\",\"size\":%ld}",
+                   first ? "" : ",", jsonStringEscape(el->name),
+                   jsonStringEscape(display), (long)(size_t)el->val);
+    first = FALSE;
+    }
+hashElFreeList(&list);
+dyStringAppend(out, "]}");
+emitJson(out->string);
+dyStringFree(&out);
+}
+
+static void doQuickLift(boolean wide)
 /* Build a chain from the blocks the page already has, wrap the source's
  * annotation tracks in a hub that points at it, and hand back a Genome Browser
  * URL on the target.  Needs the cart (for the hub), so unlike the other
@@ -1510,6 +1913,17 @@ if (srcHap != NULL)
             { srcHap = NULL; break; }
     }
 boolean hideTracks = sameOk(jsonOptionalStringField(root, "hideTracks", "off"), "on");
+/* The interval the user converted, and the single target this chain is for.
+ * With these we can widen the chain ourselves rather than being limited to the
+ * blocks the page happened to have. */
+long srcStart = -1, srcEnd = -1;
+struct jsonElement *el = jsonFindNamedField(root, "", "srcStart");
+if (el != NULL && el->type == jsonNumber)
+    srcStart = (long)el->val.jeNumber;
+el = jsonFindNamedField(root, "", "srcEnd");
+if (el != NULL && el->type == jsonNumber)
+    srcEnd = (long)el->val.jeNumber;
+char *tgtHap = jsonOptionalStringField(root, "tgt", NULL);
 
 if (!pgValidDb(srcDb) || !pgValidDb(tgtDb))
     {
@@ -1561,6 +1975,51 @@ if (qSize == 0)
     {
     pgRestoreDb(savedDb);
     emitJsonError("%s is not a sequence of %s", srcContig, srcDb);
+    return;
+    }
+
+/* Fetch the blocks this chain is built from, widened beyond the interval that
+ * was converted so the tracks survive a pan.
+ *
+ * The page used to post its own blocks and we only fetched the flanks.  That
+ * put an unbounded array in the request body, and a conversion over a big or
+ * repeat-dense region produced one past the 1 MB cap cheapcgi.c enforces
+ * (CGI_INPUT_SIZE_LIMIT_DEFAULT) - which aborts with an HTML error page before
+ * any of our code runs, so the page saw "<!DOCTYPE" where it wanted JSON.
+ * Since we were already making this call for the padding, fetching all of it
+ * costs nothing extra and keeps the request small.  Blocks in the payload are
+ * still honoured if present, as a fallback when the fetch fails. */
+long padded = 0;
+char *fetchErr = NULL;
+if (!isEmpty(tgtHap) && srcStart >= 0 && srcEnd > srcStart)
+    {
+    long pad = pgChainPad(srcEnd - srcStart, wide);
+    if (pad > 0)
+        {
+        long from = srcStart - pad, to = srcEnd + pad;
+        if (from < 0)
+            from = 0;
+        if (to > qSize)
+            to = qSize;
+        struct jsonElement *wider = pgFetchBlocks(srcPath, tgtHap, from, to, &fetchErr);
+        if (wider != NULL)
+            {
+            root = wider;
+            padded = to - from;
+            fetchErr = NULL;
+            }
+        }
+    }
+
+/* The page no longer posts its blocks, so a failed fetch leaves nothing to
+ * parse and pgParseBlocks would report "no 'blocks' array in the request" -
+ * true, but it describes our own request rather than what went wrong.  Say why
+ * the fetch failed instead.  A payload that does carry blocks is still
+ * honoured, which is what the mock tests rely on. */
+if (fetchErr != NULL && jsonFindNamedField(root, "", "blocks") == NULL)
+    {
+    pgRestoreDb(savedDb);
+    emitJsonError("%s", fetchErr);
     return;
     }
 
@@ -1703,6 +2162,11 @@ dyStringPrintf(out, "{\"status\":\"ok\",\"url\":\"%s\",\"tracks\":\"%s\"",
                jsonStringEscape(url->string), jsonStringEscape(shown->string));
 if (skipped->stringSize > 0)
     dyStringPrintf(out, ",\"skipped\":\"%s\"", jsonStringEscape(skipped->string));
+/* How much source sequence the chain covers.  The page uses this to decide
+ * whether asking for a wider one is worth it, and it is the honest answer to
+ * "how far can I pan before the annotations stop". */
+if (padded > 0)
+    dyStringPrintf(out, ",\"chainSpan\":%ld", padded);
 dyStringAppend(out, "}");
 emitJson(out->string);
 dyStringFree(&out);
@@ -1955,7 +2419,7 @@ char *useMockDef = isEmpty(apiBase) ? "on" : "off";
 boolean useMock = sameString(cfgOr("pangenome.useMock", useMockDef), "on");
 char *transport = cfgOr("pangenome.transport", "job");
 int pollMs = atoi(cfgOr("pangenome.pollIntervalMs", "1500"));
-int maxSeq = atoi(cfgOr("pangenome.maxSequences", "50"));
+int maxSeq = atoi(cfgOr("pangenome.maxSequences", "10"));
 int maxMultimaps = atoi(cfgOr("pangenome.maxMultimaps", "1"));
 
 /* apiBase and transport are admin-controlled; still route them through the
@@ -1974,6 +2438,9 @@ jsInlineF("window.pangenomeConfig = {\n"
           "  defaultSrcDb: \"%s\",\n"
           "  defaultPosition: \"%s\",\n"
           "  defaultTarget: \"%s\",\n"
+          "  presetTarget: \"%s\",\n"
+          "  presetAnnot: \"%s\",\n"
+          "  presetHide: \"%s\",\n"
           "  minTargetCoverage: %s,\n"
           "  maxTargetNodes: %s,\n"
           "  wideRegionBp: %ld,\n"
@@ -1988,15 +2455,20 @@ jsInlineF("window.pangenomeConfig = {\n"
           /* empty => let the middleware use its own default */
           isEmpty(cfgOr("pangenome.minHapCoverage", ""))
               ? "null" : cfgOr("pangenome.minHapCoverage", ""),
-          atol(cfgOr("pangenome.maxLiftSpan", "10000000")),
+          atol(cfgOr("pangenome.maxLiftSpan", "1000000")),
           jsonStringEscape(cfgOr("pangenome.defaultSrcDb", "hs1")),
           jsonStringEscape(cfgOr("pangenome.defaultPosition",
                                  "chr9:145458455-145495201")),
           jsonStringEscape(cfgOr("pangenome.defaultTarget", "grch38#0")),
+          /* hgConvert sends the assembly the user picked there, so the page
+           * opens on it rather than on the configured default. */
+          jsonStringEscape(cgiUsualString("pgTarget", "")),
+          jsonStringEscape(cgiUsualString("pgAnnot", "")),
+          jsonStringEscape(cgiUsualString("pgHide", "")),
           cfgOr("pangenome.minTargetCoverage", "10"),
           cfgOr("pangenome.maxTargetNodes", "300"),
           atol(cfgOr("pangenome.wideRegionBp", "100000")),
-          atoi(cfgOr("pangenome.maxLiftTargets", "10")),
+          atoi(cfgOr("pangenome.maxLiftTargets", "5")),
           cartSessionId(cart),
           quickLiftEnabled(cart) ? "true" : "false",
           sameString(cfgOr("pangenome.quickLift", "off"), "on") ? "true" : "false");
@@ -2019,10 +2491,10 @@ printf("<table class='hgPangenomeTable' border=0>\n");
 
 /* Options row. */
 printf("<tr>\n");
-printf("<td><label for='pgSurjectTarget'>Report position on:</label> "
-       "<a href='#' id='pgSurjectHelp' class='pgHelp' title='What is this?'>?</a> "
-       "<input type='text' id='pgSurjectTarget' size='28' "
-       "placeholder='auto (representative assembly)'></td>\n");
+/* No "report position on" box: the position is reported on the representative
+ * assembly, and the user picks a different one by clicking it in the assembly
+ * list, which re-surjects.  Asking up front for something they can choose
+ * afterwards, from a list they have not seen yet, only got in the way. */
 printf("<td><label for='pgMaxMultimaps'>Alignments per sequence:</label> "
        "<input type='number' id='pgMaxMultimaps' min='1' max='%d' value='%d' "
        "style='width:4em' title='How many places in the graph to report for each "
@@ -2061,12 +2533,12 @@ printf("<p style='font-size:0.9em;color:#555'>Up to %d sequences per submission.
 printf("</form>\n");
 
 printf("<p>Already have coordinates?  "
-       "<a href='hgPangenome?page=convert'>Convert coordinates between assemblies</a> "
+       "<a href='hgPangenome?page=convert'>TagAlong</a> "
        "translates a region from one assembly to another through the graph.</p>\n");
 }
 
 static void drawConvertPage()
-/* The coordinate-translation page, in the spirit of hgConvert's "In Other
+/* TagAlong, the coordinate-translation page, in the spirit of hgConvert's "In Other
  * Genomes".  The source assembly and position are inherited from the cart, so
  * arriving from a track view pre-fills them with whatever the user was looking
  * at - but both stay editable.  Destination haplotypes come from the live graph
@@ -2078,9 +2550,10 @@ char *db = cartUsualString(cart, "db", "");
 char *position = cartUsualString(cart, "position", "");
 
 printf("<form id='pgcForm' onsubmit='return false;'>\n");
-printf("<h2>Convert Coordinates Between Assemblies</h2>\n");
+printf("<h2>TagAlong</h2>\n");
 printf("<p>Translate a region from one assembly's coordinates to another's "
-       "through the pangenome graph.</p>\n");
+       "through the pangenome graph, and bring the source's annotations "
+       "along with it.</p>\n");
 
 printf("<table class='hgPangenomeTable' border=0>\n");
 
@@ -2109,7 +2582,7 @@ printf("<div class='pgMuted' id='pgcTargetCount'></div>\n");
 printf("<select id='pgcTargets' multiple size='10' class='pgcTargets'></select>\n");
 printf("<div class='pgMuted'>Hold Ctrl (Cmd on a Mac) to pick several, "
        "up to %d at a time.</div>\n",
-       atoi(cfgOr("pangenome.maxLiftTargets", "10")));
+       atoi(cfgOr("pangenome.maxLiftTargets", "5")));
 printf("</td></tr>\n");
 
 /* ---- annotations ---- */
@@ -2156,8 +2629,21 @@ cart = theCart;
  * one comes through the cart shell.  It writes its own JSON header. */
 if (sameOk(cgiOptionalString("cmd"), "quickLift"))
     {
-    doQuickLift();
+    doQuickLift(FALSE);
     return;
+    }
+/* Same work, wider chain.  Sent after the user has followed the link, so the
+ * chain they are already looking at is replaced by one that survives panning.
+ * Nothing waits for it, and the reply goes nowhere. */
+if (sameOk(cgiOptionalString("cmd"), "extendChain"))
+    {
+    doQuickLift(TRUE);
+    /* Deliberately not returning: cartCheckout() would write this request's
+     * copy of the cart over whatever the browser has done in the seconds since,
+     * undoing tracks the user turned on while we were working.  We have nothing
+     * to save, so leave without saving. */
+    fflush(stdout);
+    exit(0);
     }
 if (sameOk(cgiOptionalString("cmd"), "alignTrack"))
     {
@@ -2168,7 +2654,7 @@ if (sameOk(cgiOptionalString("cmd"), "alignTrack"))
 /* The coordinate-translation page is a separate view of this CGI. */
 if (sameOk(cgiOptionalString("page"), "convert"))
     {
-    cartWebStart(cart, NULL, "Pangenome Coordinate Conversion");
+    cartWebStart(cart, NULL, "TagAlong");
     if (issueBotWarning)
         botDelayMessage(getenv("REMOTE_ADDR"), botDelayMillis);
     webIncludeResourceFile("hgPangenome.css");
@@ -2180,7 +2666,7 @@ if (sameOk(cgiOptionalString("page"), "convert"))
     return;
     }
 
-int maxSeq = atoi(cfgOr("pangenome.maxSequences", "50"));
+int maxSeq = atoi(cfgOr("pangenome.maxSequences", "10"));
 int maxMultimaps = atoi(cfgOr("pangenome.maxMultimaps", "1"));
 
 cartWebStart(cart, NULL, "Pangenome Mapping");
@@ -2197,15 +2683,6 @@ drawForm(maxSeq, maxMultimaps,
          atoi(cfgOr("pangenome.maxMultimapsLimit", "10")));
 
 /* Progress + results are rendered here by the app. */
-printf("<div id='pgSurjectHelpBox' class='pgHelpBox' style='display:none'>\n"
-       "A graph alignment does not by itself have a chromosome coordinate: the "
-       "sequence may follow a path that several assemblies share.  Choosing an "
-       "assembly here reports the alignment as an ordinary "
-       "<i>sequence:start-end</i> on that assembly, so you can open "
-       "it in the Genome Browser.  It is the same idea as "
-       "<a href='../cgi-bin/hgLiftOver'>liftOver</a>, done through the graph "
-       "rather than through a chain file.\n"
-       "</div>\n");
 printf("<div id='pgStatus' class='pgStatus' style='display:none'></div>\n");
 printf("<div id='pgResults' class='pgResults'></div>\n");
 
@@ -2227,6 +2704,33 @@ cgiSpoof(&argc, argv);
 /* API modes: forward to the middleware and return JSON, skipping the cart
  * (and its central-DB dependency) entirely. */
 char *cmd = cgiOptionalString("cmd");
+
+/* One size cap for every command, before anything dispatches.
+ *
+ * cheapcgi.c enforces its own 1 MB cap (CGI_INPUT_SIZE_LIMIT_DEFAULT) and
+ * aborts with an HTML error page, which a JSON client can only report as
+ * "Unexpected token '<'".  Ours has to sit below that so an oversized request
+ * comes back as our own error envelope instead. */
+if (cmd != NULL)
+    {
+    char *payload = cgiOptionalString("payload");
+    long maxBytes = atol(cfgOr("pangenome.maxRequestBytes", "500000"));
+    if (payload != NULL && maxBytes > 0 && (long)strlen(payload) > maxBytes)
+        {
+        emitJsonError("request too large: %ld bytes (limit %ld)",
+                      (long)strlen(payload), maxBytes);
+        return 0;
+        }
+    }
+
+/* Reads two local files and needs no cart, so it is answered before the shells
+ * below and is not rate limited - the page asks for it whenever the source
+ * changes. */
+if (sameOk(cmd, "contigs"))
+    {
+    doContigs();
+    return 0;
+    }
 if (cmd != NULL && (sameString(cmd, "map") || sameString(cmd, "poll")
                     || sameString(cmd, "liftover") || sameString(cmd, "haplotypes")
                     || sameString(cmd, "liftoverTargets")
@@ -2289,7 +2793,7 @@ if (sameOk(cmd, "alignTrack"))
     return 0;
     }
 
-if (sameOk(cmd, "quickLift"))
+if (sameOk(cmd, "quickLift") || sameOk(cmd, "extendChain"))
     {
     struct errCatch *errCatch = errCatchNew();
     if (errCatchStart(errCatch))

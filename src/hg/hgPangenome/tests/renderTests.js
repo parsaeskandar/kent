@@ -2,7 +2,7 @@
  *
  * Contract + rendering tests: feed the client one canned middleware response
  * per shape and assert what the page shows.  Covers every per-sequence status,
- * every surjection status, haplotype presentation, the mosaic bar, multiple
+ * every surjection status, haplotype presentation, multiple
  * placements, both transports (job polling and synchronous), incremental
  * rendering, copy/download text, and the config-injected-after-script order.
  *
@@ -17,7 +17,7 @@
 var t = require('./testLib.js');
 var loader = require('./loadClient.js');
 
-var PAGE_IDS = ['pgResults', 'pgStatus', 'pgSeq', 'pgSurjectTarget', 'pgMaxMultimaps',
+var PAGE_IDS = ['pgResults', 'pgStatus', 'pgSeq', 'pgMaxMultimaps',
                 'pgSubmit', 'pgClear', 'pgFile'];
 
 // ---------------------------------------------------------------- fixtures
@@ -189,6 +189,32 @@ t.test('the alignments section is not rendered on the page', function () {
     t.notOk(/Alignments/.test(text(c)), 'no Alignments heading');
 });
 
+
+t.test('a subpath offset in bracket form is applied to a surjection', function () {
+    // The exact case from the page: GRCh38#0#chr8[1407250].  Only the alignment
+    // reader knew the bracket form, so a surjection onto a subpath showed
+    // "chr8[1407250]" as the contig - a sequence no assembly has, so the browser
+    // link went nowhere - and reported a position missing the offset.
+    var c = loader.load({ ids: PAGE_IDS, readyState: 'loading' });
+    var r = c.api.resolveSurjection({ status: 'ok', target: 'GRCh38#0#chr8[1407250]',
+                                      position: 6139074, cigar: '100M' });
+    t.ok(r, 'parsed');
+    if (!r) return;
+    t.eq(r.contig, 'chr8', 'contig without the bracket');
+    t.eq(r.offset, 1407250, 'offset taken from the bracket');
+    t.eq(r.start0, 7546324, 'offset added to the reported position');
+    t.eq(r.hapContig, 'GRCh38#0#chr8', 'and the path names a real sequence');
+});
+
+t.test('both subpath notations agree with each other', function () {
+    var c = loader.load({ ids: PAGE_IDS, readyState: 'loading' });
+    var a = c.api.splitSubpath('HG00097#1#CM094065.1#131188231');
+    var b = c.api.splitSubpath('HG00097#1#CM094065.1[131188231]');
+    t.deepEq(a, b, 'the #N and [N] forms parse identically');
+    t.isNull(c.api.splitSubpath('HG00097#1#chr1#notanumber'),
+             'an unknown 4th field is refused rather than guessed');
+    t.isNull(c.api.splitSubpath('HG00097#1'), 'too few fields is refused');
+});
 
 t.test('a subpath offset written as #N is applied', function () {
     var c = loader.load({ ids: PAGE_IDS, readyState: 'loading' });
@@ -471,61 +497,6 @@ t.test('a haplotype absent from the HPRC table gets no link', function () {
     t.eq(links(c).length, 0, 'no link');
 });
 
-// ====================================================================== mosaic
-
-t.suite('mosaic (read recombines haplotypes)');
-
-function mosaicResult() {
-    return result({ query_length: 3000, alignments: [aln({ haplotypes: hap({
-        count: 15, fully_covered: false, coverage_percent: 63, num_segments: 3,
-        mosaic: [
-            { covered_bp: 1500, haplotype_count: 6, representative: 'CHM13#0#chr10' },
-            { covered_bp: 1000, haplotype_count: 9, representative: 'HG01234#2#CM0987.1' },
-            { covered_bp: 500, haplotype_count: 4, representative: 'HG00097#1#CM094066.1' }
-        ] }) })] });
-}
-
-t.test('num_segments = 1 shows no mosaic bar', function () {
-    var c = renderOne(result());
-    t.eq(byClass(c, 'pgMosaicBar').length, 0, 'no bar');
-});
-
-t.test('num_segments > 1 shows the bar and explains what it means', function () {
-    var c = renderOne(mosaicResult());
-    t.eq(byClass(c, 'pgMosaicBar').length, 1, 'bar present');
-    t.contains(text(c), 'no single assembly spans this read', 'explanation');
-});
-
-t.test('one segment is drawn per mosaic entry, labelled with its bp span', function () {
-    var c = renderOne(mosaicResult());
-    var segs = byClass(c, 'pgMosaicSeg').filter(function (n) {
-        return n.className.indexOf('pgMosaicSwatch') < 0;
-    });
-    t.eq(segs.length, 3, 'three segments');
-    t.contains(segs[0].textContent, '1500 bp', 'first label');
-    t.contains(segs[1].textContent, '1000 bp', 'second label');
-    t.contains(segs[2].textContent, '500 bp', 'third label');
-});
-
-t.test('segment widths are proportional to covered_bp', function () {
-    var c = renderOne(mosaicResult());
-    var segs = byClass(c, 'pgMosaicSeg').filter(function (n) {
-        return n.className.indexOf('pgMosaicSwatch') < 0;
-    });
-    // 1500/3000, 1000/3000, 500/3000
-    t.eq(segs[0].style.width, '50.00%', 'first width');
-    t.eq(segs[1].style.width, '33.33%', 'second width');
-    t.eq(segs[2].style.width, '16.67%', 'third width');
-});
-
-t.test('each segment names its representative and haplotype count', function () {
-    var c = renderOne(mosaicResult());
-    var s = text(c);
-    t.contains(s, 'CHM13 chr10 — 1500 bp, 6 assemblies', 'segment 1 legend');
-    t.contains(s, 'HG01234 hap2 CM0987.1 — 1000 bp, 9 assemblies', 'segment 2 legend');
-});
-
-
 t.suite('coverage cutoff in the request');
 
 t.test('no cutoff is sent unless one is configured', function () {
@@ -545,15 +516,21 @@ t.test('a configured cutoff is sent, so the payload is trimmed at the source', f
     t.eq(payload.options.min_haplotype_coverage, 50, 'cutoff forwarded');
 });
 
-// ====================================================== coverage-ordered list
+// ====================================================== identity-ordered list
 
-t.suite('haplotypes ordered by coverage');
+t.suite('haplotypes ordered by identity');
 
+// Identity is what the list is ranked on.  Here it is deliberately pulled apart
+// from coverage; on a clean match the engine reports the two as equal.
 var COV = [
-    { haplotype: 'HG01234#2', coverage: 41.2, covered_bp: 1422 },
-    { haplotype: 'CHM13#0', coverage: 100.0, covered_bp: 3451 },
-    { haplotype: 'GRCh38#0', coverage: 99.8, covered_bp: 3444 },
-    { haplotype: 'HG00097#1', coverage: 100.0, covered_bp: 3451 }
+    { haplotype: 'HG01234#2', coverage: 41.2, covered_bp: 1422,
+                              identity: 88.0, matched_bp: 1251 },
+    { haplotype: 'CHM13#0', coverage: 100.0, covered_bp: 3451,
+                            identity: 99.4, matched_bp: 3430 },
+    { haplotype: 'GRCh38#0', coverage: 99.8, covered_bp: 3444,
+                             identity: 97.1, matched_bp: 3344 },
+    { haplotype: 'HG00097#1', coverage: 100.0, covered_bp: 3451,
+                              identity: 99.4, matched_bp: 3430 }
 ];
 
 function rowsFor(coverage, names) {
@@ -563,17 +540,36 @@ function rowsFor(coverage, names) {
     return c.api.haplotypeRows({ names: names || [], representative: null }, coverage);
 }
 
-t.test('rows come back best-covered first, regardless of input order', function () {
+t.test('rows come back best-matched first, regardless of input order', function () {
     var r = rowsFor(COV);
     t.deepEq(r.map(function (x) { return x.name; }),
              ['CHM13#0', 'HG00097#1', 'GRCh38#0', 'HG01234#2'],
-             '100s first, then 99.8, then 41.2');
+             '99.4s first, then 97.1, then 88.0');
 });
 
 t.test('ties are broken by name so the order is stable', function () {
     var r = rowsFor(COV);
-    t.eq(r[0].name, 'CHM13#0', 'first of the two 100% entries');
+    t.eq(r[0].name, 'CHM13#0', 'first of the two 99.4% entries');
     t.eq(r[1].name, 'HG00097#1', 'second');
+});
+
+t.test('identity outranks coverage, not the other way round', function () {
+    // the case the switch exists for: the better-covered haplotype is the
+    // worse match, and the list has to say so
+    var r = rowsFor([
+        { haplotype: 'A#0', coverage: 100.0, covered_bp: 100, identity: 91.0,
+          matched_bp: 91 },
+        { haplotype: 'B#0', coverage: 62.0, covered_bp: 62, identity: 99.9,
+          matched_bp: 62 }]);
+    t.eq(r[0].name, 'B#0', 'the closer match leads despite lower coverage');
+});
+
+t.test('an engine reporting coverage but no identity still sorts by coverage',
+       function () {
+    var r = rowsFor([{ haplotype: 'A#0', coverage: 41.2, covered_bp: 4 },
+                     { haplotype: 'B#0', coverage: 100.0, covered_bp: 10 }]);
+    t.eq(r[0].name, 'B#0', 'falls back rather than going unordered');
+    t.isNull(r[0].identity, 'and reports no identity');
 });
 
 t.test('exact carriers are marked, near misses are not', function () {
@@ -590,20 +586,23 @@ t.test('exact carriers are marked, near misses are not', function () {
 });
 
 t.test('a 3-field carrier name matches its 2-field coverage entry', function () {
-    var r = rowsFor([{ haplotype: 'CHM13#0', coverage: 100, covered_bp: 10 }],
+    var r = rowsFor([{ haplotype: 'CHM13#0', coverage: 100, covered_bp: 10,
+                       identity: 99.4, matched_bp: 10 }],
                     ['CHM13#0#chr10']);
     t.eq(r.length, 1, 'one row, not two');
     t.eq(r[0].name, 'CHM13#0#chr10', 'shown with the contig the carrier list gave');
-    t.eq(r[0].coverage, 100, 'scored');
+    t.eq(r[0].identity, 99.4, 'scored');
+    t.eq(r[0].matchedBp, 10, 'and the matching bases came across');
     t.ok(r[0].isCarrier, 'and recognized as the carrier');
 });
 
 t.test('carriers the coverage list omits still appear, after the scored ones', function () {
-    var r = rowsFor([{ haplotype: 'CHM13#0', coverage: 100, covered_bp: 10 }],
+    var r = rowsFor([{ haplotype: 'CHM13#0', coverage: 100, covered_bp: 10,
+                       identity: 99.4, matched_bp: 10 }],
                     ['CHM13#0#chr10', 'HG09999#1#chrX']);
     t.eq(r.length, 2, 'both present');
     t.eq(r[0].name, 'CHM13#0#chr10', 'scored one first');
-    t.isNull(r[1].coverage, 'unscored');
+    t.isNull(r[1].identity, 'unscored');
 });
 
 t.test('an engine without the field falls back to the carrier list', function () {
@@ -613,17 +612,50 @@ t.test('an engine without the field falls back to the carrier list', function ()
          'no scores, all carriers');
 });
 
-t.test('the rendered list shows percentages, best first', function () {
+t.test('the rendered list shows identity, best first', function () {
     var c = renderOne(result({ alignments: [aln({
         haplotypes: hap({ count: 2, names: ['CHM13#0#chr10', 'HG00097#1#CM094066.1'],
                           representative: null }),
         haplotype_coverage: COV })] }));
     var s = text(c);
-    t.contains(s, 'CHM13 chr10100%', 'top entry with its percentage');
-    t.contains(s, 'GRCh3899.8%', 'one decimal kept');
-    t.ok(s.indexOf('CHM13 chr10100%') < s.indexOf('HG01234 hap241.2%'),
-         'ordered by coverage in the output');
-    t.contains(s, 'scored by coverage, best first', 'the label says so');
+    t.contains(s, 'CHM13 chr1099.4%', 'top entry with its identity');
+    t.contains(s, 'GRCh3897.1%', 'one decimal kept');
+    t.ok(s.indexOf('CHM13 chr1099.4%') < s.indexOf('HG01234 hap288%'),
+         'ordered by identity in the output');
+    t.contains(s, 'scored by identity, best first', 'the label says so');
+});
+
+t.test('coverage is not a second number in the list', function () {
+    // on a clean match it is the same figure as identity, so printing both
+    // mostly gave the same number twice
+    var c = renderOne(result({ alignments: [aln({
+        haplotypes: hap({ count: 2, names: ['CHM13#0#chr10', 'HG00097#1#CM094066.1'],
+                          representative: null }),
+        haplotype_coverage: COV })] }));
+    var s = text(c);
+    t.notOk(/GRCh38[^A-Z]*99\.8%/.test(s), "GRCh38's coverage is not shown");
+    t.notOk(/HG01234[^A-Z]*41\.2%/.test(s), "nor HG01234's");
+});
+
+t.test('coverage is still reachable in the hover', function () {
+    var c = renderOne(result({ alignments: [aln({
+        haplotypes: hap({ count: 2, names: ['CHM13#0#chr10', 'HG00097#1#CM094066.1'],
+                          representative: null }),
+        haplotype_coverage: COV })] }));
+    var titles = byClass(c, 'pgHapListPct').map(function (n) {
+        return n.getAttribute('title') || '';
+    }).join(' | ');
+    t.contains(titles, '3430 bp matching', 'the matching bases');
+    t.contains(titles, '% of the sequence covered', 'and coverage, out of the way');
+});
+
+t.test('the TSV carries identity as a fraction', function () {
+    var c = loader.load({ ids: PAGE_IDS, readyState: 'loading' });
+    var tsv = c.api.haplotypeTsv(
+        [{ name: 'CHM13#0#chr10', coverage: 100, coveredBp: 3451,
+           identity: 99.4, matchedBp: 3430, isCarrier: true }], []);
+    t.contains(tsv, '\t0.994\t', 'identity divided by 100');
+    t.contains(tsv, '\t1\t', 'coverage still there too');
 });
 
 // ======================================================== other placements

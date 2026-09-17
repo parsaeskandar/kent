@@ -1,4 +1,4 @@
-/* hgPangenomeConvert.js - client for the coordinate-conversion page.
+/* hgPangenomeConvert.js - client for TagAlong, the coordinate-conversion page.
  *
  * Translates a region from one haplotype's coordinates to another's through the
  * pangenome graph, in the spirit of hgConvert's "In Other Genomes" - but between
@@ -42,10 +42,21 @@ function buildDbToHap() {
     });
 }
 
+// An assembly served through a hub is known to the cart by a decorated name -
+// hs1 arrives as "hub_25071_hs1" from the curated hub, a GenArk sample as
+// "hub_146215_GCA_...".  The assembly table is keyed on the undecorated name,
+// so strip the prefix before looking one up.  Without this, arriving from the
+// browser on hs1 looked like an assembly outside the pangenome.
+function bareDb(db) {
+    return String(db == null ? "" : db).replace(/^hub_[0-9]+_/, "");
+}
+
 function hapForDb(db) {
     if (!dbToHap) buildDbToHap();
     if (!db) return null;
-    return dbToHap[db] || dbToHap[String(db).toLowerCase()] || null;
+    var bare = bareDb(db);
+    return dbToHap[db] || dbToHap[String(db).toLowerCase()] ||
+           dbToHap[bare] || dbToHap[bare.toLowerCase()] || null;
 }
 function assemblyForHap(hap) {
     var table = window.pangenomeAssemblies || {};
@@ -152,6 +163,43 @@ function postCmd(cmd, payload) {
     }).then(checkHttp);
 }
 
+// Ask for a wider chain on the way out of the page.
+//
+// The chain the first request builds reaches a little either side of the
+// converted interval - enough to pan a few window-widths, not enough to roam.
+// Widening it costs the mapping server about a second per megabase, which is
+// not worth charging to every conversion, so it is asked for here instead:
+// once, at the moment the user actually follows the link.
+//
+// It has to be sendBeacon rather than fetch.  This runs immediately before
+// navigating away, and the browser cancels in-flight fetches when the page
+// goes; a beacon is guaranteed to be delivered.  That is also why the payload
+// leaves out the blocks - the server fetches its own, and beacons are size
+// limited.  Nothing waits for the reply, and the browser picks the new chain
+// up on the next pan without a reload.
+function requestWiderChain(base) {
+    /* typeof, not a plain test: where navigator is absent altogether naming it
+     * throws rather than reading as false, and this runs on the way out of the
+     * page, where an exception would take the navigation with it. */
+    if (typeof navigator === "undefined" || !navigator.sendBeacon ||
+        typeof Blob === "undefined")
+        return;
+    var lean = {};
+    Object.keys(base).forEach(function (k) {
+        if (k !== "blocks") lean[k] = base[k];
+    });
+    var body = "cmd=extendChain&payload=" +
+               encodeURIComponent(JSON.stringify(lean));
+    if (CFG.hgsid)
+        body += "&hgsid=" + encodeURIComponent(CFG.hgsid);
+    try {
+        navigator.sendBeacon(selfUrl(), new Blob([body],
+            { type: "application/x-www-form-urlencoded" }));
+    } catch (e) {
+        /* Best effort: the narrower chain is already in place and works. */
+    }
+}
+
 function getCmd(qs) {
     return fetch(selfUrl() + "?" + qs, {
         method: "GET", headers: { "Accept": "application/json" }
@@ -200,6 +248,8 @@ var allHaplotypes = [];
 var hapExactByLower = null;
 var reachable = null;          // lower name -> coverage (or null), else not filtered
 var reachableScored = false;   // true when the server ranked them
+var autoRan = false;           // the hand-off from hgConvert converts once
+var sourceIsExample = false;   // the position on screen is ours, not the user's
 
 // The graph's path names are case-sensitive ("CHM13#0", not "chm13#0"), but our
 // generated assembly table is keyed lower-case.  Map back to the graph's own
@@ -235,6 +285,17 @@ function loadHaplotypes() {
         fillTargets("");
         preselectDefaultTarget();
         hideStatus();
+        // Arriving from hgConvert the user has already chosen a source, a
+        // position and a destination and pressed Submit once; make them press
+        // it again and the hand-off would just look broken.  Run it for them,
+        // but only once, and only when everything really did come through -
+        // never on a position this page supplied, because converting an example
+        // region under the heading the user asked for is worse than asking.
+        if (CFG.presetTarget && !autoRan && !sourceIsExample &&
+            selectedTargets().length > 0 && ($("pgcPos").value || "").trim() !== "") {
+            autoRan = true;
+            doConvert();
+        }
     }).catch(function (err) {
         showError("Could not load the assembly list: " + err.message, loadHaplotypes);
     });
@@ -348,7 +409,9 @@ function showAllHaplotypes() {
 // Pre-select a sensible target so the page is one click from an answer.  Skips
 // it if the default happens to be the source haplotype.
 function preselectDefaultTarget() {
-    var want = String(CFG.defaultTarget || "").toLowerCase();
+    // A destination chosen in hgConvert wins over the configured default: the
+    // user already said where they wanted to go.
+    var want = String(CFG.presetTarget || CFG.defaultTarget || "").toLowerCase();
     if (!want) return;
     var src = String(currentSourceHap() || "").toLowerCase();
     if (want === src) return;
@@ -422,21 +485,39 @@ function onSourceChange() {
 // go with it, fall back to a configured example instead of an unusable form.
 // The source db and position move together - a position only means something on
 // its own assembly.
+// Fill in what is missing, and only what is missing.
+//
+// These are two independent questions and were being answered as one: an
+// assembly the page did not recognise replaced the position too, so a request
+// for chr10 came back converted from the example region on chr9.  A position
+// the user gave us is never overwritten - if we cannot use it we say so, and
+// the caller declines to convert rather than quietly answering about somewhere
+// else.
+//
+// Returns {why, tookPosition} or null when nothing needed filling in.
 function applySourceFallback() {
     var db = ($("pgcSrcDb") || {}).value || "";
     var pos = ($("pgcPos") || {}).value || "";
-    var usable = !!hapForDb(db) && pos.trim() !== "";
-    if (usable) return null;
+    var haveDb = !!hapForDb(db);
+    var havePos = pos.trim() !== "";
+    if (haveDb && havePos) return null;
 
-    var why = !db ? "no assembly was carried over"
-            : (!hapForDb(db) ? "assembly " + db + " is not part of the pangenome"
-                             : "no position was carried over");
-    $("pgcSrcDb").value = CFG.defaultSrcDb || "hs1";
-    $("pgcPos").value = CFG.defaultPosition || "";
-    return why;
+    var why = !haveDb
+        ? (!db ? "no assembly was carried over"
+               : "assembly " + bareDb(db) + " is not part of the pangenome")
+        : "no position was carried over";
+    if (!haveDb)
+        $("pgcSrcDb").value = CFG.defaultSrcDb || "hs1";
+    var tookPosition = false;
+    if (!havePos) {
+        $("pgcPos").value = CFG.defaultPosition || "";
+        tookPosition = true;
+    }
+    return { why: why, tookPosition: tookPosition };
 }
 
-function describeSource(fallbackWhy) {
+function describeSource(fallback) {
+    var fallbackWhy = fallback && fallback.why;
     var db = ($("pgcSrcDb") || {}).value || "";
     var hap = currentSourceHap();
     var note = $("pgcSrcNote");
@@ -450,8 +531,10 @@ function describeSource(fallbackWhy) {
     var parts = [];
     if (assembly && !/^https?:/.test(assembly)) parts.push("assembly " + assembly);
     parts.push("the position's contig must be one of this haplotype's sequences");
-    if (fallbackWhy)
+    if (fallbackWhy && fallback.tookPosition)
         parts.push("shown as a starting example because " + fallbackWhy);
+    else if (fallbackWhy)
+        parts.push(fallbackWhy);
     note.textContent = parts.join(" \u2014 ");
 }
 
@@ -462,8 +545,12 @@ function describeSource(fallbackWhy) {
 // source is simply absent from another.  Offer the real list rather than
 // letting the request fail upstream with "No paths found".
 
-var contigCache = Object.create(null);   // assembly -> {names:[], sizes:{}}
+var contigCache = Object.create(null);   // assembly -> {names, sizes, display, nativeOf}
 var contigsForSource = null;             // the list for the current source, or null
+// Lower-cased spelling -> the accession the graph knows.  Holds both spellings
+// of every sequence, because a position can arrive either way: typed from the
+// graph's own naming, or copied out of the browser's address box.
+var nativeForSource = null;
 
 function loadContigs() {
     var hap = currentSourceHap();
@@ -476,34 +563,63 @@ function loadContigs() {
 
     if (contigCache[assembly]) { applyContigs(contigCache[assembly]); return; }
 
-    fetch("../cgi-bin/hubApi/list/chromosomes?genome=" + encodeURIComponent(assembly),
-          { headers: { "Accept": "application/json" } })
-        .then(function (r) { return r.ok ? r.json() : null; })
+    // Our own endpoint rather than hubApi/list/chromosomes: that reports only
+    // the accessions, and half the point here is to know the name the browser
+    // shows for each one.
+    getCmd("cmd=contigs&db=" + encodeURIComponent(assembly))
         .then(function (d) {
-            var sizes = (d && d.chromosomes) || null;
-            if (!sizes) return;
+            var list = (d && d.contigs) || null;
+            if (!list || !list.length) return;
+            var sizes = Object.create(null), display = Object.create(null),
+                nativeOf = Object.create(null);
+            list.forEach(function (c) {
+                if (!c || !c.name) return;
+                sizes[c.name] = c.size;
+                display[c.name] = c.display || c.name;
+                nativeOf[String(c.name).toLowerCase()] = c.name;
+                if (c.display)
+                    nativeOf[String(c.display).toLowerCase()] = c.name;
+            });
             var names = Object.keys(sizes).sort(function (a, b) {
                 return sizes[b] - sizes[a];         // biggest first: chromosomes
             });
-            contigCache[assembly] = { names: names, sizes: sizes };
+            contigCache[assembly] = { names: names, sizes: sizes,
+                                      display: display, nativeOf: nativeOf };
             applyContigs(contigCache[assembly]);
         })
         .catch(function () { /* advisory only */ });
 }
 
+function nameShown(info, n) {
+    // What the browser calls this sequence, which is what the user will have in
+    // front of them.  Falls back to the accession where there is no alias.
+    return (info.display && info.display[n]) || n;
+}
+
+function nameBoth(info, n) {
+    // For a message about a name the user got wrong, give them both spellings:
+    // answering "CM094066" with "did you mean chr7" is correct but leaves them
+    // to guess that the two are the same sequence.
+    var shown = nameShown(info, n);
+    return (shown === n) ? n : (shown + " (" + n + ")");
+}
+
 function applyContigs(info) {
     contigsForSource = info.names;
+    nativeForSource = info.nativeOf || null;
     var dl = $("pgcContigs");
     if (dl) {
         clear(dl);
         info.names.forEach(function (n) {
-            var o = el("option", { value: n });
+            var shown = nameShown(info, n);
+            var o = el("option", { value: shown });
             dl.appendChild(o);
-            o.value = n;
+            o.value = shown;
         });
     }
     var examples = info.names.slice(0, 3).map(function (n) {
-        return n + " (" + Math.round(info.sizes[n] / 1e6) + " Mb)";
+        return nameShown(info, n) + " (" +
+               Math.round(info.sizes[n] / 1e6) + " Mb)";
     }).join(", ");
     setContigHint(info.names.length + " sequences in this haplotype; largest: " +
                   examples + (info.names.length > 3 ? ", …" : "") +
@@ -515,18 +631,37 @@ function setContigHint(text) {
     if (h) h.textContent = text;
 }
 
-// Advisory check: is this contig one of the source's sequences?
+// The accession the graph knows this sequence by, whatever the user called it.
+//
+// These assembly hubs set "chromAuthority ucsc", so the browser labels a
+// sequence chrUn_JBIREP010000009v1 while the graph only answers to
+// JBIREP010000009.1.  A position pasted out of the browser has to be
+// translated, or the graph reports the region as simply absent.  Unknown names
+// pass through untouched: the server is a better judge than a guess here.
+function nativeContig(contig) {
+    if (!nativeForSource) return contig;
+    var hit = nativeForSource[String(contig).toLowerCase()];
+    return hit || contig;
+}
+
+// Advisory check: is this contig one of the source's sequences?  Either
+// spelling counts - rejecting the browser's own name for it was the bug this
+// guards against.
 function contigProblem(contig) {
     if (!contigsForSource) return null;                 // unknown; let the server judge
-    if (contigsForSource.indexOf(contig) >= 0) return null;
+    if (contigsForSource.indexOf(nativeContig(contig)) >= 0) return null;
     var lower = String(contig).toLowerCase();
+    var info = contigCache[assemblyForHap(currentSourceHap())] || {};
     var near = contigsForSource.filter(function (n) {
-        return n.toLowerCase().indexOf(lower) >= 0;
-    }).slice(0, 3);
+        return n.toLowerCase().indexOf(lower) >= 0 ||
+               nameShown(info, n).toLowerCase().indexOf(lower) >= 0;
+    }).map(function (n) { return nameBoth(info, n); }).slice(0, 3);
     return "\"" + contig + "\" is not a sequence of " + hapLabel(currentSourceHap()) +
            (near.length ? ".  Did you mean " + near.join(", ") + "?"
                         : ".  Its largest sequences are " +
-                          contigsForSource.slice(0, 3).join(", ") + ".");
+                          contigsForSource.slice(0, 3).map(function (n) {
+                              return nameBoth(info, n);
+                          }).join(", ") + ".");
 }
 
 // ---- Results ----------------------------------------------------------------
@@ -665,22 +800,31 @@ function armAnnotationLink(a, iv, link) {
         e.preventDefault();
         var parts = String(iv.haplotype).split("#");
         var hap = parts[0] + "#" + parts[1];
-        var blocks = lastBlocks[hap.toLowerCase()];
         var was = a.textContent;
         a.textContent = was + " — preparing…";
-        postCmd("quickLift", {
+        // The interval and the target, not the blocks.  The server fetches its
+        // own - it was already doing so for the padding - and posting ours put
+        // an unbounded array in the request body: a conversion over a big or
+        // repeat-dense region went past the 1 MB cap cheapcgi.c enforces, which
+        // aborts with an HTML page and surfaced here as
+        // "Unexpected token '<' ... is not valid JSON".
+        var payload = {
             srcDb: assemblyForHap(currentSourceHap()),
             tgtDb: assemblyForHap(hap),
             src: lastSource.src,
             srcHap: hapLabel(currentSourceHap()),
+            srcStart: lastSource.start,
+            srcEnd: lastSource.end,
+            tgt: canonicalHap(hap),
             position: link.pos,
-            blocks: blocks,
             hideTracks: hideTargetTracks() ? "on" : "off"
-        }).then(function (resp) {
+        };
+        postCmd("quickLift", payload).then(function (resp) {
             a.textContent = was;
             if (resp && resp.status === "error") throw new Error(resp.error);
             prepared = resp.url;
             a.setAttribute("href", resp.url);
+            requestWiderChain(payload);
             window.location = resp.url;
         }).catch(function (err) {
             // Fall back to the plain position rather than going nowhere.
@@ -761,7 +905,9 @@ function buildSource() {
     if (pos.error) return { error: pos.error };
     var bad = contigProblem(pos.contig);
     if (bad) return { error: bad };
-    return { src: hap + "#" + pos.contig, contig: pos.contig,
+    // Send the graph the only name it knows, whichever one was typed.
+    var contig = nativeContig(pos.contig);
+    return { src: hap + "#" + contig, contig: contig,
              start: pos.start, end: pos.end };
 }
 
@@ -834,7 +980,16 @@ function init() {
     if (typeof CFG.wideRegionBp === "number") WIDE_REGION_BP = CFG.wideRegionBp;
     if (typeof CFG.maxLiftTargets === "number") MAX_TARGETS = CFG.maxLiftTargets;
 
-    describeSource(applySourceFallback());
+    // Options carried over from hgConvert: the user set them there, so honour
+    // them rather than resetting to this page's defaults.
+    if (CFG.presetAnnot && $("pgcQuickLift"))
+        $("pgcQuickLift").checked = (CFG.presetAnnot === "on");
+    if (CFG.presetHide && $("pgcHideTracks"))
+        $("pgcHideTracks").checked = (CFG.presetHide === "on");
+
+    var fallback = applySourceFallback();
+    sourceIsExample = !!(fallback && fallback.tookPosition);
+    describeSource(fallback);
     $("pgcSubmit").addEventListener("click", doConvert);
     $("pgcClear").addEventListener("click", onClear);
     $("pgcFilter").addEventListener("input", function () {
@@ -866,6 +1021,7 @@ if (typeof module !== "undefined" && module.exports)
         buildSource: buildSource,
         fillSources: fillSources,
         contigProblem: contigProblem,
+        nativeContig: nativeContig,
         applyContigs: applyContigs,
         showReachable: showReachable,
         applySourceFallback: applySourceFallback,

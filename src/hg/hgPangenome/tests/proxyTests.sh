@@ -91,6 +91,9 @@ conf_default() {
         "pangenome.maxSequences=50" \
         "pangenome.maxSeqLen=100" \
         "pangenome.maxRequestBytes=5000" \
+        "pangenome.maxLiftSpan=10000000" \
+        "pangenome.maxLiftTargets=10" \
+        "pangenome.maxLiftTargetMb=0" \
         "pangenome.timeoutSecs=10"
     echo "$TMP/hg.conf"
 }
@@ -504,6 +507,47 @@ lift_reject "more than 10 targets rejected" \
 ten=$(python3 -c 'import json;print(json.dumps(["h%d#1" % i for i in range(10)]))')
 out=$(cgi_post_cmd "$CONF" liftover "{\"src\":\"a#1#c\",\"start\":1,\"end\":2,\"tgt\":$ten}")
 check_eq "exactly 10 targets accepted (boundary)" "$(mock_count)" "1"
+
+# The cost of a translation is span x targets, not either alone: the mapping
+# service traverses once per target and serves one request at a time.  Capping
+# each half separately is what let 10 Mb x 10 targets through as ~110 s of
+# exclusive backend time.
+mk_conf "$TMP/budget.conf" "pangenome.apiBase=http://127.0.0.1:$PORT" \
+    "pangenome.maxLiftSpan=10000000" "pangenome.maxLiftTargets=10" \
+    "pangenome.maxLiftTargetMb=5"
+four=$(python3 -c 'import json;print(json.dumps(["h%d#1" % i for i in range(4)]))')
+out=$(cgi_post_cmd "$TMP/budget.conf" liftover \
+    "{\"src\":\"a#1#c\",\"start\":0,\"end\":2000000,\"tgt\":$four}")
+check_contains "span x targets over budget rejected" "$out" \
+    "megabase-assemblies"
+
+: > "$REC"
+two=$(python3 -c 'import json;print(json.dumps(["h%d#1" % i for i in range(2)]))')
+out=$(cgi_post_cmd "$TMP/budget.conf" liftover \
+    "{\"src\":\"a#1#c\",\"start\":0,\"end\":2000000,\"tgt\":$two}")
+check_eq "within budget accepted (2 x 2Mb = 4)" "$(mock_count)" "1"
+
+# Ours must fire below cheapcgi's own 1 MB cap, which aborts with an HTML page
+# a JSON client can only report as "Unexpected token '<'".
+mk_conf "$TMP/big.conf" "pangenome.apiBase=http://127.0.0.1:$PORT" \
+    "pangenome.maxRequestBytes=2000"
+big=$(python3 -c 'print("{\"src\":\"a#1#c\",\"start\":1,\"end\":2,\"pad\":\"" + "x"*4000 + "\"}")')
+out=$(cgi_post_cmd "$TMP/big.conf" liftover "$big")
+check_contains "oversized payload rejected as JSON, not HTML" "$out" \
+    "request too large"
+check_not_contains "oversized payload does not emit an HTML page" "$out" "DOCTYPE"
+
+# The page no longer posts its blocks - the server fetches them - so a failed
+# fetch must say why.  Reporting "no 'blocks' array in the request" described
+# our own request and hid the upstream reason (a 503 while the service was
+# restarting looked identical to a region that cannot be lifted).
+mk_conf "$TMP/dead2.conf" "pangenome.apiBase=http://127.0.0.1:$(free_port)"
+out=$(cgi_post_cmd "$TMP/dead2.conf" quickLift \
+    '{"srcDb":"hg38","tgtDb":"hg38","src":"GRCh38#0#chr1","srcHap":"GRCh38",
+      "srcStart":1000,"srcEnd":2000,"tgt":"CHM13#0","position":"chr1:1-2",
+      "hideTracks":"off"}')
+check_not_contains "failed block fetch does not blame the request" "$out" \
+    "no 'blocks' array"
 
 lift_reject "malformed JSON rejected without aborting" \
     '{"src":' "invalid JSON payload"
