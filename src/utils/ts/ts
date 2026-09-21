@@ -1,0 +1,521 @@
+#!/bin/bash
+#
+# ts - "ticket sandbox": park a UCSC Genome Browser Redmine ticket as its own
+# frozen browser instance on hgwdev.  refs #37867
+#
+# A per-ticket Apache instance, owned by the developer, bound to a loopback high
+# port, reached by an ssh tunnel (yours or a colleague's - all hgwdev users
+# share the loopback, so anyone with an hgwdev account can tunnel in).  The DB
+# and /gbdb are shared (hg.conf points at hgwdev MySQL; /gbdb is shared NFS) and
+# trash is shared with the live CGIs, so only the *code* is frozen: a full copy
+# of cgi-bin-$USER + htdocs-$USER plus a rewritten hg.conf.  Data is left
+# shared on purpose (freeze the code, share the data).  Two caches are the
+# exception, because a cache written by one instance is otherwise read by all of
+# them: the udc cache gets its own subtree under the shared trash (see
+# setUdcDir), and the trackDb cache gets its own directory inside the sandbox
+# (see setTrackDbCacheDir).  The rewritten hg.conf also drops the cookie domain,
+# or a parked instance could not hold a cart at all (see setCookieDomain).
+#
+# Each instance answers on two ports: plain http on its registered port, and
+# https on that port plus 1000, from a self-signed certificate shared by every
+# park.  Both serve the same frozen code, so the pair is how you tell whether a
+# CGI behaves differently under TLS - Apache sets HTTPS=on only for the https
+# listener, and a CGI that reads it, such as one deciding whether to mark a
+# cookie Secure, takes the other branch there.  Nothing about the http side
+# changed, and "ts conf NNNNN" adds https to a park frozen before it existed.
+#
+# The parked instances and the port registry live under $TS_ROOT, by default
+# $HOME/ticketSandboxes.  On hgwdev, point that at a large local pool (a freeze
+# is a few GB): mkdir /data/home/$USER/ticketSandboxes and symlink it from
+# $HOME, or set TS_ROOT.
+#
+# Subcommands (NNNNN = Redmine ticket number):
+#   create NNNNN [note]   freeze the live sandbox, start an httpd, register it
+#   sync   NNNNN          re-freeze a parked ticket to the current live sandbox
+#   conf   NNNNN          rewrite httpd.conf and refresh the ts hg.conf settings,
+#                         leaving the frozen code alone
+#   start  NNNNN          start the ticket's httpd (e.g. after a reboot)
+#   stop   NNNNN          stop the ticket's httpd
+#   tunnel NNNNN          open an ssh tunnel and print the browser URL
+#   list                  show all parked tickets and their running status
+#   remove NNNNN          stop the httpd and delete the ticket sandbox
+#
+set -euo pipefail
+
+# --- configuration ----------------------------------------------------------
+ROOT="$(readlink -f "${TS_ROOT:-$HOME/ticketSandboxes}")"   # parked instances live here
+REG="$ROOT/ports.tsv"                        # ticket <TAB> port <TAB> created <TAB> note
+
+TS_USER="${USER:-$(id -un)}"                 # whose live sandbox we freeze
+LIVE_CGI=/usr/local/apache/cgi-bin-$TS_USER
+LIVE_HTDOCS=/usr/local/apache/htdocs-$TS_USER
+HTDOCS_NAME="$(basename "$LIVE_HTDOCS")"     # frozen copy keeps the live name
+SHARED_HTDOCS=/usr/local/apache/htdocs        # sibling ../htdocs the CGIs read for fonts etc.
+SHARED_TRASH=/usr/local/apache/trash          # trash is data: shared with the live CGIs
+BASE_HGCONF=/usr/local/apache/cgi-bin/hg.conf
+
+HTTPD=/usr/sbin/httpd
+MODDIR=modules                               # relative to ServerRoot /etc/httpd
+PORT_BASE=48080
+
+# Every instance listens twice: plain http on its registered port, and https on
+# that port plus SSL_OFFSET.  Only the http port is in the registry, so nothing
+# about the old layout changes and an instance frozen before https existed picks
+# it up from "ts conf".  Keeping both means one park can answer the question a
+# single scheme cannot: whether a CGI behaves differently under TLS.  The cart
+# and login cookies are the live example - Apache sets HTTPS=on for the https
+# listener, cgiServerHttpsIsOn() reads it, and only then do those cookies come
+# back marked Secure.  http ports stay below PORT_BASE+SSL_OFFSET so the two
+# ranges can never overlap.
+SSL_OFFSET=1000
+SSLDIR="$ROOT/ssl"                           # one self-signed cert, shared by all instances
+HGWDEV="${HGWDEV:-hgwdev.gi.ucsc.edu}"
+
+# --- helpers -----------------------------------------------------------------
+die() { echo "ts: $*" >&2; exit 1; }
+
+usage() {   # print the header comment block, minus the shebang
+    awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "${BASH_SOURCE[0]}"
+    exit 1
+}
+
+validTkt() { [[ "$1" =~ ^[0-9]+$ ]] || die "ticket must be numeric, got '$1'"; }
+
+tsDir() { echo "$ROOT/$1"; }
+
+regPort() {   # regPort NNNNN -> port, or empty
+    [[ -f "$REG" ]] || return 0
+    awk -F'\t' -v r="$1" '$1==r{print $2}' "$REG"
+}
+
+portInUse() { # portInUse PORT -> 0 if listening
+    local ss; ss="$(command -v ss || echo /usr/sbin/ss)"
+    "$ss" -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$1\$"
+}
+
+sslPort() { echo $(( $1 + SSL_OFFSET )); }   # sslPort HTTPPORT -> the https port beside it
+
+nextPort() {
+    local p="$PORT_BASE"
+    local limit=$((PORT_BASE + SSL_OFFSET))
+    while :; do
+        [[ "$p" -lt "$limit" ]] || die "no free port below $limit (the https range starts there)"
+        if [[ -f "$REG" ]] && awk -F'\t' -v p="$p" '$2==p{f=1} END{exit !f}' "$REG"; then
+            p=$((p+1)); continue
+        fi
+        # both halves of the pair have to be free, or the instance starts on one
+        # scheme and silently fails to bind the other
+        if portInUse "$p" || portInUse "$(sslPort "$p")"; then p=$((p+1)); continue; fi
+        echo "$p"; return 0
+    done
+}
+
+# One self-signed cert for every parked instance, made once and kept in $SSLDIR.
+# A park has no password and is reached over an ssh tunnel that is already
+# encrypted, so the cert is here to turn HTTPS=on for the CGIs, not to prove
+# anything about who is serving.  A browser will warn that it is self-signed;
+# curl needs -k.  Named for localhost, with 127.0.0.1 in the SAN, because those
+# are the only two ways anyone reaches a park.
+ensureCert() {
+    [[ -s "$SSLDIR/ts.crt" && -s "$SSLDIR/ts.key" ]] && return 0
+    mkdir -p "$SSLDIR"
+    echo "Generating the shared ticket-sandbox certificate in $SSLDIR ..."
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+        -keyout "$SSLDIR/ts.key" -out "$SSLDIR/ts.crt" \
+        -subj "/CN=localhost" \
+        -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" >/dev/null 2>&1 \
+        || die "could not generate the ticket-sandbox certificate in $SSLDIR"
+    chmod 600 "$SSLDIR/ts.key"
+}
+
+pidOf() {     # pidOf NNNNN -> pid if httpd.pid exists and process alive
+    local dir; dir="$(tsDir "$1")"
+    local pf="$dir/httpd.pid"
+    [[ -f "$pf" ]] || return 0
+    local pid; pid="$(cat "$pf" 2>/dev/null)"
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && echo "$pid"
+}
+
+# --- freeze the live sandbox into the ticket dir (used by create and sync) ---
+freeze() {
+    local tkt="$1" dir; dir="$(tsDir "$tkt")"
+    echo "Freezing live sandbox into $dir ..."
+    mkdir -p "$dir/cgi-bin" "$dir/$HTDOCS_NAME" "$dir/logs"
+    # Mirror the live directory relationships so CWD-relative reads behave as on
+    # the live sandbox.  The CGIs run with CWD = $dir/cgi-bin and read two htdocs:
+    #  - DocumentRoot / browser.documentRoot -> $dir/htdocs-$USER (frozen web
+    #    content: js, style, description pages)
+    #  - ../htdocs (sibling of cgi-bin) -> the SHARED htdocs, for CGI-internal
+    #    reads like urw-fonts.  Freeze the code, not the shared static font data.
+    [[ -L "$dir/htdocs" || ! -e "$dir/htdocs" ]] || rm -rf "$dir/htdocs"
+    ln -sfn "$SHARED_HTDOCS" "$dir/htdocs"
+    # trash is data, shared with the live CGIs (custom tracks, uploaded files,
+    # sessions, cache): the CGIs write to ../trash relative to their CWD =
+    # $dir/cgi-bin, so point that at the live shared trash via a symlink.  The
+    # shared trash is world-writable (0777, setgid apache), so the sandbox httpd
+    # running as the developer can write it.  Freeze the code, share the data.
+    [[ -L "$dir/trash" || ! -e "$dir/trash" ]] || rm -rf "$dir/trash"  # drop any old private trash dir
+    ln -sfn "$SHARED_TRASH" "$dir/trash"
+    # Full copy (real freeze, not hardlinks).  Exclude the big old/ backup dir.
+    # hg.conf is generated fresh below, so exclude it from the copy.
+    rsync -a --delete --exclude 'old/' --exclude '/hg.conf' \
+        "$LIVE_CGI/"    "$dir/cgi-bin/"
+    rsync -a --delete \
+        "$LIVE_HTDOCS/" "$dir/$HTDOCS_NAME/"
+    # Rewritten, frozen hg.conf:
+    #  - include ../cgi-bin/hg.conf -> absolute (avoid self-include loop; the
+    #    shared base config is data-side and stays live by design)
+    #  - browser.documentRoot -> this ticket's frozen htdocs-$USER
+    sed -e 's#^[[:space:]]*include[[:space:]]\+\.\./cgi-bin/hg\.conf#include '"$BASE_HGCONF"'#' \
+        -e 's#^[[:space:]]*browser\.documentRoot[[:space:]]*=.*#browser.documentRoot='"$dir"'/'"$HTDOCS_NAME"'#' \
+        "$LIVE_CGI/hg.conf" > "$dir/cgi-bin/hg.conf"
+    # Per-ticket marker: a densely tiled "RM NNNNN" watermark on the page
+    # background, so it stays visible in the gaps around the content and it is
+    # obvious which frozen instance you are looking at.  browser.style
+    # (cart.c:2993) injects the stylesheet <link>; appended last so it wins.
+    makeMarker "$tkt" "$dir"
+    printf '\n# ts: per-ticket background marker (refs #37867)\nbrowser.style=/style/tsMarker.css\n' \
+        >> "$dir/cgi-bin/hg.conf"
+    # the images are keyed to the binaries we are replacing, so drop them
+    rm -rf "$dir/trackDbCache"
+    setTrackDbCacheDir "$tkt" "$dir"
+    setUdcDir "$tkt" "$dir"
+    setCookieDomain "$tkt" "$dir"
+    echo "Freeze complete ($(du -sh "$dir/cgi-bin" "$dir/$HTDOCS_NAME" 2>/dev/null | awk '{print $1}' | paste -sd'+'))."
+}
+
+# --- generate the per-ticket background watermark image + stylesheet ---------
+# Small tile => the label repeats many times across the page, so at least some
+# copies land in the margins that the content does not cover.
+makeMarker() {
+    local tkt="$1" dir="$2"
+    local png="$dir/$HTDOCS_NAME/style/tsMarker.png"
+    local css="$dir/$HTDOCS_NAME/style/tsMarker.css"
+    if command -v convert >/dev/null 2>&1; then
+        convert -size 150x70 xc:none -gravity center \
+            -fill 'rgba(200,40,40,0.28)' -pointsize 17 -weight 700 \
+            -annotate 0x0+0+0 "RM $tkt" "$png" 2>/dev/null || true
+    fi
+    cat > "$css" <<EOF
+/* ts marker for RM #$tkt - refs #37867 */
+body {
+    background-image: url("/style/tsMarker.png") !important;
+    background-repeat: repeat !important;
+    background-attachment: fixed !important;
+}
+EOF
+}
+
+# --- give the ticket its own udc cache ---------------------------------------
+# udc caches remote bigData files by URL under ../trash/udcCache.  The live
+# sandbox and every parked ticket read and write the same tree, so a cache entry
+# written by one instance is read by all of them.  That breaks the freeze: a
+# sparse or bad entry from one build reappears under another.  Give each ticket
+# its own subtree.  It still lives in the shared trash, so the trash cleaner
+# ages it out like any other udc cache, and it is still data, not code: sync
+# does not clear it.  Appended to hg.conf, so it overrides the udc.cacheDir in
+# the included base config (the last assignment of a name wins).
+udcDir() { echo "$SHARED_TRASH/udcCache/ts/$1"; }
+
+setUdcDir() {
+    local tkt="$1" dir="$2"
+    mkdir -p "$(udcDir "$tkt")"
+    # freeze() writes hg.conf fresh, but conf() calls this on an existing one
+    grep -q '^# ts: per-ticket udc cache' "$dir/cgi-bin/hg.conf" && return 0
+    printf '\n# ts: per-ticket udc cache (refs #37867)\nudc.cacheDir=%s\n' \
+        "$(udcDir "$tkt")" >> "$dir/cgi-bin/hg.conf"
+}
+
+# --- give the ticket its own trackDb cache -----------------------------------
+# The trackDb cache is a shared-memory image of the parsed trackDb, and every
+# user's CGIs write into one cacheTrackDbDir.  Two things about that are wrong
+# for a park.  The image layout is tied to TRACKDB_VERSION in the frozen
+# binaries, so a park built from a branch that changes the cache shares a
+# directory with the live sandbox and with other developers.  And the writer
+# leaves a name.txt beside each image and opens it for write, so whoever wrote
+# it first owns it and the next writer's CGI dies on a permission error, after
+# the image itself has landed - which makes the failure look intermittent.
+# Give each ticket its own directory, inside the sandbox so remove takes it
+# along with everything else.  Unlike the udc cache this is derived from the
+# code rather than data, so a re-freeze clears it.
+tdbCacheDir() { echo "$(tsDir "$1")/trackDbCache"; }
+
+setTrackDbCacheDir() {
+    local tkt="$1" dir="$2"
+    mkdir -p "$(tdbCacheDir "$tkt")"
+    # freeze() writes hg.conf fresh, but conf() calls this on an existing one
+    grep -q '^# ts: per-ticket trackDb cache' "$dir/cgi-bin/hg.conf" && return 0
+    printf '\n# ts: per-ticket trackDb cache (refs #37867)\ncacheTrackDbDir=%s\n' \
+        "$(tdbCacheDir "$tkt")" >> "$dir/cgi-bin/hg.conf"
+}
+
+# --- let the cart survive on a loopback host ---------------------------------
+# The shared config sets central.domain=.ucsc.edu, and cartWriteCookie (cart.c)
+# puts that on the cart cookie.  A parked instance answers on localhost, so the
+# browser drops a cookie scoped to .ucsc.edu, and every request gets a fresh
+# cart.  Track visibility falls back to its trackDb default, quietly: the page
+# still renders, so a scripted run measures the defaults and looks like a clean
+# pass.  Clicking through a park by hand hides it, because hgTracks puts the
+# hgsid in its own page links; a run that navigates by URL has nothing to carry.
+# An empty value leaves the domain attribute off the cookie altogether, which is
+# what a host-only cookie needs, and it works whether the instance is reached as
+# localhost or as 127.0.0.1.  The login cookies follow it too, through
+# getCookieDomainString() in wikiLink.c.  Appended to hg.conf, so it overrides
+# the value in the included base config (the last assignment of a name wins).
+setCookieDomain() {
+    local tkt="$1" dir="$2"
+    # freeze() writes hg.conf fresh, but conf() calls this on an existing one
+    grep -q '^# ts: host-only cart cookie' "$dir/cgi-bin/hg.conf" && return 0
+    printf '\n# ts: host-only cart cookie (refs #37867)\ncentral.domain=\n' \
+        >> "$dir/cgi-bin/hg.conf"
+}
+
+# --- render the per-ticket httpd.conf ----------------------------------------
+writeConf() {
+    local tkt="$1" port="$2" dir; dir="$(tsDir "$1")"
+    local sport; sport="$(sslPort "$port")"
+    cat > "$dir/httpd.conf" <<EOF
+# Private loopback httpd for RM #$tkt - generated by ts, refs #37867
+ServerName localhost:$port
+ServerRoot "/etc/httpd"
+Listen 127.0.0.1:$port
+Listen 127.0.0.1:$sport
+
+LoadModule mpm_prefork_module $MODDIR/mod_mpm_prefork.so
+LoadModule unixd_module $MODDIR/mod_unixd.so
+LoadModule authz_core_module $MODDIR/mod_authz_core.so
+LoadModule authz_host_module $MODDIR/mod_authz_host.so
+LoadModule mime_module $MODDIR/mod_mime.so
+LoadModule dir_module $MODDIR/mod_dir.so
+LoadModule alias_module $MODDIR/mod_alias.so
+LoadModule rewrite_module $MODDIR/mod_rewrite.so
+LoadModule headers_module $MODDIR/mod_headers.so
+LoadModule cgi_module $MODDIR/mod_cgi.so
+LoadModule log_config_module $MODDIR/mod_log_config.so
+LoadModule ssl_module $MODDIR/mod_ssl.so
+
+TypesConfig /etc/mime.types
+DirectoryIndex index.html
+
+PidFile "$dir/httpd.pid"
+ErrorLog "$dir/logs/error_log"
+LogFormat "%h %l %u %t \"%r\" %>s %b" common
+CustomLog "$dir/logs/access_log" common
+
+DocumentRoot "$dir/$HTDOCS_NAME"
+ScriptAlias /cgi-bin/ "$dir/cgi-bin/"
+Alias /trash/ "$SHARED_TRASH/"
+
+# CORS is scoped to the data directories only, matching the live
+# /usr/local/apache/conf/httpd.conf, which sets it on htdocs and trash and never
+# on cgi-bin.  A parked instance has no password, so a server-wide wildcard would
+# let any page in the developer's browser read CGI output through the open tunnel.
+<Directory "$dir/cgi-bin">
+    AllowOverride None
+    Options +ExecCGI +FollowSymLinks
+    Require all granted
+</Directory>
+<Directory "$dir/$HTDOCS_NAME">
+    AllowOverride None
+    Options +FollowSymLinks +Includes
+    Header set Access-Control-Allow-Origin "*"
+    Header set Access-Control-Allow-Headers: Range
+    Require all granted
+</Directory>
+<Directory "$SHARED_TRASH">
+    AllowOverride None
+    Options +FollowSymLinks
+    Header set Access-Control-Allow-Origin "*"
+    Header set Access-Control-Allow-Headers: Range
+    Require all granted
+</Directory>
+
+# The same sandbox again, over TLS, so a CGI can be exercised under HTTPS=on.
+# No session cache: shmcb wants a mutex under DefaultRuntimeDir, which a httpd
+# started by a normal user cannot write, and a sandbox has nothing to gain from
+# resumption anyway.  DocumentRoot and the two aliases are repeated rather than
+# inherited, since a vhost that names its own is the only version that is
+# certain across Apache versions.  The <Directory> blocks above are global and
+# cover both listeners.
+SSLSessionCache none
+<VirtualHost 127.0.0.1:$sport>
+    ServerName localhost:$sport
+    SSLEngine on
+    SSLCertificateFile "$SSLDIR/ts.crt"
+    SSLCertificateKeyFile "$SSLDIR/ts.key"
+    DocumentRoot "$dir/$HTDOCS_NAME"
+    ScriptAlias /cgi-bin/ "$dir/cgi-bin/"
+    Alias /trash/ "$SHARED_TRASH/"
+</VirtualHost>
+EOF
+}
+
+# --- lifecycle ---------------------------------------------------------------
+startHttpd() {
+    local tkt="$1" dir; dir="$(tsDir "$1")"
+    [[ -f "$dir/httpd.conf" ]] || die "no httpd.conf for RM $tkt (create it first)"
+    if [[ -n "$(pidOf "$tkt")" ]]; then
+        echo "RM $tkt httpd already running (pid $(pidOf "$tkt"))."; return 0
+    fi
+    "$HTTPD" -f "$dir/httpd.conf" -t >/dev/null   # syntax check first
+    "$HTTPD" -f "$dir/httpd.conf"
+    sleep 1
+    local pid; pid="$(pidOf "$tkt")"
+    [[ -n "$pid" ]] || { tail -5 "$dir/logs/error_log" >&2; die "httpd failed to start for RM $tkt"; }
+    echo "RM $tkt httpd started (pid $pid)."
+}
+
+stopHttpd() {
+    local tkt="$1" dir; dir="$(tsDir "$1")"
+    local pid; pid="$(pidOf "$tkt")"
+    if [[ -z "$pid" ]]; then echo "RM $tkt httpd not running."; return 0; fi
+    kill "$pid" 2>/dev/null || true
+    sleep 1
+    [[ -z "$(pidOf "$tkt")" ]] && echo "RM $tkt httpd stopped." || die "RM $tkt httpd did not stop (pid $pid)"
+}
+
+# --- subcommands -------------------------------------------------------------
+cmd_create() {
+    local tkt="$1"; shift || true
+    local note="${*:-}"
+    # the registry is one tab-separated line per ticket, so a tab or newline in the
+    # free-text note would append a malformed row instead of reading back as the note
+    note="$(printf '%s' "$note" | tr '\t\n\r' '   ')"
+    validTkt "$tkt"
+    [[ -d "$LIVE_CGI"    ]] || die "no live sandbox at $LIVE_CGI"
+    [[ -d "$LIVE_HTDOCS" ]] || die "no live htdocs at $LIVE_HTDOCS"
+    mkdir -p "$ROOT"
+    [[ -z "$(regPort "$tkt")" ]] || die "RM $tkt already exists (port $(regPort "$tkt")); use sync/remove"
+    local port; port="$(nextPort)"
+    local sport; sport="$(sslPort "$port")"
+    ensureCert
+    freeze "$tkt"
+    writeConf "$tkt" "$port"
+    printf '%s\t%s\t%s\t%s\n' "$tkt" "$port" "$(date +%Y-%m-%d)" "$note" >> "$REG"
+    startHttpd "$tkt"
+    echo
+    echo "RM $tkt parked on 127.0.0.1:$port (http) and 127.0.0.1:$sport (https)"
+    echo "  on hgwdev:    curl 'http://127.0.0.1:$port/cgi-bin/hgTracks?db=hg38'"
+    echo "                curl -k 'https://127.0.0.1:$sport/cgi-bin/hgTracks?db=hg38'"
+    echo "  you, remote:  ts tunnel $tkt   ->   http://localhost:$port/cgi-bin/hgTracks"
+    echo "  a colleague:  ssh -N -L $port:localhost:$port -L $sport:localhost:$sport <user>@$HGWDEV"
+    echo "                ->   http://localhost:$port/cgi-bin/hgTracks"
+    echo "The certificate is self-signed, so a browser warns once on the https port."
+}
+
+cmd_sync() {
+    local tkt="$1"; validTkt "$tkt"
+    local port; port="$(regPort "$tkt")"
+    [[ -n "$port" ]] || die "RM $tkt not found in registry"
+    local running=""; [[ -n "$(pidOf "$tkt")" ]] && running=1
+    [[ -n "$running" ]] && stopHttpd "$tkt"
+    ensureCert
+    freeze "$tkt"
+    writeConf "$tkt" "$port"     # regenerate in case template changed
+    [[ -n "$running" ]] && startHttpd "$tkt" || echo "RM $tkt re-frozen (httpd was not running)."
+}
+
+# Rewrite httpd.conf from the current template without touching the frozen code.
+# "sync" also re-freezes, which is what you want after more work on the live
+# sandbox, but not when the freeze is the whole point of the park and only the
+# config template moved on.
+cmd_conf() {
+    local tkt="$1"; validTkt "$tkt"
+    local port; port="$(regPort "$tkt")"
+    [[ -n "$port" ]] || die "RM $tkt not found in registry"
+    [[ -d "$(tsDir "$tkt")" ]] || die "no sandbox directory for RM $tkt"
+    local running=""; [[ -n "$(pidOf "$tkt")" ]] && running=1
+    [[ -n "$running" ]] && stopHttpd "$tkt"
+    ensureCert                                # retrofits https onto a pre-https park
+    writeConf "$tkt" "$port"
+    setUdcDir "$tkt" "$(tsDir "$tkt")"        # retrofit a sandbox frozen before these existed
+    setTrackDbCacheDir "$tkt" "$(tsDir "$tkt")"
+    setCookieDomain "$tkt" "$(tsDir "$tkt")"
+    if [[ -n "$running" ]]; then
+        startHttpd "$tkt"
+    else
+        echo "RM $tkt httpd.conf rewritten (httpd was not running)."
+    fi
+}
+
+cmd_start()  { validTkt "$1"; startHttpd "$1"; }
+cmd_stop()   { validTkt "$1"; stopHttpd "$1"; }
+
+cmd_port() {   # print the port for a ticket (used by the laptop-side ts wrapper)
+    # "ts port NNNNN" keeps printing the http port on its own, because a laptop
+    # may still hold a copy of ts.mac from before https existed.  The https port
+    # is a second argument away rather than a second line.
+    local tkt="$1"; validTkt "$tkt"
+    local want="${2:-http}"
+    local port; port="$(regPort "$tkt")"
+    [[ -n "$port" ]] || die "RM $tkt not found in registry"
+    case "$want" in
+        http)  echo "$port";;
+        ssl|https) sslPort "$port";;
+        *) die "ts port: second argument must be http or ssl, got '$want'";;
+    esac
+}
+
+cmd_tunnel() {
+    local tkt="$1"; validTkt "$tkt"
+    local port; port="$(regPort "$tkt")"
+    [[ -n "$port" ]] || die "RM $tkt not found in registry"
+    local sport; sport="$(sslPort "$port")"
+    cat <<EOF
+Opening ssh tunnel: localhost:$port and localhost:$sport -> $HGWDEV RM $tkt sandbox.
+While this terminal stays open, point your browser at:
+
+    http://localhost:$port/cgi-bin/hgTracks
+    https://localhost:$sport/cgi-bin/hgTracks   (self-signed, your browser warns once)
+
+To let a colleague reach it from their laptop, have them run (with their own
+hgwdev username) and then open the same URL:
+
+    ssh -N -L $port:localhost:$port -L $sport:localhost:$sport <user>@$HGWDEV
+
+Leave this window running. Ctrl-C closes the tunnel.
+EOF
+    exec ssh -N -L "$port:localhost:$port" -L "$sport:localhost:$sport" "$HGWDEV"
+}
+
+cmd_list() {
+    [[ -s "$REG" ]] || { echo "No parked tickets."; return 0; }
+    printf '%-8s %-6s %-6s %-11s %-8s %s\n' RM PORT HTTPS CREATED STATUS NOTE
+    while IFS=$'\t' read -r tkt port created note; do
+        [[ -z "$tkt" ]] && continue
+        local status="stopped"; [[ -n "$(pidOf "$tkt")" ]] && status="running"
+        printf '%-8s %-6s %-6s %-11s %-8s %s\n' \
+            "$tkt" "$port" "$(sslPort "$port")" "$created" "$status" "$note"
+    done < "$REG"
+}
+
+cmd_remove() {
+    local tkt="$1"; validTkt "$tkt"
+    local port; port="$(regPort "$tkt")"
+    [[ -n "$port" ]] || die "RM $tkt not found in registry"
+    stopHttpd "$tkt" || true
+    rm -rf "$(tsDir "$tkt")"     # takes the ticket's trackDb cache with it;
+                                 # trash is a symlink: removed, not followed
+    rm -rf "$(udcDir "$tkt")"    # the ticket's udc cache lives inside the shared trash
+    # drop the registry row
+    local tmp; tmp="$(mktemp)"
+    awk -F'\t' -v r="$tkt" '$1!=r' "$REG" > "$tmp" && mv "$tmp" "$REG"
+    echo "RM $tkt removed."
+}
+
+# --- dispatch ----------------------------------------------------------------
+[[ $# -ge 1 ]] || usage
+sub="$1"; shift || true
+case "$sub" in
+    create) [[ $# -ge 1 ]] || usage; cmd_create "$@";;
+    sync)   [[ $# -eq 1 ]] || usage; cmd_sync   "$1";;
+    conf)   [[ $# -eq 1 ]] || usage; cmd_conf   "$1";;
+    start)  [[ $# -eq 1 ]] || usage; cmd_start  "$1";;
+    stop)   [[ $# -eq 1 ]] || usage; cmd_stop   "$1";;
+    tunnel) [[ $# -eq 1 ]] || usage; cmd_tunnel "$1";;
+    port)   [[ $# -ge 1 && $# -le 2 ]] || usage; cmd_port "$@";;
+    list)   cmd_list;;
+    remove) [[ $# -eq 1 ]] || usage; cmd_remove "$1";;
+    -h|--help|help) usage;;
+    *) die "unknown subcommand '$sub' (try: create sync conf start stop tunnel list remove)";;
+esac

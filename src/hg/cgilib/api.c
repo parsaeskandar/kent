@@ -4,6 +4,7 @@
  * See kent/LICENSE or http://genome.ucsc.edu/license/ for licensing information. */
 
 #include "common.h"
+#include "cheapcgi.h"
 #include "api.h"
 
 void apiOut(char *text, char *jsonp)
@@ -11,14 +12,15 @@ void apiOut(char *text, char *jsonp)
 {
 // It's debatable whether the type should be text/plain, text/javascript or application/javascript;
 // text/javascript works with all our supported browsers, so we are using that one.
-puts("Content-Type:text/javascript\n");
+cgiPrintContentType("text/javascript");
 
-if (jsonp)
+if (jsonp && isValidJsonpCallback(jsonp))
     {
     printf("%s(%s)", jsonp, text);
     }
 else
     {
+    // No callback, or an invalid callback name: emit the bare (unpadded) JSON.
     puts(text);
     }
 }

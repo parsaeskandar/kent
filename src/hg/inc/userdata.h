@@ -7,6 +7,7 @@
 #define USERDATA_H
 
 #include "hubSpace.h"
+#include "jsonWrite.h"
 
 // 2bit genome-name collision error. Shared with the JS client so it
 // can identify this error from the message.
@@ -74,9 +75,20 @@ char *prefixUserFile(char *userName, char *fname, char *parentDir);
  * we cannot construct a full path because of a realpath(3) failure.
  * parentDir is optional and will go in between the per-user dir and the fname */
 
-char *hubNameFromPath(char *path);
-/* Return the last directory component of path. Assume that a '.' char in the last component
- * means that component is a filename and go back further */
+char *hubLeafFromPath(char *path);
+/* Return the last '/' separated component of path, ignoring a trailing '/'. Callers
+ * pass a directory, so there is no filename to guess at: a '.' in the last component
+ * is part of a directory name, which isValidParentDir allows */
+
+char *hubRootFromParentDir(char *parentDir);
+/* Return the first '/' separated component of parentDir, which is the hub itself.
+ * The hub.txt and the hubSpace dir row for a hub both live at that level, while
+ * hubLeafFromPath gives the immediately containing directory, which for a nested
+ * parentDir like 'myHub/hg38' is a subdirectory of the hub */
+
+char *hubPathFromParentDir(char *parentDir, char *userDataDir);
+/* Return the directory holding this hub's hub.txt, that is the user's directory
+ * plus the hub component of parentDir */
 
 char *writeHubText(char *path, char *userName, char *db, char *twoBitFileName);
 /* Create a hub.txt file, optionally creating the directory holding it.
@@ -85,26 +97,27 @@ char *writeHubText(char *path, char *userName, char *db, char *twoBitFileName);
  * the 2bit). For convenience, return the file name of the created hub, which
  * can be freed. */
 
-void createNewTempHubForUpload(char *requestId, struct hubSpace *rowForFile, char *userDataDir, char *parentDir);
+void createNewTempHubForUpload(char *requestId, struct hubSpace *rowForFile, char *userDataDir);
 /* Creates a hub.txt for this upload, and updates the hubSpace table for the
  * hub.txt and any parentDirs we need to create. */
 
-boolean userHasOwnNamedHubTxtInDir(char *userName, char *parentDir);
-/* Return TRUE if user uploaded a *.hub.txt NOT literally named 'hub.txt' in parentDir.
- * Used to decide whether the backend can modify hub.txt (synthesize / append / upgrade)
- * or should leave it alone because the user has their own authoritative config. */
+boolean userHasOwnNamedHubTxtInDir(char *userName, char *hubName, char *hubDir);
+/* Return TRUE if the user uploaded a *.hub.txt file NOT literally named 'hub.txt'
+ * (e.g. 'araTha1.hub.txt') at the top level of hubDir. Distinguishes "user's own
+ * authoritative hub.txt" from "backend-synthesized hub.txt that we're free to modify".
+ * parentDir alone would also match a *.hub.txt sitting in some other hub's
+ * subdirectory that happens to be named hubName, so pin it to hubDir as well */
 
 char *existingHubTypeForDir(char *userName, char *hubName);
 /* Return the hubType of this user's hub dir row, or NULL if no such row exists. */
 
-void upgradeExistingHubToAssembly(struct hubSpace *rowForFile, char *userDataDir, char *encodedParentDir);
-/* Race-proofing: when a 2bit arrives into a hub that already has a synthesized
- * hub.txt, upgrade that hub.txt to include the assembly stanza and mark every
- * hubSpace row for this hub as hubType='assemblyHub'. No-op unless rowForFile
- * is a 2bit, or the synthesized hub.txt does not exist. */
-
-boolean literalHubTxtExistsOnDisk(char *parentDir, char *userDataDir);
-/* Return TRUE if path/hub.txt exists as a real file in this user's parentDir. */
+void upgradeExistingHubToAssembly(struct hubSpace *rowForFile, char *userDataDir,
+    boolean backendOwnsHubTxt);
+/* When a 2bit arrives into a hub, mark every hubSpace row for this hub as
+ * hubType='assemblyHub'. When backendOwnsHubTxt, first add the assembly stanza to
+ * the synthesized hub.txt, which is itself a no-op if that file does not exist.
+ * Pass FALSE for a hub.txt the user uploaded, whose contents are theirs to write.
+ * The whole function is a no-op unless rowForFile is a 2bit. */
 
 int lockHubDir(char *hubDir);
 /* Acquire an exclusive flock on hubDir/.hub.lock; returns a file descriptor.
@@ -125,6 +138,13 @@ void removeFileForUser(char *fname, char *userName);
 
 struct hubSpace *listFilesForUser(char *userName);
 /* Return the files the user has uploaded */
+
+struct hubSpace *listFilesInHubDir(char *userName, char *hubName);
+/* Return the user's rows for one hub: the hub's own directory row plus every row
+ * underneath it */
+
+void hubSpaceWriteFileList(struct jsonWrite *jw, char *userName, struct hubSpace *fileList);
+/* Write fileList as the "fileList" array of jw, in the row shape the My Data table reads */
 
 char *defaultHubNameForUser(char *userName);
 /* Return a name to use as a default for a hub, starts with myFirstHub, then myFirstHub2, ... */

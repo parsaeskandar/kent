@@ -27,18 +27,24 @@ DEFAULT_OUTDIR = "/hive/users/lrnassar/claude/RM37399/flossies"
 DEFAULT_SRC = "/hive/users/lrnassar/claude/RM37399/flossies_tp53.json"
 
 COLORS = {
-    'BS2':           '35,159,134',  # teal (matches BS1 family in AF track)
-    'Informational': '180,180,180', # gray (non-coding observations)
+    'BS2':            '23,124,106',  # dark teal   - BS2 (8+ carriers)
+    'BS2_Moderate':   '46,157,138',  # medium teal - BS2_Moderate (4-7)
+    'BS2_Supporting': '138,201,189', # light teal  - BS2_Supporting (2-3)
+    'Observed':       '201,201,201', # light gray  - coding, <2 carriers (below BS2)
+    'Informational':  '180,180,180', # gray        - non-coding observations
 }
 
-# Per CSpec GN009 v2.4.0 §BS2: variant observed in cohort of healthy
-# adult women >70 weakens disease-causation evidence. We apply BS2 to
-# coding-region observations (missense, synonymous, splice). Non-coding
-# (UTR / deep intronic) observations are kept in the track for reference
-# but flagged "Informational" since BS2 is not standardly applied to
-# non-coding TP53 changes.
+# Per CSpec GN009 v2.4.0 §BS2: variant observed in a cohort of healthy
+# adult women >70 weakens disease-causation evidence. The VCEP weights BS2
+# by the number of carriers in the cohort: 2-3 -> BS2_Supporting, 4-7 ->
+# BS2_Moderate, 8+ -> BS2. The carrier tiers apply to the protein-altering
+# coding consequences in CODING_CONSEQUENCES below; a coding observation with a
+# single carrier is shown but does not meet BS2. Synonymous (labeled "silent"
+# in this export), UTR, and intronic observations are not protein-altering and
+# are flagged "Informational" (BS2 is not applied to them). In the current
+# FLOSSIES TP53 export the only coding consequence present is missense.
 CODING_CONSEQUENCES = {
-    'missense_variant', 'synonymous_variant', 'splice_donor_variant',
+    'missense_variant', 'splice_donor_variant',
     'splice_acceptor_variant', 'splice_region_variant', 'stop_gained',
     'stop_lost', 'start_lost', 'frameshift_variant',
     'inframe_insertion', 'inframe_deletion',
@@ -56,8 +62,8 @@ AUTOSQL = """table TP53Flossies
    uint   thickStart;   "Same as chromStart"
    uint   thickEnd;     "Same as chromEnd"
    uint   reserved;     "RGB color"
-   string bs2Applies;   "BS2 / Informational"
-   string points;       "Tavtigian points (-4 for BS2, 0 for Informational)"
+   string bs2Applies;   "BS2 / BS2_Moderate / BS2_Supporting / Observed / Informational"
+   string points;       "Tavtigian points (BS2 -4, Moderate -2, Supporting -1, else 0)"
    string consequence;  "Predicted consequence (missense, synonymous, UTR, etc.)"
    string hgvsc;        "HGVSc cDNA notation"
    string hgvsp;        "HGVSp protein notation (if coding)"
@@ -71,14 +77,23 @@ AUTOSQL = """table TP53Flossies
 """
 
 
-def categorize(consequence):
-    """Return ('BS2', '-4 pts') or ('Informational', '0 pts')."""
-    if consequence in CODING_CONSEQUENCES:
-        return ('BS2', '-4 pts')
-    return ('Informational', '0 pts')
+def bs2_tier(consequence, carriers):
+    """Return (label, points_str, points_int) per CSpec GN009 v2.4.0 BS2 count
+    tiers: 2-3 carriers -> BS2_Supporting, 4-7 -> BS2_Moderate, 8+ -> BS2.
+    Coding observations with a single carrier are shown but do not meet BS2;
+    non-coding observations are Informational only."""
+    if consequence not in CODING_CONSEQUENCES:
+        return ('Informational', '0 pts', 0)
+    if carriers >= 8:
+        return ('BS2', '-4 pts', -4)
+    if carriers >= 4:
+        return ('BS2_Moderate', '-2 pts', -2)
+    if carriers >= 2:
+        return ('BS2_Supporting', '-1 pt', -1)
+    return ('Observed', '0 pts', 0)
 
 
-def mouseover(disp, hgvsc, hgvsp, conseq, applies, pts,
+def mouseover(disp, hgvsc, hgvsp, conseq, applies, pts, carriers,
               ac, an, pop_acs, pop_ans):
     pop_lines = []
     for pop in pop_acs:
@@ -91,11 +106,17 @@ def mouseover(disp, hgvsc, hgvsp, conseq, applies, pts,
             pop_lines.append("{}: {}/{}".format(pop, ac_p, an_p))
     af = (ac / an) if an else 0.0
     bs2_section = ""
-    if applies == 'BS2':
+    if applies in ('BS2', 'BS2_Moderate', 'BS2_Supporting'):
         bs2_section = (
-            "<br><b>BS2 applicability:</b> Yes ({} pts) "
-            "&#8212; coding observation in healthy aged-female cohort"
-        ).format(pts)
+            "<br><b>BS2 applicability:</b> {applies} ({pts}) "
+            "&#8212; {carriers} carrier(s) in cohort "
+            "(GN009 tiers: 2&#8211;3 Supporting, 4&#8211;7 Moderate, 8+ Strong)"
+        ).format(applies=applies, pts=pts, carriers=carriers)
+    elif applies == 'Observed':
+        bs2_section = (
+            "<br><b>BS2 applicability:</b> Not met &#8212; only {carriers} "
+            "carrier(s); GN009 requires &#8805;2 carriers for BS2_Supporting"
+        ).format(carriers=carriers)
     else:
         bs2_section = (
             "<br><b>BS2 applicability:</b> Informational only "
@@ -175,12 +196,24 @@ def emit_rows(records, assembly, hg38_lookup):
                 continue
             chrom, start, end = hg38_lookup[v['variant_id']]
         conseq = v.get('major_consequence') or 'unknown'
-        applies, pts = categorize(conseq)
+        ac = int(v.get('allele_count') or 0)
+        an = int(v.get('allele_num') or 0)
+        # Carrier individuals = heterozygous + homozygous carriers, summed from
+        # the per-population het/hom counts. In this FLOSSIES export allele_count
+        # is already het + hom (not the usual het + 2*hom); the check below makes
+        # a future re-fetch that renames these keys or switches to standard
+        # allele-count semantics fail loudly instead of silently zeroing carriers.
+        carriers = (sum(int(x or 0) for x in (v.get('pop_hets') or {}).values())
+                    + sum(int(x or 0) for x in (v.get('pop_homs') or {}).values()))
+        if carriers != ac:
+            raise ValueError(
+                "FLOSSIES het+hom ({}) != allele_count ({}) for {}; "
+                "pop_hets/pop_homs schema may have changed".format(
+                    carriers, ac, v.get('HGVSc') or v.get('variant_id')))
+        applies, pts, _ = bs2_tier(conseq, carriers)
         color = COLORS[applies]
         hgvsc = v.get('HGVSc') or ''
         hgvsp = v.get('HGVSp') or ''
-        ac = int(v.get('allele_count') or 0)
-        an = int(v.get('allele_num') or 0)
         pop_acs = v.get('pop_acs') or {}
         pop_ans = v.get('pop_ans') or {}
         pop_breakdown = "; ".join(
@@ -189,7 +222,7 @@ def emit_rows(records, assembly, hg38_lookup):
         )
         disp = "{}:{}{}>{}".format(chrom, start + 1, ref, alt)
         name = hgvsp if hgvsp else (hgvsc if hgvsc else disp)
-        mo = mouseover(disp, hgvsc, hgvsp, conseq, applies, pts,
+        mo = mouseover(disp, hgvsc, hgvsp, conseq, applies, pts, carriers,
                        ac, an, pop_acs, pop_ans)
         lines.append("\t".join([
             chrom, str(start), str(end),
@@ -224,8 +257,8 @@ def build(db, outdir, src_json):
         lines = emit_rows(records, 'hg19', None)
     print("  {} BED rows".format(len(lines)))
 
-    bs2_count = sum(1 for L in lines if "\tBS2\t" in L)
-    print("  BS2 applicable: {}".format(bs2_count))
+    tiers = Counter(L.split("\t")[9] for L in lines)
+    print("  BS2 tiers: {}".format(dict(tiers)))
 
     as_file = os.path.join(outdir, "TP53Flossies.as")
     lib.write_autosql(as_file, AUTOSQL)

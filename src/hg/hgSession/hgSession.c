@@ -39,10 +39,16 @@
 #include "hubConnect.h"
 #include "trackHub.h"
 #include "errCatch.h"
+#include "geoMirror.h"
 #include "sessionData.h"
+#include "snapshotSession.h"
 #include "jsonParse.h"
+#include "jsonWrite.h"
+#include "perfTimer.h"
 
 char *database = NULL;
+struct perfTimer *hgSessionTiming = NULL;	/* Non-NULL when &measureTiming is set; times the page
+						 * and is emitted as hgSessionData.timing for the JS. */
 
 void usage()
 /* Explain usage and exit. */
@@ -60,6 +66,20 @@ char *excludeVars[] = {"Submit", "submit", hgsSessionDataDbSuffix, NULL};
 
 /* Javascript to confirm that the user truly wants to delete a session. */
 #define confirmDeleteFormat "return confirm('Are you sure you want to delete ' + decodeURIComponent('%s') + '?');"
+
+/* Forward declarations for the experimental client-rendered Sessions page (hgSession.js), which is
+ * an opt-in alternative gated by the sessionNewPage / sessionNewPageBanner hg.conf flags, mirroring
+ * hgBlat's blatNewForm / blatNewFormBanner facelift.  Defined below. */
+static boolean sessionNewPageActive();
+static void printSessionNewPageBanner(boolean onNewPage);
+void doMainPageNew(char *userName, char *message);
+static void sessionListToJson(char *userName, struct jsonWrite *jw);
+
+/* Gallery thumbnail helpers, defined further below with the rest of the gallery code.  The AJAX
+ * endpoints above them have to keep a thumbnail in step with its session, so they need these. */
+int thumbnailAdd(char *encUserName, char *encSessionName, struct sqlConnection *conn,
+                 struct dyString *dyMessage);
+void thumbnailRemove(char *encUserName, char *encSessionName, struct sqlConnection *conn);
 
 char *cgiDecodeClone(char *encStr)
 /* Allocate and return a CGI-decoded copy of encStr. */
@@ -89,10 +109,17 @@ if (loginSystemEnabled()) /* Using the new hgLogin CGI for login */
         "<li>Username:  %s</li>",wikiUserName);
 
     if (loginUseBasicAuth())
-        printf("<li>The Genome Browser is configured to use HTTP Basic Authentication, so the password cannot be changed here.</li></ul>");
+        printf("<li>The Genome Browser is configured to use HTTP Basic Authentication, so the password cannot be changed here.</li>");
     else
-        printf("<li><A HREF=\"%s\">Change password</A></li></ul>",
+        printf("<li><A HREF=\"%s\">Change password</A></li>",
             wikiLinkChangePasswordUrl(cartSessionId(cart)));
+    char *changeEmailUrl = wikiLinkChangeEmailUrl(cartSessionId(cart));
+    if (changeEmailUrl != NULL)
+        printf("<li><A HREF=\"%s\">Change email</A></li>", changeEmailUrl);
+    char *changeRecovEmailUrl = wikiLinkChangeRecovEmailUrl(cartSessionId(cart));
+    if (changeRecovEmailUrl != NULL)
+        printf("<li><A HREF=\"%s\">Change recovery email</A></li>", changeRecovEmailUrl);
+    printf("</ul>");
 
     printf("<p><A id='logoutLink' HREF=\"%s\">Sign out</A></p>",
         wikiLinkUserLogoutUrl(cartSessionId(cart)));
@@ -353,6 +380,12 @@ int rowIdx = 0;
 while ((row = sqlNextRow(sr)) != NULL)
     {
     char *encSessionName = row[0];
+    /* A snapshot is a share token, not a session the user made and would recognize (see
+     * lib/snapshotSession.c).  Leave it out of the list.  Ask the settings column, which
+     * saveSnapshotSession() stamps with the snapshot type - not the "__" name prefix, which users
+     * have also used for sessions of their own that they do need to see here (refs #38313). */
+    if (gotSettings && snapshotIsSnapshotSettings(row[5]))
+        continue;
     char *sessionName = cgiDecodeClone(encSessionName);
     char *link = NULL;
     int shared = atoi(row[1]);
@@ -636,6 +669,8 @@ else
     jsInit();
     }
 
+printSessionNewPageBanner(FALSE);
+
 printf("<P>See the <A HREF=\"../goldenPath/help/hgSessionHelp.html\" "
        "TARGET=_BLANK>Sessions User's Guide</A> "
        "for more information about this tool. "
@@ -721,7 +756,13 @@ dyStringFree(&dyUrl);
 void doMainPage(char *userName, char *message)
 /* Login status/links and session controls. */
 {
-puts("Content-Type:text/html\n");
+if (sessionNewPageActive())
+    {
+    doMainPageNew(userName, message);
+    return;
+    }
+cspWriteResponseHeader();
+cgiPrintContentType("text/html");
 if (loginSystemEnabled() || wikiLinkEnabled())
     {
     if (userName)
@@ -779,6 +820,14 @@ cartRemovePrefix(cart, hgsDoDownloadPrefix);
 cartRemovePrefix(cart, hgsDo);
 cartRemove(cart, hgsOldSessionName);
 cartRemove(cart, hgsCancel);
+/* Two of the Save form's own inputs.  If they stay in the cart they are stored inside every
+ * session saved afterwards, so one session's description travels in sessions that never had
+ * one.  hgsNewSessionShare is left alone on purpose: it has the same problem, but it is also
+ * the only memory of the user's "Allow this session to be loaded by others" choice, and
+ * showSavingOptions() defaults that box to checked.  Removing it here would quietly re-check
+ * the box for someone who keeps their sessions private. */
+cartRemove(cart, hgsNewSessionName);
+cartRemove(cart, hgsNewSessionDescription);
 }
 
 static void outIfNotPresent(struct cart *cart, struct dyString *dy, char *track, int tdbVis)
@@ -945,8 +994,10 @@ sqlDyStringPrintf(dy, ")");
 sqlUpdate(conn, dy->string);
 dyStringFree(&dy);
 
-/* Prevent modification of custom track collections or quickLifts just saved to namedSessionDb: */
-cartCopyLocalHubs(cart);
+/* Prevent modification of the custom track collection just saved to namedSessionDb.  Under
+ * copy-on-write hgCollection asks for its own trash copy before it writes, so this does
+ * nothing.  refs #38273 */
+cartCopyLocalHubsOnSessionLoad(cart);
 return useCount;
 }
 
@@ -957,7 +1008,8 @@ char *doNewSession(char *userName)
 if (userName == NULL)
     return "Unable to save session -- please log in and try again.";
 struct dyString *dyMessage = dyStringNew(2048);
-char *sessionName = trimSpaces(cartString(cart, hgsNewSessionName));
+/* Clone: saveCartAsSession() removes this cart variable, which frees the cart's own copy. */
+char *sessionName = trimSpaces(cloneString(cartString(cart, hgsNewSessionName)));
 if (isEmpty(sessionName))
     return "Error: Unable to save a session without a name.  Please add one and try again.";
 
@@ -1003,22 +1055,82 @@ return dyStringCannibalize(&dyMessage);
 static void saveSessionJsonError(struct sqlConnection *conn, char *message)
 /* Emit a JSON error response for the "Share a link" AJAX endpoints and disconnect. */
 {
-puts("Content-Type:application/json\n");
+cgiPrintContentType("application/json");
 printf("{\"error\": \"%s\"}\n", jsonStringEscape(message));
 hDisconnectCentral(&conn);
 }
 
+static boolean namedSessionExists(struct sqlConnection *conn, char *encUserName,
+                                  char *encSessionName)
+/* Is there already a session by this name for this user?  Both names must be encoded the way they
+ * are stored, i.e. through cgiEncodeFull(). */
+{
+char query[1024];
+sqlSafef(query, sizeof query,
+         "select count(*) from %s where userName = '%s' and sessionName = '%s'",
+         namedSessionTable, encUserName, encSessionName);
+return sqlQuickNum(conn, query) > 0;
+}
+
 static void saveSessionJsonResult(struct sqlConnection *conn, char *encUserName,
-                                  char *encSessionName, char *sessionName)
+                                  char *encSessionName, char *sessionName, char *warning)
 /* Emit {"name": ..., "url": ...} for the "Share a link" AJAX endpoints and disconnect.
- * sessionName is the human-readable (decoded) name; the client uses it as the rename "old name". */
+ * sessionName is the human-readable (decoded) name; the client uses it as the rename "old name".
+ * warning (may be NULL) is added as "warning" for something that went wrong alongside a save that
+ * did succeed, such as a thumbnail the server could not build. */
 {
 struct dyString *dyUrl = dyStringNew(0);
 addSessionLink(dyUrl, encUserName, encSessionName, FALSE, TRUE);
-puts("Content-Type:application/json\n");
-printf("{\"name\": \"%s\", \"url\": \"%s\"}\n",
-       jsonStringEscape(sessionName), jsonStringEscape(dyUrl->string));
+cgiPrintContentType("application/json");
+printf("{\"name\": \"%s\", \"url\": \"%s\"", jsonStringEscape(sessionName),
+       jsonStringEscape(dyUrl->string));
+if (isNotEmpty(warning))
+    printf(", \"warning\": \"%s\"", jsonStringEscape(warning));
+puts("}");
 dyStringFree(&dyUrl);
+hDisconnectCentral(&conn);
+}
+
+static int sessionSharedLevel(struct sqlConnection *conn, char *encUserName, char *encSessionName)
+/* Return the sharing level of this user's session: 0 private, 1 shared by link, 2 in the public
+ * listing.  Returns -1 when the user has no session by that name, which the shared column cannot
+ * express (it is NOT NULL), so the AJAX endpoints can say so instead of reporting a no-op as a
+ * success. */
+{
+char query[512];
+sqlSafef(query, sizeof(query), "select shared from %s where userName = '%s' and sessionName = '%s'",
+         namedSessionTable, encUserName, encSessionName);
+char *shared = sqlQuickString(conn, query);
+if (shared == NULL)
+    return -1;
+return atoi(shared);
+}
+
+static char *thumbnailWarning(struct dyString *dyMessage)
+/* Return what thumbnailAdd had to say for itself, as plain text for a JSON reply, or NULL when it
+ * said nothing.  The message is written for HTML output, so take the <br> back out. */
+{
+if (dyMessage == NULL || dyMessage->stringSize == 0)
+    return NULL;
+return trimSpaces(replaceChars(dyMessage->string, "<br>", " "));
+}
+
+void doAnonNameJson()
+/* AJAX endpoint that reserves a fresh, guaranteed-unique anonymous snapshot name and returns it as
+ * JSON {"name": ...} WITHOUT saving anything.  The top-right "Share a link" dialog calls this on open
+ * so it can show the exact link as a preview before the user commits, while keeping name generation
+ * server-side (unique, crypto-strong) for every anonymous link. */
+{
+struct sqlConnection *conn = hConnectCentral();
+cartRemove(cart, hgsDoAnonName);
+if (!sqlTableExists(conn, namedSessionTable))
+    {
+    saveSessionJsonError(conn, "Required session table does not exist in the central database.");
+    return;
+    }
+char *name = snapshotNewName(conn, "l");
+cgiPrintContentType("application/json");
+printf("{\"name\": \"%s\"}\n", jsonStringEscape(name));
 hDisconnectCentral(&conn);
 }
 
@@ -1026,8 +1138,9 @@ void doSaveSessionJson(char *userName)
 /* AJAX endpoint behind the "Share a link" menu button.  Save the current cart as a named session
  * and print JSON {"name": <session name>, "url": <shareable link>}.  When the user is not logged
  * in (or hgsShareAnon is set), save under the reserved anonymous user "l" with a random token
- * name.  When logged in with no name given, generate a short random name.  Saved shared by link so
- * the link works for anyone.  Reuses saveCartAsSession() and addSessionLink(). */
+ * name.  When logged in, the caller supplies the name (a typed name, or a random internal
+ * "_XXXXXXXX" name generated client-side).  Saved shared by link so the link works for anyone.
+ * Reuses saveCartAsSession() and addSessionLink(). */
 {
 struct sqlConnection *conn = hConnectCentral();
 if (!sqlTableExists(conn, namedSessionTable))
@@ -1037,42 +1150,118 @@ if (!sqlTableExists(conn, namedSessionTable))
     }
 
 boolean anon = isEmpty(userName) || cgiBoolean(hgsShareAnon);
-// Read the requested name from the request, not the cart (hgSession's Save form leaves a sticky
-// value in the cart under this same variable that would otherwise shadow ours).
+boolean failIfExists = cgiBoolean(hgsFailIfExists);
+// A registered snapshot type (e.g. "blat") means: save a lightweight snapshot holding only that
+// feature's declared cart vars, not the whole cart (see lib/snapshotSession.c).
+char *snapshotType = cgiOptionalString(hgsSnapshotType);
+// Read the requested name from the request, not the cart.  cleanHgSessionFromCart() now takes
+// this variable back out, but carts written before that still hold a sticky value from
+// hgSession's Save form, and it would otherwise shadow ours.
 char *sessionName = trimSpaces(cloneString(cgiUsualString(hgsNewSessionName, "")));
 
 /* Keep our control variables out of the saved session contents and the user's own cart. */
 cartRemove(cart, hgsDoSaveSessionJson);
 cartRemove(cart, hgsShareAnon);
+cartRemove(cart, hgsFailIfExists);
+cartRemove(cart, hgsSnapshotType);
 cartRemove(cart, hgsNewSessionName);
 cartRemove(cart, hgsNewSessionShare);
+
+/* Snapshot path: a lightweight session holding only the feature's declared cart vars, under a
+ * server-generated, guaranteed-unique "__"-prefixed name (share tokens must never collide and
+ * silently overwrite one another).  Handled before the normal full-session logic because its
+ * naming rules differ.  Works for both anonymous ("l") and logged-in owners. */
+if (isNotEmpty(snapshotType))
+    {
+    struct snapshotType *st = snapshotTypeFind(snapshotType);
+    if (st == NULL)
+        {
+        saveSessionJsonError(conn, "Unknown snapshot type.");
+        return;
+        }
+    /* Refuse to mint a link that would reopen to nothing (e.g. BLAT results not built yet); tell the
+     * caller to retry rather than handing out a dead link. */
+    if (!snapshotHasRequired(st, cart))
+        {
+        saveSessionJsonError(conn, "These results are not ready yet. Please try again in a moment.");
+        return;
+        }
+    char *snapUser = anon ? "l" : cgiEncodeFull(userName);
+    char *snapName;
+    if (isEmpty(sessionName))
+        snapName = snapshotNewName(conn, snapUser);            /* server-generated, unique */
+    else
+        {
+        if (startsWith(snapshotNamePrefix, sessionName))
+            snapName = cgiEncodeFull(sessionName);
+        else
+            snapName = catTwoStrings(snapshotNamePrefix, cgiEncodeFull(sessionName));
+        /* Anonymous names are not the caller's to reuse; see the anon branch below. */
+        if (anon && namedSessionExists(conn, snapUser, snapName))
+            {
+            saveSessionJsonError(conn, "That link already exists.");
+            return;
+            }
+        }
+    saveSnapshotSession(conn, snapshotType, snapUser, snapName, cart);
+    char *snapDecoded = cgiDecodeClone(snapName);
+    saveSessionJsonResult(conn, snapUser, snapName, snapDecoded, NULL);
+    return;
+    }
 
 char *encUserName = NULL;
 char *encSessionName = NULL;
 if (anon)
     {
     encUserName = "l";                    /* reserved anonymous user -> short link /s/l/<token> */
-    sessionName = makeRandomKey(96);      /* 16 URL-safe alphanumeric chars; no encoding needed */
-    encSessionName = sessionName;
+    /* Every anonymous share uses the shared snapshot naming: a server-generated, guaranteed-unique
+     * "__"-token, so tokens never collide/overwrite and the snapshot cleaner can remove abandoned
+     * ones.  The top-right Share dialog passes a name it just reserved (for its live preview); we
+     * force the "__" prefix either way so the link stays eligible for cleaning.
+     *   A name that came with the request is only ever one the dialog just reserved, which does not
+     * exist yet.  Anonymous links all sit under the single reserved user "l", so a name already in
+     * the table stays as it is and the caller is told so, rather than being written over. */
+    if (isEmpty(sessionName))
+        encSessionName = snapshotNewName(conn, encUserName);
+    else
+        {
+        if (startsWith(snapshotNamePrefix, sessionName))
+            encSessionName = cgiEncodeFull(sessionName);
+        else
+            encSessionName = catTwoStrings(snapshotNamePrefix, cgiEncodeFull(sessionName));
+        if (namedSessionExists(conn, encUserName, encSessionName))
+            {
+            saveSessionJsonError(conn, "That link already exists.");
+            return;
+            }
+        }
+    sessionName = cgiDecodeClone(encSessionName);   // keep decoded name in sync for the JSON result
     }
 else
     {
+    /* Logged-in callers always supply a name: the caller either typed one or generated a random
+     * internal "_XXXXXXXX" name client-side (sessRandomShareName in hgSession.js, shared by the
+     * top-right "Share a link" menu in topLinks.js), so we no longer auto-name here. */
     if (isEmpty(sessionName))
         {
-        /* One-click share: auto-name the session.  "_" is kept verbatim by cgiEncodeFull (unlike
-         * "-"), so the short link /s/<user>/<name> stays clean. */
-        char randName[32];
-        char *rk = makeRandomKey(48);     /* 8 URL-safe alphanumeric chars */
-        safef(randName, sizeof randName, "share_%s", rk);
-        freeMem(rk);
-        sessionName = cloneString(randName);
+        saveSessionJsonError(conn, "Please provide a name for this session.");
+        return;
         }
     encUserName = cgiEncodeFull(userName);
     encSessionName = cgiEncodeFull(sessionName);
+    /* The Share dialog sets failIfExists when the user typed a custom name, so it can warn before
+     * clobbering an existing session of theirs.  Report the clash instead of overwriting. */
+    if (failIfExists && namedSessionExists(conn, encUserName, encSessionName))
+        {
+        cgiPrintContentType("application/json");
+        printf("{\"exists\": true}\n");
+        hDisconnectCentral(&conn);
+        return;
+        }
     }
 
 saveCartAsSession(conn, encUserName, encSessionName, 1);  /* shared by link */
-saveSessionJsonResult(conn, encUserName, encSessionName, sessionName);
+saveSessionJsonResult(conn, encUserName, encSessionName, sessionName, NULL);
 }
 
 void doRenameSessionJson(char *userName)
@@ -1107,7 +1296,7 @@ char query[1024];
 
 if (sameString(oldName, newName))
     {
-    saveSessionJsonResult(conn, encUserName, encNewName, newName);
+    saveSessionJsonResult(conn, encUserName, encNewName, newName, NULL);
     return;
     }
 
@@ -1119,13 +1308,19 @@ if (sqlQuickNum(conn, query) > 0)
     saveSessionJsonError(conn, "You already have a session with that name. Please pick another.");
     return;
     }
-sqlSafef(query, sizeof query, "select count(*) from %s where userName = '%s' and sessionName = '%s'",
-         namedSessionTable, encUserName, encOldName);
-if (sqlQuickNum(conn, query) == 0)
+int shared = sessionSharedLevel(conn, encUserName, encOldName);
+if (shared < 0)
     {
     saveSessionJsonError(conn, "Could not find the link to rename.");
     return;
     }
+
+/* A gallery thumbnail's file name is built from the encoded session name, so the picture has to be
+ * moved along with the session or the public listing is left pointing at nothing.  Take the old one
+ * away first, while the row still answers to the old name (the file name also carries firstUse,
+ * which is read from that row). */
+if (shared >= 2)
+    thumbnailRemove(encUserName, encOldName, conn);
 
 /* Same UPDATE that doSessionChange uses to rename a session. */
 sqlSafef(query, sizeof query,
@@ -1133,7 +1328,15 @@ sqlSafef(query, sizeof query,
          namedSessionTable, encNewName, encUserName, encOldName);
 sqlUpdate(conn, query);
 
-saveSessionJsonResult(conn, encUserName, encNewName, newName);
+char *warning = NULL;
+if (shared >= 2)
+    {
+    struct dyString *dyMessage = dyStringNew(256);
+    thumbnailAdd(encUserName, encNewName, conn, dyMessage);
+    warning = thumbnailWarning(dyMessage);
+    }
+
+saveSessionJsonResult(conn, encUserName, encNewName, newName, warning);
 }
 
 int thumbnailAdd(char *encUserName, char *encSessionName, struct sqlConnection *conn, struct dyString *dyMessage)
@@ -1485,7 +1688,7 @@ if (hel != NULL)
 		   getSessionLink(encUserName, encSessionName),
 		   getSessionEmailLink(encUserName, encSessionName));
     cartLoadUserSession(conn, userName, sessionName, cart, NULL, wildStr);
-    cartCopyLocalHubs(cart);
+    cartCopyLocalHubsOnSessionLoad(cart);
     hubConnectLoadHubs(cart);
     cartHideDefaultTracks(cart);
     cartCheckForCustomTracks(cart, dyMessage);
@@ -1536,11 +1739,11 @@ char *encSessionName = cgiEncodeFull(sessionName);
 
 dyStringPrintf(dyMessage,
        "Loaded settings from user <B>%s</B>'s session <B>%s</B>. %s %s",
-	       otherUser, htmlEncode(sessionName),
-	       getSessionLink(otherUser, encSessionName),
+	       htmlEncode(otherUser), htmlEncode(sessionName),
+	       getSessionLink(encOtherUser, encSessionName),
 	       getSessionEmailLink(encOtherUser, encSessionName));
 cartLoadUserSession(conn, otherUser, sessionName, cart, NULL, actionVar);
-cartCopyLocalHubs(cart);
+cartCopyLocalHubsOnSessionLoad(cart);
 hubConnectLoadHubs(cart);
 cartHideDefaultTracks(cart);
 cartCheckForCustomTracks(cart, dyMessage);
@@ -1588,7 +1791,7 @@ if (fromUrl)
         errAbort("Unsupported protocol for loading a file via URL.  Please use http, https, or ftp");
     lf = netLineFileOpen(url);
     dyStringPrintf(dyMessage, "Loaded settings from URL %s .  %s %s",
-		   url, getUrlLink(url), getUrlEmailLink(url));
+		   htmlEncode(url), getUrlLink(url), getUrlEmailLink(url));
     }
 else
     {
@@ -1597,6 +1800,10 @@ else
 					hgsLoadLocalFileName "__binary");
     char *fileName = cartOptionalString(cart,
 					hgsLoadLocalFileName "__filename");
+    /* The name arrives with the upload and is printed in four of the messages below,
+     * so encode it once here rather than at each one. */
+    if (isNotEmpty(fileName))
+	fileName = htmlEncode(fileName);
     if (isNotEmpty(filePlainContents))
 	{
 	char *settings = trimSpaces(filePlainContents);
@@ -1609,14 +1816,12 @@ else
 	}
     else if (isNotEmpty(fileBinaryCoords))
 	{
-	char *binInfo = cloneString(fileBinaryCoords);
-	char *words[2];
-	char *mem;
-	unsigned long size;
-	chopByWhite(binInfo, words, ArraySize(words));
-	mem = (char *)sqlUnsignedLong(words[0]);
-	size = sqlUnsignedLong(words[1]);
-	lf = lineFileDecompressMem(TRUE, mem, size);
+	/* The cart holds the address and size of the uploaded bytes, but any
+	 * request can set that variable, so only use a block cheapcgi
+	 * handed out. */
+	unsigned long size = 0;
+	char *mem = cgiMemBlobFind(fileBinaryCoords, &size);
+	lf = (mem == NULL) ? NULL : lineFileDecompressMem(TRUE, mem, size);
 	if (lf != NULL)
 	    {
 	    dyStringAppend(dyMessage, "Loaded settings from local file ");
@@ -1655,7 +1860,7 @@ if (lf != NULL)
     if (ok)
         {
         dyStringAppend(dyMessage, dyLoadMessage->string);
-        cartCopyLocalHubs(cart);
+        cartCopyLocalHubsOnSessionLoad(cart);
         hubConnectLoadHubs(cart);
         cartHideDefaultTracks(cart);
         cartCheckForCustomTracks(cart, dyMessage);
@@ -1746,6 +1951,10 @@ char *newName = trimSpaces(cartOptionalString(cart, hgsNewSessionName));
 if (isNotEmpty(newName) && !sameString(sessionName, newName))
     {
     char *encNewName = cgiEncodeFull(newName);
+    // A thumbnail's file name is built from the encoded session name, so take the old picture away
+    // before the rename, while the row still answers to the old name.
+    if (shared >= 2)
+        thumbnailRemove(encUserName, encSessionName, conn);
     // In case the user has clicked to confirm that they want to overwrite an existing session,
     // delete the existing row before updating the row that will overwrite it.
     sqlSafef(query, sizeof(query), "delete from %s where userName = '%s' and sessionName = '%s';",
@@ -1766,10 +1975,7 @@ if (isNotEmpty(newName) && !sameString(sessionName, newName))
     renamePrefixedCartVar(hgsMakeDownloadPrefix , encOldSessionName, encNewName);
     renamePrefixedCartVar(hgsDoDownloadPrefix   , encOldSessionName, encNewName);
     if (shared >= 2)
-        {
-        thumbnailRemove(encUserName, encSessionName, conn);
         thumbnailAdd(encUserName, encNewName, conn, dyMessage);
-        }
     }
 
 char sharedVarName[256];
@@ -1877,7 +2083,8 @@ char *doReSaveSession(char *userName, char *actionVar)
 if (userName == NULL)
     return "Unable to re-save session -- please log in and try again.";
 struct sqlConnection *conn = hConnectCentral();
-char *sessionName = trimSpaces(cartString(cart, hgsNewSessionName));
+/* Clone: cartLoadUserSession() and saveCartAsSession() both free the cart's own copy. */
+char *sessionName = trimSpaces(cloneString(cartString(cart, hgsNewSessionName)));
 if (isEmpty(sessionName))
     return "Error: Unable to save a session without a name.  Please add one and try again.";
 
@@ -1885,7 +2092,7 @@ char *encUserName = cgiEncodeFull(userName);
 char *encSessionName = cgiEncodeFull(sessionName);
 int sharingLevel = getSharingLevel(conn, encUserName, encSessionName);
 cartLoadUserSession(conn, userName, sessionName, cart, NULL, actionVar);
-// Don't cartCopyLocalHubs because we're not going to make any track collection changes
+// No cartCopyLocalHubsOnSessionLoad because we're not going to make any track collection changes
 hubConnectLoadHubs(cart);
 // Some old sessions reference databases that are no longer present, and that triggers an errAbort
 // when cartHideDefaultTracks calls hgTrackDb.  Don't let that stop the process of updating other
@@ -1902,8 +2109,8 @@ struct dyString *dyMessage = dyStringNew(1024);
 dyStringPrintf(dyMessage,
                "Re-saved settings from user <B>%s</B>'s session <B>%s</B> "
                "that %s be shared with others.  %s %s",
-	       userName, htmlEncode(sessionName), (sharingLevel ? "may" : "may not"),
-	       getSessionLink(userName, encSessionName),
+	       htmlEncode(userName), htmlEncode(sessionName), (sharingLevel ? "may" : "may not"),
+	       getSessionLink(encUserName, encSessionName),
 	       getSessionEmailLink(encUserName, encSessionName));
 cartCheckForCustomTracks(cart, dyMessage);
 int useCount = saveCartAsSession(conn, encUserName, encSessionName, sharingLevel);
@@ -1982,13 +2189,13 @@ if (!binaryParam)
 
 char *binaryValue = cartOptionalString(cart, binaryParam);
 
-char *binInfo = cloneString(binaryValue);
-char *words[2];
-char *mem;
-unsigned long size;
-chopByWhite(binInfo, words, ArraySize(words));
-mem = (char *)sqlUnsignedLong(words[0]);
-size = sqlUnsignedLong(words[1]);
+/* The cart holds the address and size of the uploaded bytes, but any request
+ * can set that variable, so only use a block cheapcgi handed out. */
+unsigned long size = 0;
+char *mem = cgiMemBlobFind(binaryValue, &size);
+if (mem == NULL)
+    errAbort("The contents of the uploaded file are no longer available.  "
+	     "Please choose the file again.");
 
 struct tempName tn;
 trashDirFile(&tn, "backGround", cartSessionId(cart), ".bin");
@@ -2000,6 +2207,782 @@ writeGulp(tn.forCgi, mem, size);
 char *varName = replaceChars(binaryParam, "__binary", "__filepath");
 cartRemove(cart, varName);  // just in case
 cartSetString(cart, varName, tn.forCgi);  // update the cart
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Experimental client-rendered "Sessions" page (hgSession.js).
+ *
+ * An opt-in modern alternative to the classic server-rendered page, applying hgBlat's facelift
+ * strategy (#37996): hgSession.c stays the data/action backend, emits the session list and page
+ * config as an inline JSON global (hgSessionData) into an empty container, and hgSession.js builds
+ * the UI.  Gated exactly like hgBlat's blatNewForm/blatNewFormBanner:
+ *   - sessionNewPage        (hg.conf bool, default off; also a cart var so a user's choice sticks
+ *                            and the banner links can flip it) selects which UI is the default.
+ *   - sessionNewPageBanner  (hg.conf bool, default = sessionNewPage) turns on the old<->new notes.
+ * The inline table actions (delete/share/gallery/overwrite/describe) each POST to a small JSON
+ * endpoint below that runs the same SQL the classic full-page handlers do, but returns JSON so the
+ * table can update in place.  Navigation actions (load, load from URL/file, save-local, backup,
+ * reset) stay as ordinary form submits/links that hgSession.js builds against the existing actions.
+ * --------------------------------------------------------------------------------------------- */
+
+static boolean sessionNewPageActive()
+/* TRUE when the experimental client-rendered Sessions page should be shown.  Cart variable
+ * sessionNewPage (set by the banner links) wins, defaulting to the hg.conf flag of the same name. */
+{
+return cartUsualBoolean(cart, "sessionNewPage",
+                        cfgOptionBooleanDefault("sessionNewPage", FALSE));
+}
+
+static void printSessionNewPageBanner(boolean onNewPage)
+/* Emit the note that links between the classic and the experimental pages, so neither is a one-way
+ * door.  Advertising the new page depends on sessionNewPageBanner (defaulting to sessionNewPage),
+ * like hgBlat's printNewFormBanner, but the way back off the new page is always printed: the
+ * sessionNewPage cart variable sticks, so someone who reached the page by typing the variable into
+ * the URL on a machine where the banner is off would otherwise be stuck there.  On the new page
+ * gbModern.css supplies .gbBanner; the classic page does not load it, so emit a small inline style
+ * there. */
+{
+if (!onNewPage && !cfgOptionBooleanDefault("sessionNewPageBanner",
+                                           cfgOptionBooleanDefault("sessionNewPage", FALSE)))
+    return;
+if (onNewPage)
+    printf("<div class='gbBanner'>You are using the new experimental Sessions page. "
+           "<a href='hgSession?sessionNewPage=0&%s=%s'>Return to the classic page</a>. "
+           "If you have feedback, please let us know at "
+           "<a href='mailto:genome@soe.ucsc.edu'>genome@soe.ucsc.edu</a>.</div>\n",
+           cartSessionVarName(), cartSessionId(cart));
+else
+    {
+    printf("<style>.gbBannerClassic{background:#fbf3e2;border:1px solid #d9bd82;padding:10px 14px;"
+           "margin:12px 0;font-size:14px;}</style>\n");
+    printf("<div class='gbBannerClassic'>We are testing a new Sessions page, with a searchable, "
+           "sortable table and one-click sharing. "
+           "<a href='hgSession?sessionNewPage=1&%s=%s'>Try the new page</a>.</div>\n",
+           cartSessionVarName(), cartSessionId(cart));
+    }
+}
+
+static char *sessionValFromContents(char *contents, char *var)
+/* Extract the value of var (e.g. "db" or "position") from a saved session's CGI-encoded cart
+ * contents string, CGI-decoded, or NULL if not present. */
+{
+if (isEmpty(contents))
+    return NULL;
+char pfx[64];
+char *valIdx = NULL;
+safef(pfx, sizeof(pfx), "%s=", var);
+if (startsWith(pfx, contents))
+    valIdx = contents + strlen(pfx);
+else
+    {
+    char ampPfx[66];
+    safef(ampPfx, sizeof(ampPfx), "&%s", pfx);
+    char *p = strstr(contents, ampPfx);
+    if (p != NULL)
+        valIdx = p + strlen(ampPfx);
+    }
+if (valIdx == NULL)
+    return NULL;
+char *valEnd = strchr(valIdx, '&');
+char *enc = valEnd ? cloneStringZ(valIdx, valEnd - valIdx) : cloneString(valIdx);
+char *dec = cgiDecodeClone(enc);
+freez(&enc);
+return dec;
+}
+
+static int countShownTracks(struct cart *cart)
+/* Rough count of tracks turned on in the current cart: cart entries whose value is a display
+ * visibility other than hide.  A proxy for "tracks currently shown" for the save-summary line
+ * (may over/undercount some composite subtracks); good enough for a hint. */
+{
+int n = 0;
+struct hashEl *list = hashElListHash(cart->hash), *el;
+for (el = list; el != NULL; el = el->next)
+    {
+    char *v = (char *)el->val;
+    if (v && (sameString(v, "dense") || sameString(v, "squish") || sameString(v, "pack") ||
+              sameString(v, "full") || sameString(v, "show")))
+        n++;
+    }
+hashElFreeList(&list);
+return n;
+}
+
+static void writeMirrorJson(struct jsonWrite *jw, struct slPair *node)
+/* Write one gbNode (name=shortLabel, val=domain) into an open object as the label the table and
+ * the note show, e.g. "genome-euro", the shortLabel as the mouseover, e.g. "European Server",
+ * and the URL of that node's hgSession.  No hgsid on that URL: the cart is per node.  The URL
+ * asks for this same page there rather than the classic one, and carries the anchor that scrolls
+ * straight to the session table. */
+{
+char *domain = node->val;
+char *shortName = cloneString(domain);
+char *dot = strchr(shortName, '.');
+if (dot != NULL)
+    *dot = '\0';
+jsonWriteString(jw, "label", shortName);
+jsonWriteString(jw, "title", node->name);
+jsonWriteStringf(jw, "url", "https://%s/cgi-bin/hgSession?sessionNewPage=1#sessions", domain);
+freez(&shortName);
+}
+
+static void sessionDataToJson(char *userName, struct jsonWrite *jw)
+/* Fill jw (an open object) with { config:{...}, sessions:[...] } for the experimental page. */
+{
+boolean loggedIn = isNotEmpty(userName);
+boolean loginAvail = (loginSystemEnabled() || wikiLinkEnabled());
+
+jsonWriteObjectStart(jw, "config");
+jsonWriteBoolean(jw, "loggedIn", loggedIn);
+jsonWriteBoolean(jw, "loginAvail", loginAvail);
+if (loggedIn)
+    jsonWriteString(jw, "userName", userName);
+jsonWriteString(jw, "hgsid", cartSessionId(cart));
+jsonWriteString(jw, "cartVar", cartSessionVarName());
+/* Current view being saved, for the save-summary line.  Show the assembly accession, not the
+ * internal "hub_<id>_<acc>" name, for assembly hubs (trackHubSkipHubName). */
+char *db = cartUsualString(cart, "db", NULL);
+if (isNotEmpty(db))
+    jsonWriteString(jw, "db", trackHubSkipHubName(db));
+char *pos = cartUsualString(cart, "position", NULL);
+if (isNotEmpty(pos))
+    jsonWriteString(jw, "position", pos);
+int trackCount = countShownTracks(cart);
+if (trackCount > 0)
+    jsonWriteNumber(jw, "trackCount", trackCount);
+/* Login / account URLs so the JS can render a compact account line. */
+if (loginAvail)
+    {
+    if (!loggedIn)
+        jsonWriteString(jw, "loginUrl", wikiLinkUserLoginUrl(cartSessionId(cart)));
+    else
+        {
+        jsonWriteString(jw, "logoutUrl", wikiLinkUserLogoutUrl(cartSessionId(cart)));
+        if (!loginUseBasicAuth())
+            jsonWriteString(jw, "changePasswordUrl", wikiLinkChangePasswordUrl(cartSessionId(cart)));
+        }
+    jsonWriteString(jw, "signupUrl", wikiLinkUserSignupUrl(cartSessionId(cart)));
+    }
+jsonWriteStringf(jw, "classicUrl", "hgSession?sessionNewPage=0&%s=%s",
+                 cartSessionVarName(), cartSessionId(cart));
+jsonWriteString(jw, "helpUrl", "../goldenPath/help/hgSessionHelp.html");
+jsonWriteString(jw, "galleryUrl", "../goldenPath/help/sessions.html");
+jsonWriteStringf(jw, "publicSessionsUrl", "../cgi-bin/hgPublicSessions?%s", cartSidUrlString(cart));
+/* The geo mirror nodes (hgcentral gbNode).  Each node keeps its own namedSessionDb, so the JS
+ * asks the other nodes for their session lists and merges them into the table, marking each row
+ * with the server it came from.  "mirrors" are the other nodes, "thisServer" is this one. */
+struct slPair *thisNode = geoMirrorThisNode();
+if (thisNode != NULL)
+    {
+    jsonWriteObjectStart(jw, "thisServer");
+    writeMirrorJson(jw, thisNode);
+    jsonWriteObjectEnd(jw);
+    slPairFreeValsAndList(&thisNode);
+    }
+struct slPair *mirrors = geoMirrorOtherNodes();
+if (mirrors != NULL)
+    {
+    jsonWriteListStart(jw, "mirrors");
+    struct slPair *mirror;
+    for (mirror = mirrors; mirror != NULL; mirror = mirror->next)
+        {
+        jsonWriteObjectStart(jw, NULL);
+        writeMirrorJson(jw, mirror);
+        jsonWriteObjectEnd(jw);
+        }
+    jsonWriteListEnd(jw);
+    slPairFreeValsAndList(&mirrors);
+    }
+/* Reset-to-defaults link, same as showCartLinks(). */
+char returnAddress[512];
+safef(returnAddress, sizeof(returnAddress), "%s?%s", hgSessionName(), cartSidUrlString(cart));
+jsonWriteStringf(jw, "resetUrl", "../cgi-bin/cartReset?%s&destination=%s",
+                 cartSidUrlString(cart), cgiEncodeFull(returnAddress));
+jsonWriteObjectEnd(jw);   // config
+perfTimerStep(hgSessionTiming, "page header + config");
+
+sessionListToJson(userName, jw);
+}
+
+static void sessionListToJson(char *userName, struct jsonWrite *jw)
+/* Write the "sessions" list for userName into jw (an open object): one object per saved session. */
+{
+boolean loggedIn = isNotEmpty(userName);
+jsonWriteListStart(jw, "sessions");
+if (loggedIn)
+    {
+    struct sqlConnection *conn = hConnectCentral();
+    if (sqlTableExists(conn, namedSessionTable))
+        {
+        char *encUserName = cgiEncodeFull(userName);
+        boolean gotSettings = (sqlFieldIndex(conn, namedSessionTable, "settings") >= 0);
+        char query[512];
+        if (gotSettings)
+            sqlSafef(query, sizeof(query),
+                "SELECT sessionName, shared, firstUse, useCount, contents, settings, lastUse FROM %s "
+                "WHERE userName = '%s' ORDER BY sessionName;", namedSessionTable, encUserName);
+        else
+            sqlSafef(query, sizeof(query),
+                "SELECT sessionName, shared, firstUse, useCount, contents, lastUse FROM %s "
+                "WHERE userName = '%s' ORDER BY sessionName;", namedSessionTable, encUserName);
+        struct sqlResult *sr = sqlGetResult(conn, query);
+        perfTimerStep(hgSessionTiming, "load sessions from MySQL");
+        char **row;
+        /* Cache one connection per assembly db so the per-session band/locus lookups don't
+         * re-open a connection for every row when many sessions share an assembly. */
+        struct hash *dbConnCache = hashNew(0);
+        while ((row = sqlNextRow(sr)) != NULL)
+            {
+            char *encSessionName = row[0];
+            /* Snapshots are share tokens, not sessions the user made; keep them out of the list.
+             * The settings column, stamped by saveSnapshotSession(), is what says so - the "__"
+             * name prefix does not, since users have named their own sessions that way and those
+             * belong in the list (refs #38313).  See lib/snapshotSession.c. */
+            if (gotSettings && snapshotIsSnapshotSettings(row[5]))
+                continue;
+            char *sessionName = cgiDecodeClone(encSessionName);
+            int shared = atoi(row[1]);
+            char *firstUse = cloneString(row[2]);
+            struct tm firstUseTm;
+            ZeroVar(&firstUseTm);
+            strptime(firstUse, "%Y-%m-%d %T", &firstUseTm);
+            long epoch = (long)mktime(&firstUseTm);
+            /* created = date only for display; createdFull = date+minute for the hover. */
+            char *dateOnly = cloneString(firstUse);
+            char *spacePt = strchr(dateOnly, ' ');
+            if (spacePt != NULL)
+                *spacePt = '\0';
+            char *createdFull = cloneString(firstUse);
+            if (strlen(createdFull) == 19)
+                createdFull[16] = '\0';
+            char *db2 = sessionValFromContents(row[4], "db");
+            char *pos2 = sessionValFromContents(row[4], "position");
+            char *description = gotSettings ? getSetting(row[5], "description") : NULL;
+            /* lastUse (last time the session was saved/overwritten/loaded) drives the "most
+             * recently saved session" quick-update shortcut on the client. */
+            char *lastUse = cloneString(row[gotSettings ? 6 : 5]);
+            struct tm lastUseTm;
+            ZeroVar(&lastUseTm);
+            strptime(lastUse, "%Y-%m-%d %T", &lastUseTm);
+            long lastUseEpoch = (long)mktime(&lastUseTm);
+            char *lastUseDate = cloneString(lastUse);   /* date only for display */
+            char *sp2 = strchr(lastUseDate, ' ');
+            if (sp2 != NULL)
+                *sp2 = '\0';
+            /* Trim the seconds off the full value shown on hover: "...10:29:25" -> "...10:29". */
+            if (strlen(lastUse) == 19)
+                lastUse[16] = '\0';
+
+            /* Band (from cytoBand) and locus (from locusName) for the saved position, looked up in
+             * the session's own assembly.  Skips hub assemblies and missing tables.  For a very
+             * large region there are too many genes to name, so say so instead. */
+            char *band = NULL, *locus = NULL;
+            if (isNotEmpty(db2) && isNotEmpty(pos2) && !trackHubDatabase(db2))
+                {
+                char *posClone = cloneString(pos2);
+                stripChar(posClone, ',');
+                char *colon = strrchr(posClone, ':');
+                char *chrom = NULL;
+                int start = 0, end = 0;
+                boolean parsed = FALSE;
+                if (colon != NULL)
+                    {
+                    *colon = '\0';
+                    chrom = posClone;
+                    char *dash = strchr(colon + 1, '-');
+                    if (dash != NULL)
+                        {
+                        *dash = '\0';
+                        start = atoi(colon + 1) - 1;   /* display is 1-based; tables are 0-based */
+                        if (start < 0)
+                            start = 0;
+                        end = atoi(dash + 1);
+                        parsed = (end > start);
+                        }
+                    }
+                if (parsed)
+                    {
+                    struct sqlConnection *dbConn = hashFindVal(dbConnCache, db2);
+                    if (dbConn == NULL && sqlDatabaseExists(db2))
+                        {
+                        dbConn = hAllocConn(db2);
+                        hashAdd(dbConnCache, db2, dbConn);
+                        }
+                    if (dbConn != NULL)
+                        {
+                        if (sqlTableExists(dbConn, "cytoBand"))
+                            {
+                            char bandBuf[HDB_MAX_BAND_STRING];
+                            if (hChromBandConn(dbConn, chrom, start, bandBuf) && bandBuf[0])
+                                band = cloneString(bandBuf);
+                            }
+                        if ((end - start) > 10000000)
+                            locus = cloneString("Too large for the genes");
+                        else
+                            locus = hLocusName(dbConn, chrom, start, end);
+                        }
+                    }
+                freez(&posClone);
+                }
+
+            struct dyString *dyUrl = dyStringNew(0);
+            addSessionLink(dyUrl, encUserName, encSessionName, FALSE, TRUE);
+
+            jsonWriteObjectStart(jw, NULL);
+            jsonWriteString(jw, "name", sessionName);
+            jsonWriteString(jw, "encName", encSessionName);
+            jsonWriteNumber(jw, "shared", shared);
+            jsonWriteString(jw, "created", dateOnly);
+            jsonWriteString(jw, "createdFull", createdFull);
+            jsonWriteNumber(jw, "createdEpoch", epoch);
+            jsonWriteString(jw, "lastUse", lastUse);
+            jsonWriteString(jw, "lastUseDate", lastUseDate);
+            jsonWriteNumber(jw, "lastUseEpoch", lastUseEpoch);
+            jsonWriteNumber(jw, "useCount", atoll(row[3]));
+            if (isNotEmpty(db2))
+                jsonWriteString(jw, "db", trackHubSkipHubName(db2));
+            if (isNotEmpty(pos2))
+                jsonWriteString(jw, "position", pos2);
+            if (isNotEmpty(band))
+                jsonWriteString(jw, "band", band);
+            if (isNotEmpty(locus))
+                jsonWriteString(jw, "locus", locus);
+            if (isNotEmpty(description))
+                jsonWriteString(jw, "description", description);
+            jsonWriteString(jw, "shareUrl", dyUrl->string);
+            jsonWriteObjectEnd(jw);
+
+            dyStringFree(&dyUrl);
+            freez(&band);
+            freez(&locus);
+            freez(&firstUse);
+            freez(&dateOnly);
+            freez(&createdFull);
+            freez(&lastUse);
+            freez(&lastUseDate);
+            freez(&sessionName);
+            }
+        sqlFreeResult(&sr);
+        perfTimerStep(hgSessionTiming, "annotate positions (band + locus) + build JSON");
+        /* Release the cached per-assembly connections. */
+        struct hashEl *hel, *helList = hashElListHash(dbConnCache);
+        for (hel = helList; hel != NULL; hel = hel->next)
+            {
+            struct sqlConnection *dbConn = hel->val;
+            hFreeConn(&dbConn);
+            }
+        hashElFreeList(&helList);
+        hashFree(&dbConnCache);
+        }
+    hDisconnectCentral(&conn);
+    }
+jsonWriteListEnd(jw);   // sessions
+}
+
+void doMainPageNew(char *userName, char *message)
+/* Render the experimental client-rendered Sessions page: framework header (gold "My Sessions"
+ * band), the experimental banner, an empty #sessionApp container, and the hgSessionData JSON that
+ * hgSession.js reads to build the UI. */
+{
+if (isNotEmpty(cartOptionalString(cart, "measureTiming")))
+    hgSessionTiming = perfTimerNew();   /* times the page; emitted as hgSessionData.timing */
+cspWriteResponseHeader();
+cgiPrintContentType("text/html");
+cartWebStart(cart, NULL, "My Sessions");
+jsInit();
+jsIncludeDataTablesLibs();
+webIncludeResourceFile("gbModern.css");
+webIncludeResourceFile("hgSession.css");
+jsIncludeFile("hgSession.js", NULL);
+
+printSessionNewPageBanner(TRUE);
+if (isNotEmpty(message))
+    printf("<div class='gbBanner'>%s</div>\n", message);
+
+printf("<div id='sessionApp' class='gbApp'></div>\n");
+
+struct jsonWrite *jw = jsonWriteNew();
+jsonWriteObjectStart(jw, NULL);
+sessionDataToJson(userName, jw);
+/* When &measureTiming is set, hand the per-phase timings to hgSession.js (it shows them in a
+ * dialog).  Emitted at the top level as hgSessionData.timing. */
+perfTimerJson(hgSessionTiming, jw, "timing");
+jsonWriteObjectEnd(jw);
+jsInlineF("var hgSessionData = %s;\n", jw->dy->string);
+jsonWriteFree(&jw);
+perfTimerFree(&hgSessionTiming);
+
+cartWebEnd();
+}
+
+/* ---- Cross-mirror session list ---- */
+
+#define mirrorReadTimeout 8     /* seconds to wait for a mirror node's answer before giving up */
+
+static int mirrorConnect(char *domain, char *cookieHeader)
+/* Send a session list request to one mirror node and return the socket to read the answer from,
+ * or -1.  Only sends - the answers are read afterwards, so that the nodes work on their queries
+ * at the same time instead of one after the other. */
+{
+char url[512];
+safef(url, sizeof(url), "https://%s/cgi-bin/hgSession?%s=1", domain, hgsDoSessionListJson);
+int sd = -1;
+struct errCatch *errCatch = errCatchNew();
+if (errCatchStart(errCatch))
+    {
+    sd = netHttpConnect(url, "GET", "HTTP/1.0", "hgSession", cookieHeader);
+    if (sd >= 0)
+        setReadWriteTimeouts(sd, mirrorReadTimeout);
+    }
+errCatchEnd(errCatch);
+if (errCatch->gotError)
+    sd = -1;
+errCatchFree(&errCatch);
+return sd;
+}
+
+static struct jsonElement *mirrorRead(int sd, char *domain)
+/* Read one mirror node's answer and return its parsed "sessions" list, or NULL if the node did
+ * not send one.  A node running a release without the endpoint answers with an HTML error page,
+ * so the answer is parsed here and written back out by us rather than passed through. */
+{
+struct jsonElement *sessions = NULL;
+char url[512];
+safef(url, sizeof(url), "https://%s/cgi-bin/hgSession", domain);
+struct errCatch *errCatch = errCatchNew();
+if (errCatchStart(errCatch))
+    {
+    int redirectSd = -1;
+    char *redirectUrl = NULL;
+    if (netSkipHttpHeaderLinesHandlingRedirect(sd, url, &redirectSd, &redirectUrl))
+        {
+        if (redirectSd >= 0)
+            {
+            close(sd);
+            sd = redirectSd;
+            }
+        struct dyString *dy = netSlurpFile(sd);
+        struct jsonElement *parsed = jsonParse(dy->string);   /* errAborts if it is not JSON */
+        if (parsed != NULL)
+            sessions = jsonFindNamedField(parsed, "", "sessions");
+        dyStringFree(&dy);
+        }
+    }
+errCatchEnd(errCatch);
+if (errCatch->gotError)
+    sessions = NULL;
+errCatchFree(&errCatch);
+close(sd);
+return sessions;
+}
+
+void doMirrorSessionsJson()
+/* AJAX for this server's own hgSession.js: ask every other mirror node for the sessions the
+ * logged-in user has saved there and hand them back as
+ *   {"mirrors": [{"label":.., "title":.., "url":.., "sessions":[..]}, ..]}.
+ * A node that does not answer, times out, or runs a release without the session list endpoint is
+ * reported with "error" instead of "sessions" and the page says so; it never holds up the table,
+ * which the browser has already drawn from this server's own sessions.
+ *
+ * Runs before the cart is created: it needs nothing from the cart, and the fetches take long
+ * enough that it should not be holding a cart open.  The user's login cookies are passed on to
+ * the other nodes, which share our cookie salt, so that they can recognize the same user. */
+{
+char *userName = (loginSystemEnabled() || wikiLinkEnabled()) ? wikiLinkUserName() : NULL;
+char *cookieHeader = wikiLinkLoginCookieHeader();
+struct slPair *nodes = (isNotEmpty(userName) && cookieHeader != NULL) ?
+                       geoMirrorOtherNodes() : NULL;
+struct jsonWrite *jw = jsonWriteNew();
+jsonWriteObjectStart(jw, NULL);
+jsonWriteListStart(jw, "mirrors");
+int nodeCount = slCount(nodes), i;
+if (nodeCount > 0)
+    {
+    int *sockets = NULL;
+    AllocArray(sockets, nodeCount);
+    struct slPair *node;
+    /* Send all of the requests before reading any of the answers, so that the nodes work on
+     * their queries at the same time and this takes as long as the slowest one, not as long as
+     * all of them together. */
+    for (i = 0, node = nodes; node != NULL; i++, node = node->next)
+        sockets[i] = mirrorConnect(node->val, cookieHeader);
+    for (i = 0, node = nodes; node != NULL; i++, node = node->next)
+        {
+        struct jsonElement *sessions = (sockets[i] >= 0) ? mirrorRead(sockets[i], node->val) : NULL;
+        jsonWriteObjectStart(jw, NULL);
+        writeMirrorJson(jw, node);
+        if (sessions != NULL)
+            jsonWriteJsonElement(jw, "sessions", sessions);
+        else
+            jsonWriteString(jw, "error", "no answer");
+        jsonWriteObjectEnd(jw);
+        }
+    freez(&sockets);
+    slPairFreeValsAndList(&nodes);
+    }
+jsonWriteListEnd(jw);
+jsonWriteObjectEnd(jw);
+printf("Cache-Control: no-store\n");
+cgiPrintContentType("application/json");
+printf("%s\n", jw->dy->string);
+jsonWriteFree(&jw);
+freez(&cookieHeader);
+}
+
+static void sessionListCorsHeaders()
+/* Let one of our other mirror nodes read this response with the user's login cookie attached.
+ * Only an Origin that matches a gbNode domain gets the header, so no other page can ask the
+ * browser to hand it someone's session list.  The value printed is the one we built ourselves,
+ * never the raw request header. */
+{
+printf("Vary: Origin\n");
+char *origin = getenv("HTTP_ORIGIN");
+if (isEmpty(origin))
+    return;
+struct slPair *nodes = geoMirrorOtherNodes(), *node;
+for (node = nodes; node != NULL; node = node->next)
+    {
+    char allowed[512];
+    safef(allowed, sizeof(allowed), "https://%s", (char *)node->val);
+    if (sameString(origin, allowed))
+        {
+        printf("Access-Control-Allow-Origin: %s\n", allowed);
+        printf("Access-Control-Allow-Credentials: true\n");
+        break;
+        }
+    }
+slPairFreeValsAndList(&nodes);
+}
+
+void doSessionListJson()
+/* AJAX for hgSession.js running on another mirror node: return this server's saved sessions for
+ * the logged-in user, as {"sessions":[...]}.  Answered before the cart is created - a request
+ * from another node must not leave a cart behind here - so the user is identified from the login
+ * cookie alone, and an unauthenticated request gets an empty list rather than an error. */
+{
+char *userName = (loginSystemEnabled() || wikiLinkEnabled()) ? wikiLinkUserName() : NULL;
+sessionListCorsHeaders();
+printf("Cache-Control: no-store\n");
+cgiPrintContentType("application/json");
+struct jsonWrite *jw = jsonWriteNew();
+jsonWriteObjectStart(jw, NULL);
+sessionListToJson(userName, jw);
+jsonWriteObjectEnd(jw);
+printf("%s\n", jw->dy->string);
+jsonWriteFree(&jw);
+}
+
+/* ---- JSON action endpoints for the experimental page's inline table actions ---- */
+
+static void saveSessionJsonOk(struct sqlConnection *conn, char *extraFields)
+/* Emit {"success": true[, <extraFields>]} and disconnect.  extraFields (may be NULL) is inserted
+ * verbatim after "success": true, e.g. ", \"shared\": 2". */
+{
+cgiPrintContentType("application/json");
+printf("{\"success\": true%s}\n", extraFields ? extraFields : "");
+hDisconnectCentral(&conn);
+}
+
+void doDeleteSessionJson(char *userName)
+/* AJAX: delete the session named by hgsOldSessionName under the current user. */
+{
+struct sqlConnection *conn = hConnectCentral();
+char *sessionName = trimSpaces(cloneString(cgiUsualString(hgsOldSessionName, "")));
+if (isEmpty(userName))
+    { saveSessionJsonError(conn, "Please log in and try again."); return; }
+if (isEmpty(sessionName))
+    { saveSessionJsonError(conn, "No session was specified."); return; }
+char *encUserName = cgiEncodeFull(userName);
+char *encSessionName = cgiEncodeFull(sessionName);
+char query[512];
+int shared = sessionSharedLevel(conn, encUserName, encSessionName);
+if (shared < 0)
+    { saveSessionJsonError(conn, "Could not find that session."); return; }
+if (shared >= 2)
+    thumbnailRemove(encUserName, encSessionName, conn);
+sqlSafef(query, sizeof(query), "DELETE FROM %s WHERE userName = '%s' AND sessionName = '%s';",
+         namedSessionTable, encUserName, encSessionName);
+sqlUpdate(conn, query);
+saveSessionJsonOk(conn, NULL);
+}
+
+void doShareSessionJson(char *userName)
+/* AJAX: set the "shared by link" flag (0<->1) on hgsOldSessionName.  Desired state in
+ * hgsNewSessionShare (0/1).  Does not touch the gallery (shared==2) except to unshare. */
+{
+struct sqlConnection *conn = hConnectCentral();
+char *sessionName = trimSpaces(cloneString(cgiUsualString(hgsOldSessionName, "")));
+int desired = cgiUsualInt(hgsNewSessionShare, 0);
+cartRemove(cart, hgsNewSessionShare);
+if (isEmpty(userName))
+    { saveSessionJsonError(conn, "Please log in and try again."); return; }
+if (isEmpty(sessionName))
+    { saveSessionJsonError(conn, "No session was specified."); return; }
+char *encUserName = cgiEncodeFull(userName);
+char *encSessionName = cgiEncodeFull(sessionName);
+char query[512];
+int shared = sessionSharedLevel(conn, encUserName, encSessionName);
+if (shared < 0)
+    { saveSessionJsonError(conn, "Could not find that session."); return; }
+int newShared = desired ? 1 : 0;
+sqlSafef(query, sizeof(query), "UPDATE %s SET shared = %d WHERE userName = '%s' AND sessionName = '%s';",
+         namedSessionTable, newShared, encUserName, encSessionName);
+sqlUpdate(conn, query);
+sessionTouchLastUse(conn, encUserName, encSessionName);
+/* Either way out of the public listing takes the picture with it: this endpoint drops a session
+ * from shared==2 to 1 as well as to 0, and the file would otherwise be left behind. */
+if (shared >= 2 && newShared < 2)
+    thumbnailRemove(encUserName, encSessionName, conn);
+char extra[32];
+safef(extra, sizeof(extra), ", \"shared\": %d", newShared);
+saveSessionJsonOk(conn, extra);
+}
+
+void doGallerySessionJson(char *userName)
+/* AJAX: add/remove hgsOldSessionName to/from the public gallery (shared 2<->1).  Desired state in
+ * hgsNewSessionShare (0/1).  Adding requires a non-empty description, like the classic page. */
+{
+struct sqlConnection *conn = hConnectCentral();
+char *sessionName = trimSpaces(cloneString(cgiUsualString(hgsOldSessionName, "")));
+int desired = cgiUsualInt(hgsNewSessionShare, 0);
+cartRemove(cart, hgsNewSessionShare);
+if (isEmpty(userName))
+    { saveSessionJsonError(conn, "Please log in and try again."); return; }
+if (isEmpty(sessionName))
+    { saveSessionJsonError(conn, "No session was specified."); return; }
+char *encUserName = cgiEncodeFull(userName);
+char *encSessionName = cgiEncodeFull(sessionName);
+boolean gotSettings = (sqlFieldIndex(conn, namedSessionTable, "settings") >= 0);
+char query[512];
+if (desired)
+    {
+    if (!gotSettings)
+        { saveSessionJsonError(conn, "This server does not support the public listing."); return; }
+    sqlSafef(query, sizeof(query),
+             "select settings from %s where userName = '%s' and sessionName = '%s';",
+             namedSessionTable, encUserName, encSessionName);
+    char *settings = sqlQuickString(conn, query);
+    char *description = getSetting(settings, "description");
+    if (isEmpty(description))
+        {
+        saveSessionJsonError(conn, "Please add a description (with the Edit button) before posting "
+                             "this session to the public listing.");
+        return;
+        }
+    }
+int shared = sessionSharedLevel(conn, encUserName, encSessionName);
+if (shared < 0)
+    { saveSessionJsonError(conn, "Could not find that session."); return; }
+int newShared = desired ? 2 : 1;
+sqlSafef(query, sizeof(query), "UPDATE %s SET shared = %d WHERE userName = '%s' AND sessionName = '%s';",
+         namedSessionTable, newShared, encUserName, encSessionName);
+sqlUpdate(conn, query);
+sessionTouchLastUse(conn, encUserName, encSessionName);
+struct dyString *dyMsg = dyStringNew(256);
+if (desired && shared < 2)
+    thumbnailAdd(encUserName, encSessionName, conn, dyMsg);
+if (!desired && shared >= 2)
+    thumbnailRemove(encUserName, encSessionName, conn);
+/* Pass on anything thumbnailAdd had to say, e.g. that this mirror has no ImageMagick convert.  The
+ * session is listed either way, but without this the reply is a bare success and the listing simply
+ * shows no picture. */
+struct dyString *dyExtra = dyStringNew(64);
+dyStringPrintf(dyExtra, ", \"shared\": %d", newShared);
+char *warning = thumbnailWarning(dyMsg);
+if (warning != NULL)
+    dyStringPrintf(dyExtra, ", \"warning\": \"%s\"", jsonStringEscape(warning));
+saveSessionJsonOk(conn, dyExtra->string);
+}
+
+void doOverwriteSessionJson(char *userName)
+/* AJAX: re-save the current cart over an existing session (hgsOldSessionName), preserving its
+ * sharing level.  Returns the refreshed created date, view count and assembly. */
+{
+struct sqlConnection *conn = hConnectCentral();
+char *sessionName = trimSpaces(cloneString(cgiUsualString(hgsOldSessionName, "")));
+if (isEmpty(userName))
+    { saveSessionJsonError(conn, "Please log in and try again."); return; }
+if (isEmpty(sessionName))
+    { saveSessionJsonError(conn, "No session was specified."); return; }
+if (!sqlTableExists(conn, namedSessionTable))
+    { saveSessionJsonError(conn, "Required session table does not exist."); return; }
+char *encUserName = cgiEncodeFull(userName);
+char *encSessionName = cgiEncodeFull(sessionName);
+char query[1024];
+int shared = sessionSharedLevel(conn, encUserName, encSessionName);
+if (shared < 0)
+    { saveSessionJsonError(conn, "Could not find that session to overwrite."); return; }
+int useCount = saveCartAsSession(conn, encUserName, encSessionName, shared);
+/* Report the refreshed values so the table row can update in place. */
+sqlSafef(query, sizeof(query),
+         "select firstUse, contents from %s where userName = '%s' and sessionName = '%s';",
+         namedSessionTable, encUserName, encSessionName);
+struct sqlResult *sr = sqlGetResult(conn, query);
+char **row = sqlNextRow(sr);
+char *dateOnly = NULL, *db2 = NULL;
+if (row != NULL)
+    {
+    dateOnly = cloneString(row[0]);
+    char *spacePt = strchr(dateOnly, ' ');
+    if (spacePt != NULL)
+        *spacePt = '\0';
+    db2 = sessionValFromContents(row[1], "db");
+    }
+sqlFreeResult(&sr);
+struct dyString *extra = dyStringNew(256);
+dyStringPrintf(extra, ", \"useCount\": %d", useCount);
+if (isNotEmpty(dateOnly))
+    dyStringPrintf(extra, ", \"created\": \"%s\"", jsonStringEscape(dateOnly));
+if (isNotEmpty(db2))
+    dyStringPrintf(extra, ", \"db\": \"%s\"", jsonStringEscape(db2));
+saveSessionJsonOk(conn, extra->string);
+dyStringFree(&extra);
+}
+
+void doDescribeSessionJson(char *userName)
+/* AJAX: set the description in the settings ra of hgsOldSessionName (from hgsNewSessionDescription).
+ * Mirrors the description-editing branch of doSessionChange. */
+{
+struct sqlConnection *conn = hConnectCentral();
+char *sessionName = trimSpaces(cloneString(cgiUsualString(hgsOldSessionName, "")));
+char *newDescription = cloneString(cgiUsualString(hgsNewSessionDescription, ""));
+cartRemove(cart, hgsNewSessionDescription);
+if (isEmpty(userName))
+    { saveSessionJsonError(conn, "Please log in and try again."); return; }
+if (isEmpty(sessionName))
+    { saveSessionJsonError(conn, "No session was specified."); return; }
+boolean gotSettings = (sqlFieldIndex(conn, namedSessionTable, "settings") >= 0);
+if (!gotSettings)
+    { saveSessionJsonError(conn, "This server does not support session descriptions."); return; }
+char *encUserName = cgiEncodeFull(userName);
+char *encSessionName = cgiEncodeFull(sessionName);
+char query[512];
+if (sessionSharedLevel(conn, encUserName, encSessionName) < 0)
+    { saveSessionJsonError(conn, "Could not find that session."); return; }
+sqlSafef(query, sizeof(query), "select settings from %s where userName = '%s' and sessionName = '%s';",
+         namedSessionTable, encUserName, encSessionName);
+char *settings = sqlQuickString(conn, query);
+struct hash *settingsHash = raFromString(isEmpty(settings) ? "" : settings);
+/* ra syntax needs \n / \r / backslash escaped (kept compatible with doSessionChange). */
+newDescription = replaceChars(newDescription, "\\", "\\\\");
+newDescription = replaceChars(newDescription, "\r", "\\r");
+newDescription = replaceChars(newDescription, "\n", "\\n");
+hashRemove(settingsHash, "description");
+hashAdd(settingsHash, "description", newDescription);
+struct dyString *dyRa = dyStringNew(512);
+struct hashEl *hel = hashElListHash(settingsHash);
+while (hel != NULL)
+    {
+    dyStringPrintf(dyRa, "%s %s\n", hel->name, (char *)hel->val);
+    hel = hel->next;
+    }
+struct dyString *dyQuery = dyStringNew(1024);
+sqlDyStringPrintf(dyQuery, "UPDATE %s set settings = '%s' WHERE userName = '%s' AND sessionName = '%s';",
+                  namedSessionTable, dyRa->string, encUserName, encSessionName);
+sqlUpdate(conn, dyQuery->string);
+dyStringFree(&dyQuery);
+dyStringFree(&dyRa);
+saveSessionJsonOk(conn, NULL);
 }
 
 void hgSession()
@@ -2069,6 +3052,10 @@ else if (cartVarExists(cart, hgsDoNewSession))
     char *message = doNewSession(userName);
     doMainPage(userName, message);
     }
+else if (cartVarExists(cart, hgsDoAnonName))
+    {
+    doAnonNameJson();
+    }
 else if (cartVarExists(cart, hgsDoSaveSessionJson))
     {
     doSaveSessionJson(userName);
@@ -2076,6 +3063,26 @@ else if (cartVarExists(cart, hgsDoSaveSessionJson))
 else if (cartVarExists(cart, hgsDoRenameSessionJson))
     {
     doRenameSessionJson(userName);
+    }
+else if (cartVarExists(cart, hgsDoDeleteJson))
+    {
+    doDeleteSessionJson(userName);
+    }
+else if (cartVarExists(cart, hgsDoShareJson))
+    {
+    doShareSessionJson(userName);
+    }
+else if (cartVarExists(cart, hgsDoGalleryJson))
+    {
+    doGallerySessionJson(userName);
+    }
+else if (cartVarExists(cart, hgsDoOverwriteJson))
+    {
+    doOverwriteSessionJson(userName);
+    }
+else if (cartVarExists(cart, hgsDoDescribeJson))
+    {
+    doDescribeSessionJson(userName);
     }
 else if (cartVarExists(cart, hgsDoOtherUser))
     {
@@ -2141,6 +3148,22 @@ int main(int argc, char *argv[])
 long enteredMainTime = clock1000();
 htmlPushEarlyHandlers();
 cgiSpoof(&argc, argv);
+/* The session list another mirror node asks for is answered before the cart exists, so that a
+ * request from a node does not create a cart - and a row in userDb and sessionDb - here. */
+if (cgiOptionalString(hgsDoSessionListJson) != NULL)
+    {
+    doSessionListJson();
+    cgiExitTime("hgSession", enteredMainTime);
+    return 0;
+    }
+/* Likewise the fan-out to the other nodes: it needs nothing from the cart, and it waits on
+ * other servers long enough that it should not be holding one open. */
+if (cgiOptionalString(hgsDoMirrorSessions) != NULL)
+    {
+    doMirrorSessionsJson();
+    cgiExitTime("hgSession", enteredMainTime);
+    return 0;
+    }
 hgSession();
 cgiExitTime("hgSession", enteredMainTime);
 return 0;

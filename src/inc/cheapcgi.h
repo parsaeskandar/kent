@@ -13,15 +13,6 @@
 #include "hash.h"
 #endif
 
-// #define FAST_CGI_DECODE
-#ifdef FAST_CGI_DECODE
-// 50kB per-variable limit on content length to prevent egregious
-// cart-stuffing, whether intentional or accidental.  5kB limit
-// on variable names for similar reasons.
-#define CGI_VAR_SIZE_LIMIT 50000
-#define CGI_VAR_NAME_LIMIT 5000
-#endif
-
 //============ javascript inline-separation routines ===============
 
 void jsInlineFinish();
@@ -96,6 +87,18 @@ struct cgiVar
 struct cgiVar* cgiVarList();
 /* return the list of cgiVar's */
 
+char *cgiMemBlobRegister(char *mem, unsigned long size);
+/* Record a block of memory that may be named by address in a cgi or cart
+ * variable, and return the "<address> <size>" text that names it.  The
+ * returned string is allocated here and belongs to the caller. */
+
+char *cgiMemBlobFind(char *spec, unsigned long *retSize);
+/* Return the block of memory named by spec, which is "<address> <size>" text
+ * made by cgiMemBlobRegister or by an uploaded file part.  Return NULL if this
+ * program never registered such a block, in which case the address came from
+ * the request rather than from us and must not be used.  If retSize is not
+ * NULL the size of the block is returned in it. */
+
 struct cgiDictionary
 /* Stuff to encapsulate parsed out CGI vars. */
     {
@@ -120,6 +123,22 @@ char *findCookieData(char *varName);
 
 void dumpCookieList();
 /* Print out the cookie list. */
+
+void cgiAddHttpHeader(char *name, char *value);
+/* Add an HTTP header for cgiPrintContentType() to write ahead of the Content-Type
+ * line, e.g. cgiAddHttpHeader("Cache-Control", "no-store").  Both strings are
+ * cloned.  Has no effect once the header has been written. */
+
+boolean cgiDidContentType();
+/* Return TRUE if the CGI response header has already been written. */
+
+void cgiPrintContentType(char *contentType);
+/* Write the CGI response header: any headers added with cgiAddHttpHeader(), a
+ * Content-Type line, and the blank line that ends the header.  contentType NULL
+ * means "text/html".  Header lines are not ordered, so a CGI that also sends
+ * Status, Set-Cookie, Content-Disposition or the like writes those first and
+ * calls this last to close the header.  Only the first call in a process writes
+ * anything. */
 
 boolean cgiIsOnWeb();
 /* Return TRUE if looks like we're being run as a CGI. */
@@ -687,6 +706,18 @@ void cgiChangeVar(char *varName, char *value);
 
 void cgiSetMaxLogLen(int l);
 /* set the size of variable values that are dumped to stderr. Default is 0, which means no logging */
+
+void cgiSkipMalformedPairs(boolean on);
+/* Tell the cookie parser to step over a malformed pair instead of losing the
+ * pair after it or aborting.  hg.conf skipMalformedCgiPairs turns this on;
+ * hgConfig.c pushes it in, since these libraries do not read hg.conf. */
+
+boolean isValidJsonpCallback(char *s);
+/* Return TRUE if s is safe to use as a JSONP callback name: non-empty, not
+ * too long, and every dot-separated segment is a C symbol (letters, digits,
+ * underscore, not starting with a digit).  This rejects anything with
+ * parentheses, spaces, operators, or other characters that would let an
+ * attacker turn a same-origin JSONP response into arbitrary script. */
 
 #endif /* CHEAPCGI_H */
 

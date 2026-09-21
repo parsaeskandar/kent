@@ -458,7 +458,7 @@ if (start < 0)
     htmlClose();
     return;
     }
-puts("Content-Type: text/html\n");
+cgiPrintContentType("text/html");
 int line;
 boolean autoRefreshFound = FALSE;
 boolean successfullyUploaded = FALSE;
@@ -607,6 +607,10 @@ void gsSendToDM()
 
 char *trashFileName = cartUsualString(cart, "gsTemp", "");
 char *fileName = cartUsualString(cart, hgtaOutFileName, "");
+
+/* The upload sends this file to a remote service, so be sure it is one we made. */
+if (!isServerUserFilePath(trashFileName))
+    errAbort("Nothing to upload.");
 
 // adjust upload name based on compression and existing extension
 char *compressType = cartUsualString(cart, hgtaCompressType, textOutCompressNone);

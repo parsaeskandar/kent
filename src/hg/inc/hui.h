@@ -246,6 +246,10 @@ void hTvDropDownClassVisOnlyAndExtra(char *varName, enum trackVisibility vis,
 void hTvDropDownClassWithJavascript(char *varName, char *id, enum trackVisibility vis, boolean canPack,
                                     char *class, struct slPair *events);
 
+/* Parse an onlyVisibility value the way hTvGetVizArr() does: case-insensitively, with an
+ * unrecognized value falling back to dense rather than to hide. */
+enum trackVisibility tvFromVisOnlySetting(char *visOnly);
+
 /* return a NULL-terminated array of char* with possible track visibilities */
 char** hTvGetVizArr(enum trackVisibility vis, boolean canPack, char* visOnly);
 
@@ -1043,6 +1047,10 @@ boolean compositeChildHideEmptySubtracks(struct cart *cart, struct trackDb *chil
  * Return TRUE if we should hide empties
  */
 
+void compositeHideEmptySubtracksUi(struct cart *cart, struct trackDb *tdb);
+/* Print the checkbox controlling the hideEmptySubtracks setting, for composites that
+ * have it.  Prints nothing for the ones that don't. */
+
 char *wgEncodeVocabLink(char *term,char *value,char *title, char *label,char *suffix);
 // returns allocated string of HTML link to ENCODE controlled vocabulary term
 
@@ -1140,6 +1148,22 @@ int tvCompare(enum trackVisibility a, enum trackVisibility b);
 
 enum trackVisibility tvMin(enum trackVisibility a, enum trackVisibility b);
 /* Return the less visible of a and b. */
+
+void hubTrackBareNamesFromTdbList(struct trackDb *tdbList);
+/* Let hubTrackOwnsBareName() answer from this list of tracks rather than from trackDb.
+ * A CGI that has already built the full track list should call this once, with it: the
+ * list holds the assembly's tracks and the attached hubs' together, and a hub track is
+ * always "hub_<id>_"-prefixed there, so an undecorated name can only match a native
+ * track.  Without this the question costs a trackDb query per distinct bare name. */
+
+boolean hubTrackOwnsBareName(char *db, char *hubTrack);
+/* A hub track can be named on a URL or in the cart without its "hub_<id>_" prefix, so
+ * that hub links stay readable, and the visibility and selection code falls back to that
+ * bare name when the decorated one has no value.  The bare name is the hub track's alone
+ * only when the assembly has no track of that name: when it does, the variable belongs to
+ * the native track, and letting the hub track take it moves the user's setting to a track
+ * they were not looking at and drops it from the one they were.  Takes the decorated hub
+ * track name; FALSE for anything that isn't one. */
 
 enum trackVisibility tdbLocalVisibility(struct cart *cart, struct trackDb *tdb,
                                         boolean *subtrackOverride);

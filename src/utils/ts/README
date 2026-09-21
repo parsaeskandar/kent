@@ -1,0 +1,132 @@
+ts - ticket sandboxes
+=====================
+
+ts parks a Redmine ticket as its own frozen browser instance on hgwdev.  You can
+leave the ticket, work on something else, and return to it later.  You can also
+give a reviewer a URL for it.  refs #37867
+
+Only the code is frozen.  Each parked instance holds a full copy of your live
+cgi-bin-$USER and htdocs-$USER, plus a rewritten hg.conf.  The MySQL databases,
+/gbdb, and the browser trash stay shared with the live CGIs.  A private httpd,
+running as you, serves the copy on a loopback high port.  It needs no root, no
+DNS, and no vhost.
+
+What ts does not share is the two caches.  Each ticket gets its own udc cache
+under the shared trash, trash/udcCache/ts/NNNNN, and its own trackDb cache
+inside the sandbox.  See Notes.
+
+Two files:
+
+  ts       the real tool.  Runs on hgwdev.
+  ts.mac   a thin wrapper for your laptop.  It runs ts subcommands over ssh and
+           opens the local ssh -L tunnel.  Install it as "ts" on the laptop.
+
+Setup on hgwdev.  A freeze uses a few gigabytes per ticket, so keep the parked
+instances on a large local pool instead of your home directory:
+
+  mkdir -p /data/home/$USER/ticketSandboxes
+  ln -s /data/home/$USER/ticketSandboxes ~/ticketSandboxes
+
+Set TS_ROOT if you want them somewhere else.  Run "ts" with no arguments for the
+subcommand list.
+
+Typical use:
+
+  ts create 37867 "some note"     freeze the live sandbox and start the httpd
+  ts sync 37867                   re-freeze after more work on the live sandbox
+  ts conf 37867                   rewrite the config only, keeping the freeze
+  ts list                         show every parked ticket and its status
+  ts tunnel 37867                 open the tunnel and print the browser URL
+  ts remove 37867                 stop the httpd and delete the instance
+
+Any hgwdev account can reach a parked instance, because all hgwdev users share
+the machine's loopback:
+
+  ssh -N -L PORT:localhost:PORT you@hgwdev.gi.ucsc.edu
+  # then open http://localhost:PORT/cgi-bin/hgTracks
+
+There is no password on a parked instance.  It shows only what any hgwdev user
+can already build and query.
+
+Every instance also answers over https, on its port plus 1000.  "ts list" prints
+both numbers, and "ts tunnel" forwards both.  See Notes for why.
+
+Notes
+-----
+
+The freeze is a full copy, not hardlinks.  Hardlinks only freeze a file against
+replacement by rename, so an in-place edit of a live file would also change the
+parked copy.
+
+The CGIs read two htdocs directories.  The frozen htdocs-$USER is the
+DocumentRoot, and the code also reads a sibling ../htdocs for files such as the
+URW fonts.  Each parked instance keeps a symlink to the shared
+/usr/local/apache/htdocs for that reason.  Without it, rendering fails because
+it cannot find a font file.
+
+udc caches remote bigData files by URL.  The live sandbox and every parked
+ticket would otherwise read and write the same trash/udcCache tree, so a cache
+entry written by one instance is read by all of them.  That breaks the freeze: a
+sparse or bad entry written by one build reappears under another.  ts gives each
+ticket its own trash/udcCache/ts/NNNNN instead.  It still lives in the shared
+trash, so the trash cleaner ages it out like any other udc cache, and it is
+still data: "ts sync" does not clear it.  "ts remove" does delete it.
+
+"ts conf" adds this setting to an instance frozen before ts had it, so you do
+not have to re-freeze to get a private cache.
+
+The trackDb cache is private per ticket too, at NNNNN/trackDbCache inside the
+sandbox.  It holds a shared-memory image of the parsed trackDb, and its layout
+is tied to TRACKDB_VERSION in the binaries that wrote it, so a park built from a
+branch that touches the cache has no business sharing a directory with the live
+sandbox or with other developers.  There is a sharper reason as well: the writer
+leaves a name.txt beside each image and opens it for write, so whoever wrote it
+first owns the file and the next writer's CGI dies on a permission error - after
+the image itself has already landed, which makes the failure look intermittent.
+
+This one is derived from the code rather than data, so it is treated the
+opposite way from the udc cache: "ts sync" clears it, because the binaries it
+belongs to have just been replaced, and "ts remove" takes it with the sandbox.
+"ts conf" retrofits it onto an instance frozen before ts had it.  Budget for it:
+an image is on the order of 200 MB per assembly, on top of the freeze itself.
+
+The cart cookie is written with no domain on it.  The shared config sets
+central.domain=.ucsc.edu, and a parked instance answers on localhost, so a
+browser drops a cookie scoped to .ucsc.edu.  Every request then gets a fresh
+cart, and each track comes up at its trackDb default rather than the setting you
+chose.  Nothing errors, which is what makes this worth saying out loud: the page
+still renders.  Clicking through a park by hand hides the problem, because
+hgTracks puts the hgsid into the links on its own pages.  A script that
+navigates by URL has nothing to carry, so it quietly measures the defaults and
+reports a clean run.  ts writes an empty central.domain into the frozen hg.conf.
+That leaves the domain attribute off the cookie and makes it host-only, which
+works whether you reach the instance as localhost or as 127.0.0.1.  "ts conf"
+adds it to an instance frozen before ts had it.
+
+Each instance listens twice: plain http on its registered port, and https on
+that port plus 1000.  Both serve the same frozen code.  The point of the pair is
+that some CGI behaviour depends on the scheme, and on a plain-http park you
+cannot see it at all.  Apache sets HTTPS=on only for the https listener, and
+cgiServerHttpsIsOn() reads exactly that, so a CGI deciding whether to mark a
+cookie Secure takes one branch on each port.  Hitting both is then a two-line
+check rather than something you have to reason about.
+
+The certificate is self-signed, made once, and shared by every instance on the
+account.  It lives in ticketSandboxes/ssl.  A browser warns the first time; curl
+needs -k.  That is fine here: a park has no password and is reached through an
+ssh tunnel that is already encrypted, so the certificate exists to turn HTTPS=on
+for the CGIs, not to prove who is serving.
+
+Only the http port is in the registry.  The https port is derived, so nothing
+about the old layout changed and "ts conf" adds https to an instance frozen
+before it existed.  http ports are kept below 49080 so the two ranges cannot
+overlap.
+
+Each instance draws its ticket number faintly across the page background, so you
+always know which frozen browser you are viewing.  ts writes that stylesheet
+into the frozen htdocs and sets browser.style in the frozen hg.conf.
+
+ts does not replace the tip/beta/rel Docker instances.  Those reproduce an exact
+released environment, including the database.
+
+Write-up: https://hgwdev.gi.ucsc.edu/~braney/per-rm-sandboxes.html

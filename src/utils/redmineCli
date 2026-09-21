@@ -7,22 +7,32 @@ Usage:
     redmineCli show 33571
     redmineCli list --project maillists --status open --limit 10
     redmineCli create --subject "Bug report" --description "Details here"
+    redmineCli create --project genomebrowser --tracker 11 --subject "New track" \
+        --description "Details here" --assemblies hg38   # Track tracker requires Assemblies
     redmineCli build-patch --subject "v500 build patch: ..." --description "..." \
         --developer braney --commit-id abc123 --files src/hg/js/hgTracks.js \
         --cgis hgTracks --test-case "..." --reviewer hiram \
         --target-version 500 --relates 27113
     redmineCli comment 33571 --message "Adding a note"
     redmineCli update 33571 --status 1 --assigned-to lou --note "Reopening"
+    redmineCli update 33571 --description-file newDescription.txt
     redmineCli update 33571 --release-log-url "../cgi-bin/hgTrackUi?db=hg38&g=myTrack"
     redmineCli update 33571 --custom-field 46="some value"
     redmineCli attach 33571 screenshot.png --note "See attached"
     redmineCli note 20460 85                   # show note-85 from ticket 20460
     redmineCli relate 10316 15336 30368       # relate tickets to each other
+    redmineCli related 34446                   # list a ticket's related tickets
+    redmineCli related 34446 --add 12345 6789  # add relations to a ticket
     redmineCli watch 37339 lou braney         # add watchers to a ticket
     redmineCli users                          # list user names and IDs
+    redmineCli sql --tables                   # list Redmine database tables
+    redmineCli sql --describe issues          # show one table's columns
+    redmineCli sql "select id, subject from issues where project_id=1 limit 5"
+    redmineCli sql --file report.sql --tsv    # run a saved query, tab-separated
 """
 
 import argparse
+import decimal
 import json
 import mimetypes
 import os
@@ -32,7 +42,7 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import date, datetime
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -47,6 +57,45 @@ PRIORITY_UNPRIORITIZED = 12
 PRIORITY_URGENT = 6
 STATUS_NEW = 1
 PROJECT_GB = "genomebrowser"
+
+# --- Read-only SQL against the Redmine database ----------------------------
+# Credentials come from ~/.hg.conf: redmine.db.user and redmine.db.password if
+# present, otherwise db.user and db.password. redmine.db.host, redmine.db.name
+# and redmine.db.port are optional and default to the constants below.
+
+DEFAULT_DB_HOST = "redmine.gi.ucsc.edu"
+DEFAULT_DB_NAME = "redmine"
+DEFAULT_DB_PORT = 3306
+
+# Rows printed before output is cut off. --limit 0 turns the cap off.
+SQL_DEFAULT_LIMIT = 500
+
+# Seconds before the server kills a query. These run against the live
+# production database, so a bad join must not sit there holding resources.
+SQL_MAX_STATEMENT_TIME = 30
+
+# Statement verbs cmd_sql will send. This is a guard rail against a typo, not
+# a security boundary. The password on disk would let any other client run the
+# same statement, so read-only is enforced by granting the account SELECT and
+# nothing else.
+SQL_ALLOWED_VERBS = ("select", "show", "describe", "desc", "explain", "with")
+
+# The hgcat grant covers the whole redmine schema, so these are readable. The
+# checks below keep a careless query from putting credentials on a terminal or
+# into a log. They are not a security boundary: the same account can read the
+# same rows from any other MySQL client. --allow-sensitive turns them off.
+#
+# Tables that hold nothing but credentials. Matched against the query text.
+SQL_SECRET_TABLES = ("tokens",)
+
+# Columns never worth printing, wherever they are selected from. Checked
+# against the result columns, so "select * from users" is caught too.
+SQL_SECRET_COLUMNS = ("hashed_password", "salt", "twofa_scheme",
+                      "twofa_totp_key", "twofa_totp_last_used_at")
+
+# Redmine display name of the build-meister account. QA assigns a Build Patch
+# ticket to this user to hand it over for patching; patch-queue gates on it.
+BUILD_MEISTER_NAME = "Build Meister"
 
 # Name -> Redmine tracker ID mapping (case-insensitive lookup in resolve_tracker)
 TRACKER_IDS = {
@@ -167,7 +216,7 @@ USER_IDS = {
     "kate": 33, "kate rosenbloom": 33,
     "lou": 171, "lou nassar": 171,
     "marc": 183, "marc perry": 183,
-    "mark": 7, "mark diekhans": 7,
+    "markd": 7, "mark diekhans": 7,
     "matt": 150, "matt speir": 150,
     "max": 100, "max haeussler": 100,
     "melissa": 27, "melissa cline": 27,
@@ -205,15 +254,26 @@ FIELD_VALIDATORS = {
 }
 
 
-def read_api_key(conf_path="~/.hg.conf"):
-    """Read redmine.apiKey from ~/.hg.conf."""
+def read_conf(conf_path="~/.hg.conf"):
+    """Parse a key=value config file into a dict, skipping comments and blanks."""
     conf_path = os.path.expanduser(conf_path)
+    values = {}
     with open(conf_path) as f:
         for line in f:
             line = line.strip()
-            if line.startswith("redmine.apiKey="):
-                return line.split("=", 1)[1]
-    sys.exit("Error: redmine.apiKey not found in " + conf_path)
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip()
+    return values
+
+
+def read_api_key(conf_path="~/.hg.conf"):
+    """Read redmine.apiKey from ~/.hg.conf."""
+    api_key = read_conf(conf_path).get("redmine.apiKey")
+    if not api_key:
+        sys.exit("Error: redmine.apiKey not found in " + os.path.expanduser(conf_path))
+    return api_key
 
 
 def api_get(base_url, path, api_key):
@@ -472,6 +532,8 @@ def cmd_show(args):
     out.append(f"- **Author:** {issue['author']['name']}")
     if issue.get("assigned_to"):
         out.append(f"- **Assigned to:** {issue['assigned_to']['name']}")
+    if issue.get("fixed_version"):
+        out.append(f"- **Target version:** {issue['fixed_version']['name']}")
     out.append(f"- **Created:** {format_date(issue['created_on'])}")
     out.append(f"- **Updated:** {format_date(issue['updated_on'])}")
     if issue.get("closed_on"):
@@ -492,6 +554,15 @@ def cmd_show(args):
                        f"({a['filesize']} bytes, {a['author']['name']}, "
                        f"{format_date(a['created_on'])})")
         out.append("")
+
+    # Related tickets (shown by default; --no-related suppresses the extra API calls).
+    if not getattr(args, "no_related", False):
+        rel_lines = related_lines(args.base_url, args.ticket_id, args.api_key)
+        if rel_lines:
+            out.append("## Related tickets")
+            out.append("")
+            out.extend(rel_lines)
+            out.append("")
 
     out.append("## Description")
     out.append("")
@@ -553,6 +624,115 @@ def download_file(url, dest_path, api_key):
 # Subcommand: list
 # ---------------------------------------------------------------------------
 
+def cmd_patch_queue(args):
+    """Report which Build Patch tickets are ready for the build meister to patch.
+
+    This is the machine-readable gate behind `autoBuild.sh patchtickets`. It
+    encodes the handoff point in the build-patch process: a second developer
+    reviews, QA tests on hgwdev and sets the ticket to Approved, then QA assigns
+    the build meister. So "ready to patch" means status Approved AND assigned to
+    the build meister, for the release being built, with a usable commit hash.
+
+    Code Review Status is reported but NOT enforced. In practice QA approves and
+    hands over tickets whose Code Review Status was never moved off New, so
+    blocking on it would reject nearly everything. It comes back as a warning
+    instead, which is the useful behavior: the patch still runs, and the
+    inconsistency is visible.
+
+    TSV output is one row per ticket: verdict, id, comma-separated commit hashes,
+    subject, notes -- notes LAST because it is the only field that is routinely
+    empty, and a tab-delimited reader that treats tabs as whitespace (bash `read`
+    does) collapses an empty field in the middle and shifts everything after it.
+    Verdict is ELIGIBLE or BLOCKED. Commit hashes are only
+    lifted out of the Commit ID field here -- whether they exist in git, are
+    merge commits, or are already on the branch is git's business, and
+    autoBuild.sh/cherryPickCommits.csh check all three before applying.
+    """
+    params = {
+        "project_id": PROJECT_GB,
+        "tracker_id": TRACKER_BUILD_PATCH,
+        "status_id": args.status,
+        "limit": str(args.limit),
+        "sort": "id:asc",
+    }
+    query = urllib.parse.urlencode(params)
+    data = api_get(args.base_url, f"/issues.json?{query}", args.api_key)
+    issues = data.get("issues", [])
+
+    rows = []
+
+    if args.tickets:
+        wanted = []
+        for t in args.tickets:
+            try:
+                wanted.append(int(str(t).lstrip("#")))
+            except ValueError:
+                sys.exit(f"error: '{t}' is not a ticket number")
+        found = {i["id"] for i in issues}
+        issues = [i for i in issues if i["id"] in set(wanted)]
+        for missing in [w for w in wanted if w not in found]:
+            rows.append(("BLOCKED", missing, "",
+                         f"not an open Build Patch ticket in {PROJECT_GB} "
+                         f"(status filter: {args.status})", ""))
+
+    target = args.target_version.lstrip("vV") if args.target_version else None
+
+    for iss in issues:
+        cf = {c["name"]: (c.get("value") or "") for c in iss.get("custom_fields", [])}
+        version = (iss.get("fixed_version") or {}).get("name", "")
+        status = iss["status"]["name"]
+        assignee = (iss.get("assigned_to") or {}).get("name", "")
+        review = cf.get("Code Review Status", "")
+        commits = re.findall(r"\b[0-9a-f]{7,40}\b", cf.get("Commit ID", "").lower())
+
+        blockers = []
+        if target and version.lstrip("vV") != target:
+            blockers.append("target version is '%s', not %s"
+                            % (version or "unset", target))
+        if status != "Approved":
+            blockers.append("status is '%s', not Approved" % status)
+        if assignee != BUILD_MEISTER_NAME:
+            blockers.append("assigned to '%s', not %s"
+                            % (assignee or "nobody", BUILD_MEISTER_NAME))
+        if not commits:
+            blockers.append("Commit ID field has no usable commit hash (value: '%s')"
+                            % cf.get("Commit ID", ""))
+
+        if blockers:
+            rows.append(("BLOCKED", iss["id"], ",".join(commits),
+                         "; ".join(blockers), iss["subject"]))
+        else:
+            note = ""
+            if review != "Approved":
+                note = ("WARNING: Code Review Status is '%s', not Approved"
+                        % (review or "unset"))
+            rows.append(("ELIGIBLE", iss["id"], ",".join(commits),
+                         note, iss["subject"]))
+
+    if args.tsv:
+        for verdict, tid, commits, note, subject in rows:
+            print("\t".join([verdict, str(tid), commits, subject, note]))
+        return
+
+    if not rows:
+        print("No Build Patch tickets matched.")
+        return
+
+    out = ["| Verdict | # | Commit(s) | Subject | Notes |",
+           "|---------|---|-----------|---------|-------|"]
+    for verdict, tid, commits, note, subject in rows:
+        out.append("| %s | %s | %s | %s | %s |"
+                   % (verdict, tid, commits or "—",
+                      subject[:50].replace("|", "\\|") or "—",
+                      note.replace("|", "\\|") or "—"))
+    eligible = sum(1 for r in rows if r[0] == "ELIGIBLE")
+    out.append("")
+    out.append("%d of %d ready to patch%s."
+               % (eligible, len(rows),
+                  " for v%s" % target if target else ""))
+    print("\n".join(out))
+
+
 def cmd_list(args):
     """List/search tickets with filters."""
     params = {
@@ -576,6 +756,10 @@ def cmd_list(args):
 
     if args.search:
         params["subject"] = f"~{args.search}"
+
+    if args.target_version:
+        params["fixed_version_id"] = resolve_version(
+            args.target_version, args.project, args.base_url, args.api_key)
 
     query = urllib.parse.urlencode(params)
     data = api_get(args.base_url, f"/issues.json?{query}", args.api_key)
@@ -635,6 +819,19 @@ def cmd_create(args):
         custom_fields.append({"id": CF_EMAIL, "value": args.email})
     if args.mlm:
         custom_fields.append({"id": CF_MLM, "value": args.mlm})
+    if getattr(args, "assemblies", None) is not None:
+        custom_fields.append({"id": CF_ASSEMBLIES, "value": args.assemblies})
+    for cf_spec in (getattr(args, "custom_field", None) or []):
+        if "=" not in cf_spec:
+            sys.exit(f"Error: --custom-field must be ID=VALUE, got: {cf_spec}")
+        cf_id, cf_val = cf_spec.split("=", 1)
+        if not cf_id.isdigit():
+            sys.exit(f"Error: custom field ID must be numeric, got: {cf_id}")
+        cf_id = int(cf_id)
+        if cf_id in FIELD_VALIDATORS:
+            validator, name = FIELD_VALIDATORS[cf_id]
+            cf_val = validator(cf_val, f"--custom-field {cf_id} ({name})")
+        custom_fields.append({"id": cf_id, "value": cf_val})
     if custom_fields:
         issue_data["issue"]["custom_fields"] = custom_fields
 
@@ -658,7 +855,8 @@ def cmd_build_patch(args):
     no assignee (QA claims it), and the five required custom fields (Commit ID,
     Files Changed, CGIs to retest, Test Case, Suggested Code Reviewer). Relates
     the ticket to the bug it fixes and, unless --no-default-watchers is given,
-    adds the QA Team and build meister as watchers.
+    adds the QA Team, the build meister, and the suggested code reviewer as
+    watchers.
     """
     description = read_text_input(args.description, args.description_file)
     if not description:
@@ -707,9 +905,11 @@ def cmd_build_patch(args):
             else:
                 raise
 
-    # Watchers: QA Team + build meister by default, plus any extras. The
-    # process requires QA Team on every Build Patch from the start.
-    watchers = [] if args.no_default_watchers else ["qa", "build"]
+    # Watchers: QA Team + build meister + the suggested code reviewer by
+    # default, plus any extras. The process requires QA Team on every Build
+    # Patch from the start, and the reviewer has to set Code Review Status
+    # before QA can test, so they need the notification too.
+    watchers = [] if args.no_default_watchers else ["qa", "build", args.reviewer]
     watchers += (args.watch or [])
     seen = set()
     for name in watchers:
@@ -768,6 +968,16 @@ def cmd_update(args):
         issue_data["priority_id"] = args.priority
     if args.subject is not None:
         issue_data["subject"] = strip_emoji(args.subject)
+    description = read_text_input(args.description, args.description_file)
+    if description is not None:
+        # An explicit empty string clears the description; anything else gets
+        # the same attribution treatment as create, which is idempotent so
+        # rewriting a description Claude already wrote will not double it up.
+        if description == "":
+            issue_data["description"] = ""
+        else:
+            issue_data["description"] = strip_emoji(
+                prepend_attribution(description))
     if args.target_version is not None:
         if args.target_version == "":
             issue_data["fixed_version_id"] = ""
@@ -836,6 +1046,7 @@ def cmd_update(args):
     if not issue_data:
         sys.exit("Error: no fields to update. Provide at least one of: "
                  "--status, --assigned-to, --priority, --subject, "
+                 "--description, --description-file, "
                  "--target-version, --category, --mlm, "
                  "--release-log-text, --release-log-url, "
                  "--released-to-rr, --file-list, --file-list-add, "
@@ -973,6 +1184,101 @@ def cmd_relate(args):
 
 
 # ---------------------------------------------------------------------------
+# Related-ticket helpers (shared by `show` and `related`)
+# ---------------------------------------------------------------------------
+
+def fetch_relations(base_url, ticket_id, api_key):
+    """Return a list of (other_ticket_id, relation_type) for a ticket's relations.
+    The relation JSON names both ends (issue_id, issue_to_id); the "other" end is
+    whichever one is not this ticket."""
+    data = api_get(base_url, f"/issues/{ticket_id}.json?include=relations", api_key)
+    tid = int(ticket_id)
+    rels = []
+    for r in data["issue"].get("relations", []):
+        other = r["issue_to_id"] if r["issue_id"] == tid else r["issue_id"]
+        rels.append((other, r.get("relation_type", "relates")))
+    # Stable order: by relation type, then ticket id.
+    rels.sort(key=lambda t: (t[1], t[0]))
+    return rels
+
+
+def summarize_issue(base_url, ticket_id, api_key):
+    """Return {id, subject, status, tracker} for a ticket, or None if the ticket itself
+    is not accessible (deleted -> 404, or no permission -> 403).  Any other failure
+    (network trouble, rate limiting, bad API key) is re-raised, so it is not silently
+    hidden behind a "(not readable)" label."""
+    try:
+        d = api_get(base_url, f"/issues/{ticket_id}.json", api_key)["issue"]
+    except SystemExit as e:
+        # api_get exits with "Error: HTTP <code> GET <url>: <body>", where body is up to 500
+        # characters of whatever the server sent.  Match the prefix we build, not anywhere in
+        # the string: a 502 or a proxy error page that happens to quote "HTTP 404 GET" in its
+        # own text would otherwise be swallowed and labelled "(not readable)", which is exactly
+        # the confusion this function exists to prevent.
+        msg = str(e)
+        if msg.startswith("Error: HTTP 403 GET ") or msg.startswith("Error: HTTP 404 GET "):
+            return None
+        raise
+    return {"id": d["id"], "subject": d.get("subject", ""),
+            "status": d.get("status", {}).get("name", ""),
+            "tracker": d.get("tracker", {}).get("name", "")}
+
+
+def related_lines(base_url, ticket_id, api_key):
+    """Build markdown bullet lines describing a ticket's related tickets, one per line
+    with tracker/status and subject.  Returns [] if there are none."""
+    rels = fetch_relations(base_url, ticket_id, api_key)
+    if not rels:
+        return []
+    lines = []
+    for other_id, rtype in rels:
+        info = summarize_issue(base_url, other_id, api_key)
+        if info:
+            lines.append(f"- {rtype} #{other_id} [{info['tracker']}/{info['status']}] "
+                         f"{info['subject']}")
+        else:
+            lines.append(f"- {rtype} #{other_id} (not readable)")
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: related
+# ---------------------------------------------------------------------------
+
+def cmd_related(args):
+    """List a ticket's related tickets, or add new relations to it."""
+    if args.add:
+        # Add each --add ticket as a relation of the main ticket (idempotent, like `relate`).
+        created = skipped = 0
+        for other in args.add:
+            data = {"relation": {"issue_to_id": int(other),
+                                 "relation_type": args.type}}
+            try:
+                api_post(args.base_url,
+                         f"/issues/{args.ticket_id}/relations.json",
+                         args.api_key, data)
+                created += 1
+                print(f"  Related #{args.ticket_id} <-> #{other} ({args.type})")
+            except SystemExit as e:
+                if "422" in str(e):
+                    skipped += 1
+                    print(f"  Already related: #{args.ticket_id} <-> #{other}")
+                else:
+                    raise
+        print(f"Done: {created} created, {skipped} already existed")
+        return
+
+    # No --add: list (pull) the related tickets.
+    lines = related_lines(args.base_url, args.ticket_id, args.api_key)
+    if not lines:
+        print(f"#{args.ticket_id} has no related tickets.")
+        return
+    print(f"# Related tickets for #{args.ticket_id}")
+    print("")
+    print("\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
 # Subcommand: watch
 # ---------------------------------------------------------------------------
 
@@ -1041,6 +1347,201 @@ def cmd_note(args):
 
 
 # ---------------------------------------------------------------------------
+# sql
+# ---------------------------------------------------------------------------
+
+def import_pymysql():
+    """Import pymysql, preferring the copy bundled in the kent tree."""
+    try:
+        import pymysql
+        return pymysql
+    except ImportError:
+        pass
+    pyLib = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                         "..", "hg", "pyLib")
+    sys.path.insert(0, os.path.normpath(pyLib))
+    try:
+        import pymysql
+        return pymysql
+    except ImportError:
+        sys.exit("Error: cannot import pymysql. Expected the copy bundled in "
+                 "the kent tree at src/hg/pyLib.")
+
+
+def sql_connect(args):
+    """Open a connection to the Redmine database using ~/.hg.conf credentials."""
+    pymysql = import_pymysql()
+    conf = read_conf(args.conf)
+    # Prefer a dedicated redmine.db.* account. Fall back to the db.* account,
+    # which is the same shared read-only login on both servers, so the password
+    # does not have to be stored twice.
+    user = conf.get("redmine.db.user") or conf.get("db.user")
+    password = conf.get("redmine.db.password") or conf.get("db.password")
+    if not user or not password:
+        sys.exit(
+            "Error: no database credentials in " + os.path.expanduser(args.conf)
+            + "\nAdd redmine.db.user and redmine.db.password (the file must be "
+            "mode 600).\nredmine.db.host, redmine.db.name and redmine.db.port "
+            "are optional.")
+    database = args.database or conf.get("redmine.db.name", DEFAULT_DB_NAME)
+    try:
+        # Multi-statement support stays off, so a query cannot smuggle in a
+        # second statement after a semicolon.
+        return pymysql.connect(
+            host=conf.get("redmine.db.host", DEFAULT_DB_HOST),
+            port=int(conf.get("redmine.db.port", DEFAULT_DB_PORT)),
+            user=user, password=password, database=database,
+            charset="utf8mb4", connect_timeout=10)
+    except Exception as e:
+        sys.exit(f"Error: cannot connect to the Redmine database: {e}")
+
+
+def sql_first_verb(sql):
+    """Return the first SQL keyword, skipping leading comments and blank lines."""
+    for line in sql.splitlines():
+        line = line.strip()
+        if not line or line.startswith("--") or line.startswith("#"):
+            continue
+        word = line.lstrip("(").split(None, 1)
+        return word[0].lower() if word else ""
+    return ""
+
+
+def sql_cell(value, max_width=0):
+    """Render one result value as a single line of display text."""
+    if value is None:
+        text = "NULL"
+    elif isinstance(value, datetime):
+        text = value.isoformat(sep=" ")
+    elif isinstance(value, date):
+        text = value.isoformat()
+    elif isinstance(value, bytes):
+        text = value.decode("utf-8", errors="replace")
+    else:
+        text = str(value)
+    text = " ".join(text.split())
+    if max_width and len(text) > max_width:
+        text = text[:max_width - 3] + "..."
+    return text
+
+
+def sql_json_default(value):
+    """Render values json.dumps cannot handle on its own."""
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, decimal.Decimal):
+        return float(value)
+    return str(value)
+
+
+def sql_print_table(columns, rows, max_width):
+    """Print rows as a column-aligned text table."""
+    widths = [len(c) for c in columns]
+    cells = []
+    for row in rows:
+        out = [sql_cell(v, max_width) for v in row]
+        for i, text in enumerate(out):
+            widths[i] = max(widths[i], len(text))
+        cells.append(out)
+    print("  ".join(c.ljust(w) for c, w in zip(columns, widths)).rstrip())
+    print("  ".join("-" * w for w in widths))
+    for out in cells:
+        print("  ".join(t.ljust(w) for t, w in zip(out, widths)).rstrip())
+
+
+def sql_check_secret_tables(sql):
+    """Refuse a query naming a table that holds only credentials."""
+    for table in SQL_SECRET_TABLES:
+        if re.search(r"\b%s\b" % re.escape(table), sql, re.IGNORECASE):
+            sys.exit(f"Error: refusing to query the '{table}' table, which holds "
+                     "Redmine API keys and session tokens.\n"
+                     "Pass --allow-sensitive if you really mean to read it.")
+
+
+def sql_check_secret_columns(columns):
+    """Refuse to print credential columns. Called before any row is fetched."""
+    hits = [c for c in columns if c.lower() in SQL_SECRET_COLUMNS]
+    if hits:
+        sys.exit("Error: refusing to print the column(s) " + ", ".join(hits)
+                 + ", which hold password hashes or two-factor seeds.\n"
+                 "Name the columns you want instead of using *, or pass "
+                 "--allow-sensitive.")
+
+
+def cmd_sql(args):
+    """Run a read-only SQL query against the Redmine database."""
+    if args.tables:
+        sql = "show tables"
+    elif args.describe:
+        sql = "describe `%s`" % args.describe.replace("`", "")
+    else:
+        sql = read_text_input(args.query, args.file)
+        if sql is None and not sys.stdin.isatty():
+            sql = sys.stdin.read()
+        if not sql or not sql.strip():
+            sys.exit("Error: no query given. Pass SQL as an argument, with "
+                     "--file, or on stdin.")
+    sql = sql.strip().rstrip(";").strip()
+    if args.limit < 0:
+        args.limit = 0
+
+    verb = sql_first_verb(sql)
+    if verb not in SQL_ALLOWED_VERBS:
+        sys.exit(f"Error: refusing to run a '{verb}' statement. redmineCli sql "
+                 "runs read-only queries only: "
+                 + ", ".join(v.upper() for v in SQL_ALLOWED_VERBS) + ".")
+    if not args.allow_sensitive:
+        sql_check_secret_tables(sql)
+    if args.explain and verb in ("select", "with"):
+        sql = "explain " + sql
+
+    conn = sql_connect(args)
+    try:
+        with conn.cursor() as cur:
+            # Kill a runaway query rather than let it hold production resources.
+            cur.execute("set session max_statement_time=%f" % float(args.timeout))
+            cur.execute(sql)
+            if cur.description is None:
+                sys.exit("Error: that statement returned no result set.")
+            columns = [d[0] for d in cur.description]
+            if not args.allow_sensitive:
+                sql_check_secret_columns(columns)
+            # Fetch one extra row so we can tell "exactly at the cap" from
+            # "there was more".
+            rows = cur.fetchmany(args.limit + 1) if args.limit else cur.fetchall()
+    except SystemExit:
+        raise
+    except Exception as e:
+        sys.exit(f"Error: query failed: {e}")
+    finally:
+        conn.close()
+
+    truncated = bool(args.limit) and len(rows) > args.limit
+    if truncated:
+        rows = rows[:args.limit]
+
+    if args.json:
+        print(json.dumps([dict(zip(columns, r)) for r in rows],
+                         indent=2, default=sql_json_default))
+    elif args.tsv:
+        print("\t".join(columns))
+        for row in rows:
+            print("\t".join(sql_cell(v) for v in row))
+    elif rows:
+        sql_print_table(columns, rows, args.max_width)
+
+    # Flush before the stderr footer, or a piped stdout arrives after it.
+    sys.stdout.flush()
+    count = len(rows)
+    note = f"\n{count} row{'' if count == 1 else 's'}"
+    if truncated:
+        note += f" (cut off at --limit {args.limit}; use --limit 0 for all)"
+    sys.stderr.write(note + "\n")
+
+
+# ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
 
@@ -1062,6 +1563,8 @@ def build_parser():
                         help="Download images to a temp directory")
     p_show.add_argument("--download-all", dest="download_all", action="store_true",
                         help="Download all attachments to a temp directory")
+    p_show.add_argument("--no-related", dest="no_related", action="store_true",
+                        help="Don't fetch and show related tickets (faster)")
 
     # list
     p_list = sub.add_parser("list", help="List/search tickets")
@@ -1073,6 +1576,8 @@ def build_parser():
                         help="Assignee name or 'me'")
     p_list.add_argument("--tracker",
                         help="Tracker name or ID")
+    p_list.add_argument("--target-version", dest="target_version",
+                        help="Target version name or ID (e.g. 503)")
     p_list.add_argument("--search",
                         help="Search in subject")
     p_list.add_argument("--limit", type=int, default=25,
@@ -1081,6 +1586,20 @@ def build_parser():
                         help="Pagination offset (default: %(default)s)")
     p_list.add_argument("--sort", default="updated_on:desc",
                         help="Sort field:direction (default: %(default)s)")
+
+    # patch-queue
+    p_pq = sub.add_parser("patch-queue",
+                          help="Report which Build Patch tickets are ready to patch")
+    p_pq.add_argument("--target-version", dest="target_version",
+                      help="Only accept tickets targeting this release (e.g. 502)")
+    p_pq.add_argument("--tickets", nargs="+", metavar="ID",
+                      help="Restrict to these ticket numbers (default: all open Build Patches)")
+    p_pq.add_argument("--status", default="open",
+                      help="Status filter passed to Redmine: open, closed, * (default: %(default)s)")
+    p_pq.add_argument("--limit", type=int, default=100,
+                      help="Max tickets to examine (default: %(default)s)")
+    p_pq.add_argument("--tsv", action="store_true",
+                      help="Machine-readable output: verdict/id/commits/notes/subject")
 
     # create
     p_create = sub.add_parser("create", help="Create a new ticket")
@@ -1101,6 +1620,13 @@ def build_parser():
     p_create.add_argument("--category", help="MLQ Category (custom field)")
     p_create.add_argument("--email", help="Sender email (custom field)")
     p_create.add_argument("--mlm", help="MLM name (custom field)")
+    p_create.add_argument("--assemblies",
+                          help="Assemblies (custom field, e.g. 'hg38')")
+    p_create.add_argument("--custom-field", dest="custom_field",
+                          action="append", metavar="ID=VALUE",
+                          help="Set an arbitrary custom field by numeric ID "
+                               "(repeatable). Use for required fields on trackers "
+                               "like Track that would otherwise 422.")
 
     # build-patch
     p_bp = sub.add_parser("build-patch",
@@ -1120,7 +1646,7 @@ def build_parser():
     p_bp.add_argument("--test-case", dest="test_case", required=True,
                       help="Step-by-step to reproduce both the failure and the fix")
     p_bp.add_argument("--reviewer", required=True,
-                      help="Suggested code reviewer (name or user ID)")
+                      help="Suggested code reviewer (name or user ID); also added as a watcher")
     p_bp.add_argument("--target-version", dest="target_version", required=True,
                       help="Release number being built (e.g. 500)")
     p_bp.add_argument("--post-mortem", dest="post_mortem",
@@ -1128,10 +1654,10 @@ def build_parser():
     p_bp.add_argument("--relates", nargs="+", metavar="BUG_ID",
                       help="Bug ticket(s) this patch fixes; related on creation")
     p_bp.add_argument("--watch", nargs="+", metavar="NAME",
-                      help="Extra watchers beyond the QA Team + build meister defaults")
+                      help="Extra watchers beyond the QA Team + build meister + reviewer defaults")
     p_bp.add_argument("--no-default-watchers", dest="no_default_watchers",
                       action="store_true",
-                      help="Do not auto-add the QA Team and build meister as watchers")
+                      help="Do not auto-add the QA Team, build meister, and reviewer as watchers")
     p_bp.add_argument("--project", default=PROJECT_GB,
                       help="Project (default: %(default)s)")
 
@@ -1153,6 +1679,11 @@ def build_parser():
                           help="Assignee name/ID (empty string to clear)")
     p_update.add_argument("--priority", type=int, help="New priority ID")
     p_update.add_argument("--subject", help="New subject")
+    p_update.add_argument("--description",
+                          help="Replace the ticket description (empty string "
+                               "clears it)")
+    p_update.add_argument("--description-file", dest="description_file",
+                          help="Read new description from file (- for stdin)")
     p_update.add_argument("--target-version", dest="target_version",
                           help="Target version name or ID (empty string to clear)")
     p_update.add_argument("--category", help="MLQ Category")
@@ -1207,6 +1738,17 @@ def build_parser():
                                "blocked, precedes, follows, copied_to, copied_from "
                                "(default: %(default)s)")
 
+    # related
+    p_related = sub.add_parser("related",
+                               help="List a ticket's related tickets, or add relations to it")
+    p_related.add_argument("ticket_id", help="Ticket ID number")
+    p_related.add_argument("--add", nargs="+", metavar="ID",
+                           help="Ticket IDs to relate to this ticket (omit to just list)")
+    p_related.add_argument("--type", default="relates",
+                           help="Relation type used with --add: relates, duplicates, "
+                                "duplicated, blocks, blocked, precedes, follows, copied_to, "
+                                "copied_from (default: %(default)s)")
+
     # watch
     p_watch = sub.add_parser("watch", help="Add watchers to a ticket")
     p_watch.add_argument("ticket_id", help="Ticket ID number")
@@ -1216,6 +1758,35 @@ def build_parser():
     p_note = sub.add_parser("note", help="Display a specific note from a ticket")
     p_note.add_argument("ticket_id", help="Ticket ID number")
     p_note.add_argument("note_number", type=int, help="Note number (as shown in Redmine URL #note-N)")
+
+    # sql
+    p_sql = sub.add_parser("sql",
+                           help="Run a read-only SQL query against the Redmine database")
+    p_sql.add_argument("query", nargs="?",
+                       help="SQL to run; omit to read it from --file or stdin")
+    p_sql.add_argument("--file", help="Read the query from a file ('-' for stdin)")
+    p_sql.add_argument("--tables", action="store_true",
+                       help="List the tables in the database")
+    p_sql.add_argument("--describe", metavar="TABLE",
+                       help="Show one table's columns")
+    p_sql.add_argument("--allow-sensitive", dest="allow_sensitive",
+                       action="store_true",
+                       help="Allow reading credential tables and columns "
+                            "(tokens, password hashes, two-factor seeds)")
+    p_sql.add_argument("--explain", action="store_true",
+                       help="Prefix the query with EXPLAIN instead of running it")
+    p_sql.add_argument("--database", help="Schema name (default: redmine.db.name "
+                       "from the conf file, else %s)" % DEFAULT_DB_NAME)
+    p_sql.add_argument("--tsv", action="store_true", help="Tab-separated output")
+    p_sql.add_argument("--json", action="store_true", help="JSON output")
+    p_sql.add_argument("--limit", type=int, default=SQL_DEFAULT_LIMIT,
+                       help="Most rows to print, 0 for all (default: %(default)s)")
+    p_sql.add_argument("--max-width", dest="max_width", type=int, default=80,
+                       help="Cut off wide cells in table output, 0 for no limit "
+                            "(default: %(default)s)")
+    p_sql.add_argument("--timeout", type=float, default=SQL_MAX_STATEMENT_TIME,
+                       help="Seconds before the server kills the query "
+                            "(default: %(default)s)")
 
     return parser
 
@@ -1234,6 +1805,7 @@ def main():
     commands = {
         "show": cmd_show,
         "list": cmd_list,
+        "patch-queue": cmd_patch_queue,
         "create": cmd_create,
         "build-patch": cmd_build_patch,
         "comment": cmd_comment,
@@ -1241,8 +1813,10 @@ def main():
         "attach": cmd_attach,
         "users": cmd_users,
         "relate": cmd_relate,
+        "related": cmd_related,
         "watch": cmd_watch,
         "note": cmd_note,
+        "sql": cmd_sql,
     }
     commands[args.command](args)
 

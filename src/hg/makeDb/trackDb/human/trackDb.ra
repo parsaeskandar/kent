@@ -162,7 +162,7 @@ longLabel Genetic Variants mentioned in scientific publications
 superTrack on
 group phenDis
 type bed 3
-pennantIcon Updated red ../goldenPath/newsarch.html#062526 "Updated Varaico Variants and Varaico Variants (suppl) tracks to release 3 Jun. 25, 2026"
+pennantIcon Updated red ../goldenPath/newsarch.html#062526 "Updated Varaico Variants and Varaico Variants (suppl) tracks to Release 3 Jun. 25, 2026"
 
         track mastermind
         shortLabel Mastermind Variants
@@ -2825,9 +2825,9 @@ visibility hide
 color 100,50,0
 altColor 255,240,200
 type chain genbank
-iframeUrl https://www.ncbi.nlm.nih.gov/nuccore/$$
-iframeOptions height='600' width='1024'
-idInUrlSql SELECT qName from gbDnaBigChain where id=%-s
+# a link, not an iframe: NCBI sends X-Frame-Options: SAMEORIGIN, so nuccore cannot be framed
+url https://www.ncbi.nlm.nih.gov/nuccore/$$
+idInUrlSql SELECT qName from gbDnaBigChain where id='%s'
 
 track gbSmall
 shortLabel GenBank Small
@@ -2837,8 +2837,8 @@ visibility hide
 color 100,50,0
 altColor 255,240,200
 type psl
-iframeUrl https://www.ncbi.nlm.nih.gov/nuccore/$$
-iframeOptions height='600' width='1024'
+# a link, not an iframe: NCBI sends X-Frame-Options: SAMEORIGIN, so nuccore cannot be framed
+url https://www.ncbi.nlm.nih.gov/nuccore/$$
 #idInUrlSql SELECT qName from gbDnaBigChain where id=%-s
 
 track affyTranscription
@@ -5607,6 +5607,7 @@ track ncbiRefSeqHistorical
 parent refSeqComposite off
 priority 9
 type genePred
+dataVersion /gbdb/$D/ncbiRefSeq/ncbiRefSeqHistoricalVersion.txt
 shortLabel RefSeq Historical
 longLabel NCBI RefSeq Historical Transcript Versions
 color 12,12,120
@@ -5621,6 +5622,16 @@ semiShortCircuit 1
 termRegex [N][MR]_[0-9]{6}[0-9]*\.[0-9]+
 searchPriority 20
 
+searchName ncbiRefSeqHistoricalProtAcc
+searchTable ncbiRefSeqHistorical
+searchType genePred
+searchMethod exact
+semiShortCircuit 1
+xrefTable ncbiRefSeqLinkHistorical
+xrefQuery select id,protAcc from %s where protAcc = '%s' and protAcc not in (select protAcc from ncbiRefSeqLink) order by length(id) desc, id desc
+termRegex [NY]P_[0-9]{6}[0-9]*\.[0-9]+
+searchPriority 20.1
+
 
 include alphaMissense.ra
 
@@ -5632,6 +5643,13 @@ include colorsDbLegacy.ra alpha
 include g2p.ra
 include varFreqs.ra
 include phasedVars.ra
+
+# Tandem Repeat Variation superTrack.  Shared by all human assemblies: the
+# bigDataUrls use $D and -strict drops the members whose file is not there, so
+# each assembly gets only the tracks that were actually built for it.  Alpha only
+# until the STRchive auto-push is installed, #38268 -- beta and public still get
+# the hg38-only human/hg38/strVar.ra.  Drop the "alpha" here to release it.
+include strVarNew.ra alpha
 
 track dnaMethylation
 superTrack on

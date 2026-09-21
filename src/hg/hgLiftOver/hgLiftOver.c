@@ -98,7 +98,6 @@ jsIncludeAutoCompleteLibs();
 char *searchBarId = "fromGenomeSearch";
 printf("<input name='%s' value='%s' type='hidden'></input>\n", HGLFT_FROMDB_VAR, chain->fromDb);
 printf("<input name='%s' value='%s' type='hidden'></input>\n", HGLFT_FROMORG_VAR, fromOrg);
-printf("<input name='formMethod' value='GET' type='hidden'></input>\n");
 printf("<TD class='searchCell'>\n");
 printGenomeSearchBar(searchBarId, "Search any species, genome or assembly name", NULL, TRUE, "Change original genome:", NULL);
 jsInlineF(
@@ -578,6 +577,10 @@ if (errCatchStart(errCatch))
                 minMatch, minBlocks, 0, minSizeQ,
                 minChainT, 0,
                 fudgeThick, mapped, unmapped, multiple, NULL, &errCt);
+        /* flush and close the output files before we read the failure file back below */
+        carefulClose(&mapped);
+        carefulClose(&unmapped);
+
         if (ct == -1)
             /* programming error */
             errAbort("ERROR: Unsupported data format.\n");
@@ -610,7 +613,12 @@ if (errCatchStart(errCatch))
             struct lineFile *errFile = lineFileOpen(unmappedTn.forCgi, TRUE);
             puts("<BLOCKQUOTE><PRE>\n");
             while (lineFileNext(errFile, &line, &lineSize))
-                puts(line);
+                {
+                // these are the user's own failed input regions, escape before echoing (XSS)
+                char *encoded = htmlEncode(line);
+                puts(encoded);
+                freeMem(encoded);
+                }
             lineFileClose(&errFile);
             puts("</PRE></BLOCKQUOTE>\n");
             }
@@ -621,8 +629,6 @@ if (errCatchStart(errCatch))
         puts("</PRE></BLOCKQUOTE>\n");
         }
         webParamsUsed(minMatch, multiple, minSizeQ, minChainT, minBlocks, fudgeThick);
-
-        carefulClose(&unmapped);
         }
     }
 errCatchEnd(errCatch);

@@ -208,6 +208,8 @@ struct tempName hubTn;
 char buffer[4096];
 safef(buffer, sizeof buffer, "%s-%s", customCompositeCartName, db);
 char *hubName = cartOptionalString(cart, buffer);
+if ((hubName != NULL) && !isServerUserFilePath(hubName))
+    hubName = NULL;     // not a file we made;  make a fresh one below rather than open this
 int fd = -1;
 
 if (!doCreate && (hubName == NULL))
@@ -1005,7 +1007,15 @@ static void doMiddle(struct cart *cart)
 char *userName = (loginSystemEnabled() || wikiLinkEnabled()) ? wikiLinkUserName() : NULL;
 
 if (userName == NULL)
-    errAbort("You must be logged in to edit collections. Visit our <A HREF=\"hgLogin?hgLogin.do.displayLoginPage=1\">login page.</A>");
+    {
+    // Send them back here once they are logged in, rather than to the sessions page
+    char *hgsid = cartSessionId(cart);
+    char *retEnc = wikiLinkEncodeCurrentPageReturnUrl(hgsid);
+    char *loginUrl = retEnc ? wikiLinkUserLoginUrlReturning(hgsid, retEnc)
+                            : wikiLinkUserLoginUrl(hgsid);
+    errAbort("You must be logged in to edit collections. Visit our "
+             "<A HREF=\"%s\">login page.</A>", loginUrl);
+    }
 
 char *db;
 char *genome;
@@ -1071,6 +1081,12 @@ boolean isCommandLine = (cgiOptionalString("cgiSpoof") != NULL);
 if (!isCommandLine)
     htmlPushEarlyHandlers(); /* Make errors legible during initialization. */
 oldVars = hashNew(10);
+
+// Every command below rewrites the whole hub file named by customComposite-<db>, and that file
+// may belong to a saved session, so ask the cart for a private copy in trash.  This has to be
+// said before the cart is opened, because the copy gives the hub a new id and the hubs are
+// loaded during cart open.  refs #38273
+cartRequestLocalHubCopy();
 
 cartEmptyShellNoContent(doMiddle, hUserCookie(), excludeVars, oldVars);
 

@@ -331,6 +331,24 @@ safef(buf, sizeof(buf), "setCheckBoxesWithPrefix(this, '%s', %s); return false",
 return buf;
 }
 
+void jsFixUpPageLinks()
+/* Emit the javascript that tidies up this page's links once it is rendered: our own CGI
+ * links get the current session id, and links that leave this server open in a new tab with
+ * rel="noopener noreferrer".  See addHgsidToLinks() and offsiteLinksToNewTab() in utils.js.
+ * A track description page comes from whoever wrote the track or the hub, so the session id
+ * cannot be substituted into it on the server without also handing it to an <img> that
+ * points somewhere else. */
+{
+static boolean done = FALSE;
+if (done)
+    return;
+done = TRUE;
+jsIncludeFile("utils.js", NULL);
+// jsInlineFinish() writes this at the end of the body, so the page is parsed by then
+jsInline("addHgsidToLinks(document);\n"
+         "offsiteLinksToNewTab(document);\n");
+}
+
 /* cgiMakeCheckAllSubmitButton really belongs in cheapcgi.c, but that is compiled without access to jsHelper.h */
 
 void cgiMakeCheckAllSubmitButton(char *name, char *value, char *id, char *idPrefix, boolean state)
@@ -537,7 +555,11 @@ switch (ele->type)
             for (el = list; el != NULL; el = el->next)
                 {
                 struct jsonElement *val = el->val;
-                dyStringPrintf(dy,"%s%s\"%s\": ", indentBuf, tab, el->name);
+                // the key is not always a literal: an assembly hub's genome name ends up here,
+                // so it is encoded the same way a string value is
+                char *escapedName = jsonStringEscape(el->name);
+                dyStringPrintf(dy,"%s%s\"%s\": ", indentBuf, tab, escapedName);
+                freeMem(escapedName);
                 jsonDyStringPrintRecurse(dy, val, indentLevel);
                 dyStringPrintf(dy,"%s%s", el->next == NULL ? "" : ",",nl);
                 }

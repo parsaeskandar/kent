@@ -164,7 +164,8 @@ struct chromInfo *trackHubAllChromInfo(char *database);
 /* Return a chromInfo structure for all the chroms in this database. */
 
 struct chromInfo *trackHubMaybeChromInfo(char *database, char *chrom);
-/* Return a chromInfo structure for just this chrom in this database. 
+/* Return a chromInfo structure for just this chrom in this database.  The database
+ * may be decorated with a hub_<id>_ prefix or undecorated.
  * Return NULL if chrom doesn't exist. */
 
 struct chromInfo *trackHubChromInfo(char *database, char *chrom);
@@ -213,6 +214,10 @@ void trackHubAddDescription(char *trackDbFile, struct trackDb *tdb);
 void trackHubAddOneDescription(char *trackDbFile, struct trackDb *tdb);
 /* Fetch tdb->track's html description and store in tdb->html. */
 
+struct slName *trackHubDescriptionRemovals(char *trackDbFile, struct trackDb *tdb);
+/* Return a list of messages naming the parts of tdb's description page that we do not
+ * print, or NULL if we print all of it. */
+
 struct trackHubGenome *trackHubGetGenome(char *database);
 /* get genome structure for an assembly in a trackHub */
 
@@ -240,7 +245,7 @@ boolean trackHubGetPcrParams(char *database, char **pHost, char **pPort, char **
 struct trackHubGenome *trackHubGetGenomeUndecorated(char *database);
 /* Get the genome structure for an undecorated genome name. */
 
-char *trackHubBuild(char *db, struct cart *cart, struct dyString *visDy, struct trackDb **badList);
+char *trackHubBuild(char *db, struct cart *cart, struct trackDb **badList);
 /* Build a track hub using trackDb and the cart. */
 
 struct grp *readGroupRa(char *groupFileName);
@@ -252,6 +257,10 @@ struct trackDb *trackHubAddTracksGenome(struct trackHubGenome *hubGenome);
 boolean trackHubIsValidSeqName(char *name);
 /* Return TRUE if name is a valid sequence name: non-empty, starts with a
  * letter or digit, and contains only [A-Za-z0-9._-]. */
+
+boolean trackHubBigNetEnabled();
+/* Return TRUE if the bigNet track type is turned on.  Off unless hg.conf says
+ * bigNet=on.  Everything that accepts or advertises the type asks this. */
 
 #endif /* TRACKHUB_H */
 

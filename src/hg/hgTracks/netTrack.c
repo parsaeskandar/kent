@@ -1,5 +1,5 @@
 /* netTrack - stuff to handle loading and display of
- * netAlign type tracks in browser. Nets are derived
+ * netAlign and bigNet type tracks in browser. Nets are derived
  * from cross-species alignments usually. */
 
 /* Copyright (C) 2011 The Regents of the University of California 
@@ -140,7 +140,7 @@ if (w > 1)
     if (rNextLine > 0)	 /* Put up click info in full mode. */
 	{
 	struct dyString *bubble = dyStringNew(256);
-	char depth[8];
+	char depth[16];
 	snprintf(depth, sizeof(depth), "%d", level);
 	dyStringPrintf(bubble, "%s %c %dk ",
 	    fill->qName, fill->qStrand, fill->qStart/1000);
@@ -172,7 +172,7 @@ w = x2-x1;
 if (w >= 1)
     {
     struct dyString *bubble = dyStringNew(256);
-    char depth[8];
+    char depth[16];
     int midY = y + rMidLineOff;
     clippedBarbs(rHvg, x1, midY, w, 2, 5, orientation, color, FALSE);
     hvGfxLine(rHvg, x1, midY, x2, midY, color);
@@ -243,7 +243,20 @@ static void netDraw(struct track *tg, int seqStart, int seqEnd,
  * the items as well as drawing them. */
 {
 /* Load Net. */
-struct chainNet *net = chainNetLoadRange(database, tg->table, chromName,
+struct chainNet *net;
+if (tg->isBigBed)
+    {
+    char *fileName = hReplaceGbdb(trackDbSetting(tg->tdb, "bigDataUrl"));
+    char *quickLiftFile = trackDbSetting(tg->tdb, "quickLiftUrl");
+    if (fileName == NULL)
+        errAbort("No bigDataUrl in track %s", tg->track);
+    if (quickLiftFile != NULL)
+        net = chainNetLoadRangeQuickLift(quickLiftFile, fileName, chromName, seqStart, seqEnd);
+    else
+        net = chainNetLoadRangeHub(fileName, chromName, seqStart, seqEnd);
+    }
+else
+    net = chainNetLoadRange(database, tg->table, chromName,
 	seqStart, seqEnd, NULL);
 
 if (net != NULL)

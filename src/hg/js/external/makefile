@@ -8,6 +8,7 @@ JS_FILES= BackboneExtend.js \
 	dataTables-1.13.6.min.js \
 	dataTables-2.2.2.min.js \
 	dataTables.buttons-3.2.2.min.js \
+	dataTables.rowReorder-1.5.1.min.js \
 	dataTables.select-1.7.0.min.js \
 	dataTables.select-3.0.0.min.js \
 	es5-sham.4.0.3.min.js es5-shim.4.0.3.min.js \
@@ -17,7 +18,8 @@ JS_FILES= BackboneExtend.js \
 	lodash.3.10.0.compat.min.js \
 	react-with-addons-0.12.2.min.js \
 	sorttable.js tus.min.js \
-	shepherd.min.js
+	shepherd.min.js \
+	reveal-5.1.0.js reveal-notes-5.1.0.js
 
 # Don't bother jshint'ing external libs.
 jshint:

@@ -15,6 +15,7 @@
 #include "portable.h"
 #include "bed.h"
 #include "basicBed.h"
+#include "htmlColor.h"
 #include "psl.h"
 #include "web.h"
 #include "hdb.h"
@@ -254,6 +255,7 @@ boolean zoomedToBaseLevel;      /* TRUE if zoomed so we can draw bases. */
 boolean zoomedToCodonNumberLevel; /* TRUE if zoomed so we can print codons and exon number text in genePreds*/
 boolean zoomedToCodonLevel; /* TRUE if zoomed so we can print codons text in genePreds*/
 boolean zoomedToCdsColorLevel; /* TRUE if zoomed so we can color each codon*/
+boolean baseColorDrawCodonArrows = TRUE; /* Draw a strand chevron on each codon box? Off in squish. */
 
 boolean withLeftLabels = TRUE;		/* Display left labels? */
 boolean withIndividualLabels = TRUE;    /* print labels on item-by-item basis (false to skip) */
@@ -287,6 +289,8 @@ struct rgbColor lightSeaColor = {200, 220, 255, 255};
 struct hash *hgFindMatches; /* The matches found by hgFind that should be highlighted. */
 boolean hgFindMatchesShowHighlight; /* For use with pdf mode which suppresses label highlight */
 
+struct hash *itemColorHash; /* Per-item background highlight colors keyed by "track\titemName". */
+
 struct trackLayout tl;
 
 void initTl()
@@ -295,6 +299,10 @@ void initTl()
 {
 trackLayoutInit(&tl, cart);
 
+// Settle the text engine here, with the rest of the font setup, so that every
+// string measured from now on -- including the item labels that decide how pack
+// mode lays out its rows -- is measured with the engine that will draw it.
+initFontEngine();
 }
 
 static boolean isTooLightForTextOnWhite(struct hvGfx *hvg, Color color)
@@ -2707,7 +2715,7 @@ else
     boolean isNotLastExon = (exonIntronNumber<numExons);
 
     static const char *phasePrefix  = 
-        "<b><a target=_blank href='../goldenPath/help/codonPhase.html'> <i class='fa fa-question-circle-o'></i></a></b>";
+        "<b><a target=_blank href='../goldenPath/help/codonPhase.html'> <i class='fa fa-question-circle'></i></a></b>";
 
     if (isNotLastExon)
         {
@@ -2979,6 +2987,181 @@ else
     return splicedBaseCount(lf, g, lf->end);
 }
 
+static int cdsMrnaPos(struct linkedFeatures *lf, int g)
+/* 1-based HGVS c. position of genomic base g, which must lie in the CDS.
+ * c.1 is the first base of the CDS, distances measured in spliced space. */
+{
+if (lf->orientation >= 0)
+    return splicedBaseCount(lf, lf->tallStart, g) + 1;
+else
+    return splicedBaseCount(lf, g + 1, lf->tallEnd) + 1;
+}
+
+static void sfCdsRange(struct linkedFeatures *lf, struct simpleFeature *sf, int *retLo, int *retHi)
+/* The c. positions of the first and last base of sf, low number first.  On the minus strand
+ * c. counts the other way along the genome, so the two ends swap. */
+{
+int a = cdsMrnaPos(lf, sf->start), b = cdsMrnaPos(lf, sf->end - 1);
+*retLo = min(a, b);
+*retHi = max(a, b);
+}
+
+static void codonCdsRange(struct linkedFeatures *lf, struct simpleFeature *prev,
+                          struct simpleFeature *codon, int *retCStart, int *retCEnd)
+/* The HGVS c. range of one codon from lf->codons, measured rather than computed as
+ * 3*codonIndex-2 .. 3*codonIndex.  The two part company whenever the annotated CDS does not
+ * begin on a codon boundary: exonFrames says so, and baseColorCodonsFromGenePred then makes
+ * codon 1 short instead of shifting every number after it, so from there on the arithmetic
+ * is off by the missing bases.  A codon split across an intron is two list entries sharing
+ * one codonIndex and they are neighbours in the list, so prev and next are all that have to
+ * be looked at.  prev is the list entry before codon, NULL at the head of the list. */
+{
+int lo, hi;
+sfCdsRange(lf, codon, &lo, &hi);
+struct simpleFeature *neighbors[2];
+neighbors[0] = prev;
+neighbors[1] = codon->next;
+int i;
+for (i = 0;  i < ArraySize(neighbors);  i++)
+    {
+    struct simpleFeature *other = neighbors[i];
+    if ((other == NULL) || (other->codonIndex != codon->codonIndex))
+        continue;
+    int oLo, oHi;
+    sfCdsRange(lf, other, &oLo, &oHi);
+    lo = min(lo, oLo);
+    hi = max(hi, oHi);
+    }
+*retCStart = lo;
+*retCEnd = hi;
+}
+
+static int cdsFirstCodonBases(struct track *tg, struct linkedFeatures *lf)
+/* How many coding bases the transcript's first codon has: 3 normally, but 1 or 2 when the
+ * annotated CDS starts part way into a codon, as a 5'-truncated transcript's does.  genePred
+ * records that as the frame of the first coding exon, and baseColorCodonsFromGenePred numbers
+ * the codons accordingly - a short codon 1, not a shifted numbering - so anything turning a
+ * c. position into a p. number has to know about it.  3 when there is no frame to read, which
+ * is also the right answer for every transcript whose CDS starts on a codon boundary. */
+{
+char *type = (tg->tdb != NULL) ? tg->tdb->type : NULL;
+if (type == NULL || !(startsWith("genePred", type) || startsWith("bigGenePred", type)))
+    return 3;
+struct genePred *gp = (struct genePred *)(lf->original);
+/* Same test baseColorCodonsFromGenePred uses to decide whether to trust exonFrames. */
+if (gp == NULL || gp->exonFrames == NULL || gp->optFields < genePredExonFramesFld)
+    return 3;
+int i, i0, iN, iInc;
+if (lf->orientation >= 0)
+    { i0 = 0;  iN = gp->exonCount;  iInc = 1; }
+else
+    { i0 = gp->exonCount - 1;  iN = -1;  iInc = -1; }
+for (i = i0;  i != iN;  i += iInc)
+    {
+    if (gp->exonEnds[i] <= gp->cdsStart || gp->exonStarts[i] >= gp->cdsEnd)
+        continue;       // an all-UTR exon, ahead of the first coding one
+    return (gp->exonFrames[i] > 0) ? 3 - gp->exonFrames[i] : 3;
+    }
+return 3;
+}
+
+static int codonForCdsPos(int firstCodonBases, int c)
+/* The 1-based codon number that c. position c falls in.  With a full first codon this is the
+ * familiar (c+2)/3; with a short one every codon after it is shifted. */
+{
+if (c <= firstCodonBases)
+    return 1;
+return 2 + (c - firstCodonBases - 1) / 3;
+}
+
+static boolean exonCodonRange(struct linkedFeatures *lf, int cdS, int cdE,
+                              int *retP5, int *retP3)
+/* First and last codon number covering the coding interval [cdS, cdE), read off lf->codons
+ * so that the exon's mouseover and the per-codon mouseovers inside it cannot disagree.
+ * FALSE when the track has no codon list, which is when it is not drawing codons at all and
+ * so has no per-codon mouseover to agree with. */
+{
+if (lf->codons == NULL)
+    return FALSE;
+int lo = 0, hi = 0;
+struct simpleFeature *sf;
+for (sf = lf->codons;  sf != NULL;  sf = sf->next)
+    {
+    if (sf->codonIndex <= 0 || sf->start >= cdE || sf->end <= cdS)
+        continue;   // a UTR block (codonIndex 0), or a codon outside this exon
+    if (lo == 0 || sf->codonIndex < lo)
+        lo = sf->codonIndex;
+    if (sf->codonIndex > hi)
+        hi = sf->codonIndex;
+    }
+if (lo == 0)
+    return FALSE;
+*retP5 = lo;
+*retP3 = hi;
+return TRUE;
+}
+
+static void exonCdsNote(struct track *tg, struct linkedFeatures *lf, int s, int e,
+                        char *buf, int bufSize)
+/* Describe the exon [s,e) of a coding transcript in HGVS c. coordinates: the UTR
+ * piece(s) as c.-N / c.*N and the coding piece as a c. range together with the
+ * codon (p.) numbers it covers.  This is what the popup shows when we are zoomed
+ * out too far to label the individual codons. */
+{
+buf[0] = '\0';
+boolean posStrand = (lf->orientation >= 0);
+int cdsStart = lf->tallStart, cdsEnd = lf->tallEnd;
+/* the exon split into its three possible pieces, in genomic coordinates */
+int upS = s, upE = min(e, cdsStart);            // left of the CDS
+int cdS = max(s, cdsStart), cdE = min(e, cdsEnd);
+int dnS = max(s, cdsEnd), dnE = e;              // right of the CDS
+/* in transcription order the left piece is the 5' UTR on + strand, the 3' on - */
+int utr5S = posStrand ? upS : dnS, utr5E = posStrand ? upE : dnE;
+int utr3S = posStrand ? dnS : upS, utr3E = posStrand ? dnE : upE;
+char loBuf[16], hiBuf[16];
+int len = 0;
+if (utr5E > utr5S)
+    {
+    utrHgvsCoord(lf, posStrand ? utr5S : utr5E - 1, loBuf, sizeof(loBuf));
+    utrHgvsCoord(lf, posStrand ? utr5E - 1 : utr5S, hiBuf, sizeof(hiBuf));
+    if (sameString(loBuf, hiBuf))
+        safef(buf, bufSize, "<b>5' UTR: </b> c.%s<br>", loBuf);
+    else
+        safef(buf, bufSize, "<b>5' UTR: </b> c.%s_%s<br>", loBuf, hiBuf);
+    len = strlen(buf);
+    }
+if (cdE > cdS)
+    {
+    int c5 = cdsMrnaPos(lf, posStrand ? cdS : cdE - 1);
+    int c3 = cdsMrnaPos(lf, posStrand ? cdE - 1 : cdS);
+    int p5, p3;
+    if (!exonCodonRange(lf, cdS, cdE, &p5, &p3))
+        {
+        /* No codon list to read the numbers off - the track is zoomed out past the level
+         * that builds one - so count them, taking the same short first codon into account
+         * that the codon list would have. */
+        int firstCodonBases = cdsFirstCodonBases(tg, lf);
+        p5 = codonForCdsPos(firstCodonBases, c5);
+        p3 = codonForCdsPos(firstCodonBases, c3);
+        }
+    if (p5 == p3)
+        safef(buf + len, bufSize - len, "<b>Codons: </b> c.%d-%d (p.%d)<br>", c5, c3, p5);
+    else
+        safef(buf + len, bufSize - len, "<b>Codons: </b> c.%d-%d (p.%d-%d)<br>",
+                c5, c3, p5, p3);
+    len = strlen(buf);
+    }
+if (utr3E > utr3S)
+    {
+    utrHgvsCoord(lf, posStrand ? utr3S : utr3E - 1, loBuf, sizeof(loBuf));
+    utrHgvsCoord(lf, posStrand ? utr3E - 1 : utr3S, hiBuf, sizeof(hiBuf));
+    if (sameString(loBuf, hiBuf))
+        safef(buf + len, bufSize - len, "<b>3' UTR: </b> c.%s<br>", loBuf);
+    else
+        safef(buf + len, bufSize - len, "<b>3' UTR: </b> c.%s_%s<br>", loBuf, hiBuf);
+    }
+}
+
 void linkedFeaturesItemExonMaps(struct track *tg, struct hvGfx *hvg, void *item, double scale,
     int y, int heightPer, int sItem, int eItem,
     boolean lButton, boolean rButton, int buttonW)
@@ -2993,8 +3176,10 @@ int exonIx = 1;
 struct slRef *exonList = NULL, *ref;
 // TODO this exonText (and intronText) setting is just a made-up placeholder.
 // could add a real setting name. Maybe someday extend to exon names (LRG?) instead of just exon numbers
+boolean isTranscript = TRUE;   // chain blocks and LRG regions have no cDNA coordinates
 if (startsWith("chain", tg->tdb->type) || startsWith("lrg", tg->tdb->track))
     {
+    isTranscript = FALSE;
     exonText   = trackDbSettingClosestToHomeOrDefault(tg->tdb, "exonText"  , "Block");
     intronText = trackDbSettingClosestToHomeOrDefault(tg->tdb, "intronText", "Gap"  ); // what really goes here for chain type?
     }
@@ -3102,8 +3287,12 @@ for (ref = exonList; TRUE; )
             if ((gp != NULL) && gp->exonFrames && isExon)
                 {
                 startPhase = gp->exonFrames[exonIx-1];
-                if (!revStrand) 
-                    endPhase = gp->exonFrames[exonIx];
+                if (!revStrand)
+                    {
+                    // the last exon has no next exon, so it has no end phase
+                    if (exonIx < gp->exonCount)
+                        endPhase = gp->exonFrames[exonIx];
+                    }
                 else 
                     if (exonIx>1)
                         endPhase = gp->exonFrames[exonIx-2];
@@ -3116,10 +3305,10 @@ for (ref = exonList; TRUE; )
                 // draw mapBoxes for the codons if we are zoomed in far enough
                 if (isExon && lf->codons && zoomedToCdsColorLevel)
                     {
-                    struct simpleFeature *codon;
+                    struct simpleFeature *codon, *prevCodon = NULL;
                     struct dyString *codonDy = dyStringNew(0);
                     int codonS, codonE;
-                    for (codon = lf->codons; codon != NULL; codon = codon->next)
+                    for (codon = lf->codons; codon != NULL; prevCodon = codon, codon = codon->next)
                         {
                         codonS = codon->start; codonE = codon->end;
                         if (codonS > e || codonE < s)
@@ -3151,13 +3340,17 @@ for (ref = exonList; TRUE; )
                                     // if you change this text, make sure you also change hgTracks.js:mouseOverToLabel
                                     if (!isEmpty(existingText))
                                         dyStringPrintf(codonDy, "<b>Transcript: </b> %s<br>", existingText);
-                                    int codonHgvsIx = (codon->codonIndex - 1) * 3;
-                                    if (codonHgvsIx >= 0)
+                                    if (codon->codonIndex > 0)
                                         {
-                                        int cStart = codonHgvsIx + 1;
-                                        int cEnd = codonHgvsIx + 3;
+                                        /* The c. range is measured off the codon's own bases
+                                         * rather than taken as 3*codonIndex-2 .. 3*codonIndex:
+                                         * when the annotated CDS does not start on a codon
+                                         * boundary codon 1 is short, and the arithmetic is
+                                         * then wrong for the whole transcript. */
+                                        int cStart, cEnd;
+                                        codonCdsRange(lf, prevCodon, codon, &cStart, &cEnd);
                                         // a codon is a single amino acid; p. is 1-based like c.
-                                        int pPos = codonHgvsIx / 3 + 1;
+                                        int pPos = codon->codonIndex;
                                         // the one-letter amino acid was stored on the codon when it
                                         // was translated (cds.c); map it to its three-letter code
                                         char aaLetter = codon->codonAa;
@@ -3175,8 +3368,32 @@ for (ref = exonList; TRUE; )
                                             aaToAbbr(aaLetter, aaAbbr, sizeof(aaAbbr));
                                             aaName = aaToName(aaLetter);
                                             }
-                                        dyStringPrintf(codonDy, "<b>Codon: </b> c.%d-%d (p.%d)<br>",
+                                        /* These numbers are counted along the genome, as this
+                                         * track has always counted them.  Where the transcript
+                                         * has an indel relative to the genome the transcript's
+                                         * own numbering differs, so show both, and name which
+                                         * is which only in that case:  for every other
+                                         * transcript there is one count and "Codon" says it. */
+                                        boolean shifted = baseColorCodonIsShifted(codon);
+                                        dyStringPrintf(codonDy, "<b>%s: </b> c.%d-%d (p.%d)<br>",
+                                                shifted ? "Genomic codon number" : "Codon",
                                                 cStart, cEnd, pPos);
+                                        if (shifted)
+                                            {
+                                            int txCStart = (codon->txCodonIndex - 1) * 3 + 1;
+                                            dyStringPrintf(codonDy,
+                                                "<b>Transcript codon number: </b> "
+                                                "c.%d-%d (p.%d)<br>",
+                                                txCStart, txCStart+2, codon->txCodonIndex);
+                                            dyStringPrintf(codonDy,
+                                                "<b>Note: </b>This transcript's sequence has "
+                                                "extra or missing bases compared to the genome "
+                                                "before this codon, so the genomic and transcript "
+                                                "codon numbers differ. "
+                                                "<a target=_blank "
+                                                "href=\"../FAQ/FAQgenes.html#txIndel\">"
+                                                "Help</a><br>");
+                                            }
                                         if (!isEmpty(aaAbbr))
                                             {
                                             if (aaName != NULL)
@@ -3220,28 +3437,35 @@ for (ref = exonList; TRUE; )
                     // if you change this text, make sure you also change hgTracks.js:mouseOverToLabel
                     // if you change the text below, also change hgTracks:mouseOverToExon
                     char *posNote = "";
-                    char posBuf[64];
+                    char posBuf[256];
                     char *exonOrIntron = "Intron";
                     char *lengthLabel = "Length:";
                     if (isExon)
                         {
                         exonOrIntron = "Exon";
                         lengthLabel = "Exon Length:";
-                        if (lf->tallStart >= lf->tallEnd && zoomedToCdsColorLevel)
+                        if (isTranscript)
                             {
-                            // non-coding transcript (no CDS): label the exon with its
-                            // spliced HGVS n. nucleotide range instead of the codon note.
-                            boolean posStrand = (lf->orientation >= 0);
-                            int n5 = txMrnaPos(lf, posStrand ? s : e - 1);
-                            int n3 = txMrnaPos(lf, posStrand ? e - 1 : s);
-                            if (n5 == n3)
-                                safef(posBuf, sizeof(posBuf), "<b>Position: </b> n.%d<br>", n5);
+                            if (lf->tallStart >= lf->tallEnd)
+                                {
+                                // non-coding transcript (no CDS): label the exon with its
+                                // spliced HGVS n. nucleotide range instead of a codon note.
+                                boolean posStrand = (lf->orientation >= 0);
+                                int n5 = txMrnaPos(lf, posStrand ? s : e - 1);
+                                int n3 = txMrnaPos(lf, posStrand ? e - 1 : s);
+                                if (n5 == n3)
+                                    safef(posBuf, sizeof(posBuf), "<b>Position: </b> n.%d<br>", n5);
+                                else
+                                    safef(posBuf, sizeof(posBuf), "<b>Position: </b> n.%d_%d<br>",
+                                            n5, n3);
+                                }
                             else
-                                safef(posBuf, sizeof(posBuf), "<b>Position: </b> n.%d_%d<br>", n5, n3);
+                                // coding transcript, too far out to draw the codons: give the
+                                // exon's cDNA range and the codons it covers, so a c. or p.
+                                // position can be found without zooming into every exon
+                                exonCdsNote(tg, lf, s, e, posBuf, sizeof(posBuf));
                             posNote = posBuf;
                             }
-                        else
-                            posNote = "<b>Codons:</b> Zoom in to show cDNA position<br>";
                         }
 
 
@@ -4272,6 +4496,76 @@ for (sf = lf->components; sf != NULL; sf = sf->next)
  * gap if target side is at most 5 times greater than query side. */
 #define CHAIN_GAP_FACTOR 5
 
+struct itemColorSpec
+/* A user-chosen color for a single item, set via the right-click "Color this item" menu. */
+    {
+    Color color;          /* The chosen color. */
+    boolean wholeItem;    /* TRUE to recolor the item glyph, FALSE for a background highlight. */
+    };
+
+static struct itemColorSpec *itemColorLookup(struct track *tg, void *item)
+/* Return the user-chosen color spec for this item, or NULL. Matches on mapItemName, itemName, or
+ * genomic position ("pos:chrom:start-end"), the same identities the JS uses to build the record.
+ * Nameless items (e.g. bed3) have no usable name, so the position key identifies them. */
+{
+if (itemColorHash == NULL)
+    return NULL;
+static struct dyString *key = NULL;
+if (!key)
+    key = dyStringNew(0);
+struct itemColorSpec *spec = NULL;
+if (tg->mapItemName != NULL)
+    {
+    dyStringClear(key);
+    dyStringPrintf(key, "%s\t%s", tg->track, tg->mapItemName(tg, item));
+    spec = hashFindVal(itemColorHash, dyStringContents(key));
+    }
+if (spec == NULL && tg->itemName != NULL)
+    {
+    dyStringClear(key);
+    dyStringPrintf(key, "%s\t%s", tg->track, tg->itemName(tg, item));
+    spec = hashFindVal(itemColorHash, dyStringContents(key));
+    }
+if (spec == NULL && tg->itemStart != NULL && tg->itemEnd != NULL)
+    {
+    dyStringClear(key);
+    dyStringPrintf(key, "%s\tpos:%s:%d-%d", tg->track, chromName,
+          tg->itemStart(tg, item), tg->itemEnd(tg, item));
+    spec = hashFindVal(itemColorHash, dyStringContents(key));
+    }
+return spec;
+}
+
+boolean itemColorOverride(struct track *tg, void *item, Color *retColor, boolean *retWholeItem)
+/* If the user set a per-item color for this item (via right-click), return TRUE and fill in the
+ * color and whether it recolors the whole item; otherwise return FALSE. Lets non-linkedFeatures
+ * draw routines (e.g. bedDrawSimpleAt) honor right-click item colors. */
+{
+struct itemColorSpec *spec = itemColorLookup(tg, item);
+if (spec == NULL)
+    return FALSE;
+if (retColor != NULL)
+    *retColor = spec->color;
+if (retWholeItem != NULL)
+    *retWholeItem = spec->wholeItem;
+return TRUE;
+}
+
+static MgFont *squishCodonFont()
+/* Pick a small-but-readable amino-acid font for the short squish rows, where the
+ * full track font is taller than the row and gets clipped.  We want ~9px.  The
+ * built-in fonts jump from 8px straight to 11px, but the FreeType engine can
+ * render an in-between size, so use a 9px font there; under the GEM bitmap engine
+ * (which cannot fake a size) fall back to the size-8 font. */
+{
+/* Use the same predicate maybeNewFonts() uses to switch engines: freeType on, textFont not
+ * "Bitmap", and the font name known to freeTypeFonts[].  A looser test can send mgFontForCellHeight
+ * a size the bitmap engine cannot render (see the warning in lib/memgfx.c). */
+if (freeTypeFontActive())
+    return mgFontForCellHeight(10);   // getFontCorrection(10) renders ~9px
+return mgFontForSize("8");
+}
+
 void linkedFeaturesDrawAt(struct track *tg, void *item,
                           struct hvGfx *hvg, int xOff, int y, double scale,
                           MgFont *font, Color color, enum trackVisibility vis)
@@ -4340,6 +4634,32 @@ if (vis == tvDense && trackDbSetting(tg->tdb, EXP_COLOR_DENSE))
 color = colorFromCart(tg, color);
 bColor = colorFromCart(tg, bColor);
 
+// user-chosen per-item color (right-click "Color this item"): recolor the whole glyph or
+// fall back to a background highlight, unless the item is already highlighted.
+struct itemColorSpec *userColorSpec = itemColorLookup(tg, lf);
+if (userColorSpec != NULL)
+    {
+    if (userColorSpec->wholeItem)
+        color = bColor = userColorSpec->color;
+    else if (lf->highlightColor == 0)
+        {
+        lf->highlightColor = userColorSpec->color;
+        lf->highlightMode = highlightBackground;
+        }
+    }
+
+/* In squish the codon/CDS strand chevrons are too busy for the short rows, so
+ * turn them off and rely on the (thinned, widely spaced) intron barbs for the
+ * strand cue.  Also shrink the amino-acid font so the letters fit the row
+ * instead of being clipped by it. */
+MgFont *codonFont = font;
+baseColorDrawCodonArrows = TRUE;
+if (vis == tvSquish)
+    {
+    baseColorDrawCodonArrows = FALSE;
+    codonFont = squishCodonFont();
+    }
+
 struct genePred *gp = NULL;
 if (startsWith("genePred", tg->tdb->type) || startsWith("bigGenePred", tg->tdb->type))
     gp = (struct genePred *)(lf->original);
@@ -4357,7 +4677,17 @@ if (psl && baseColorNeedsCodons)
 else if (drawOpt > baseColorDrawOff)
     {
     if (gp && gp->cdsStart != gp->cdsEnd)
-        lf->codons = baseColorCodonsFromGenePred(lf, gp, (drawOpt != baseColorDrawDiffCodons), cartUsualBooleanClosestToHome(cart, tg->tdb, FALSE, CODON_NUMBERING_SUFFIX, TRUE));
+        {
+        /* Where the transcript has an indel relative to the genome, counting codons along
+         * the genome does not give the transcript's own codon numbers.  This alignment is
+         * what lets each codon carry both numbers; NULL for a track with no alignment. */
+        struct genbankCds txCds;
+        ZeroVar(&txCds);   // stays zeroed when there is no alignment to fill it in
+        struct psl *txAli = baseColorTxAliForGenePred(tg, gp, &txCds);
+        lf->codons = baseColorCodonsFromGenePred(lf, gp, (drawOpt != baseColorDrawDiffCodons),
+                cartUsualBooleanClosestToHome(cart, tg->tdb, FALSE, CODON_NUMBERING_SUFFIX, TRUE),
+                txAli, &txCds);
+        }
     }
 if (psl && drawOpt == baseColorDrawCds && !zoomedToCdsColorLevel)
     baseColorSetCdsBounds(lf, psl, tg);
@@ -4392,9 +4722,12 @@ if (lf->highlightColor && (lf->highlightMode == highlightBackground))
     // draw the background
     hvGfxBox(hvg, x1, y, w, heightPer, lf->highlightColor);
 
-    // draw the item slightly smaller
+    // draw the item slightly smaller, and re-center the thin (UTR) boxes for the
+    // reduced height so they stay symmetric within the highlight
     y++;
     heightPer -=2;
+    shortOff = heightPer/4;
+    shortHeight = heightPer - 2*shortOff;
     }
 
 if (!hideLine)
@@ -4403,19 +4736,44 @@ if (!hideLine)
     }
 if (!hideArrows)
     {
-    if ((intronGap == 0) && (vis == tvFull || vis == tvPack))
+    if ((intronGap == 0) && (vis == tvFull || vis == tvPack || vis == tvSquish))
 	{
+	int barbHeight = tl.barbHeight;
+	int barbSpacing = tl.barbSpacing;
+	if (vis == tvSquish)
+	    {
+	    /* Keep squish subtle: thin barbs sized to the short row, and spaced
+	     * 4x wider so there are far fewer of them.  In squish the codon/CDS
+	     * chevrons are turned off, so these intron barbs are the strand cue. */
+	    barbHeight = (heightPer-1)/2;
+	    if (barbHeight > tl.barbHeight)
+		barbHeight = tl.barbHeight;
+	    if (barbHeight < 1)
+		barbHeight = 1;
+	    barbSpacing = tl.barbSpacing*4;
+	    }
 	if (lf->highlightColor && (lf->highlightMode == highlightOutline))
-	    clippedBarbs(hvg, x1, midY, w, tl.barbHeight, tl.barbSpacing,
+	    clippedBarbs(hvg, x1, midY, w, barbHeight, barbSpacing,
                          lf->orientation, lf->highlightColor, FALSE);
         else
-            clippedBarbs(hvg, x1, midY, w, tl.barbHeight, tl.barbSpacing,
+            clippedBarbs(hvg, x1, midY, w, barbHeight, barbSpacing,
                          lf->orientation, bColor, FALSE);
         }
     }
 
 components = (lf->codons && zoomedToCdsColorLevel) ? lf->codons : lf->components;
 
+/* For direction barbs, merge blocks that touch in pixel space into a single
+ * span (accumulated in the loop below) so the chevrons run continuously across
+ * them.  This matters for chains, whose blocks smash together when zoomed out:
+ * individually most are too narrow to hold a chevron.  barbRunX1 < 0 means no
+ * run is currently open. */
+static int barbMergePixels = -1;   // max pixel gap between blocks still merged for
+if (barbMergePixels < 0)           // barbs; hg.conf barbMergePixels, 0 disables merging
+    barbMergePixels = atoi(cfgOptionDefault("barbMergePixels", "3"));
+Color barbColor = hvGfxContrastingColor(hvg, color);
+int barbRunX1 = -1;
+int barbRunX2 = -1;
 
 for (sf = components; sf != NULL; sf = sf->next)
     {
@@ -4461,7 +4819,7 @@ for (sf = components; sf != NULL; sf = sf->next)
         &&  e + 6 >= winStart
         &&  s - 6 <  winEnd
         &&  (e-s <= 3 || !baseColorNeedsCodons))
-            baseColorDrawItem(tg, lf, sf->grayIx, hvg, xOff, y, scale, font, s, e, heightPer,
+            baseColorDrawItem(tg, lf, sf->grayIx, hvg, xOff, y, scale, codonFont, s, e, heightPer,
                               zoomedToCodonLevel, qSeq, qOffset, sf, psl, drawOpt, MAXPIXELS, winStart,
                               color);
         else
@@ -4496,22 +4854,42 @@ for (sf = components; sf != NULL; sf = sf->next)
                && (sf->start <= winStart || sf->start == lf->start)
                && (sf->end   >= winEnd   || sf->end   == lf->end)))
                 {
-                Color barbColor = hvGfxContrastingColor(hvg, color);
                 // This scaling of bases to an image window occurs in several places.
                 // It should really be broken out into a function.
-                if (s < winStart)
-                    s = winStart;
-                if (e > winEnd)
-                    e = winEnd;
-                x1 = round((double)((int)s-winStart)*scale) + xOff;
-                x2 = round((double)((int)e-winStart)*scale) + xOff;
-                w = x2-x1;
-                clippedBarbs(hvg, x1+1, midY, x2-x1-2, tl.barbHeight, tl.barbSpacing,
-                             lf->orientation, barbColor, TRUE);
+                int bs = s, be = e;
+                if (bs < winStart)
+                    bs = winStart;
+                if (be > winEnd)
+                    be = winEnd;
+                x1 = round((double)((int)bs-winStart)*scale) + xOff;
+                x2 = round((double)((int)be-winStart)*scale) + xOff;
+                if (barbRunX1 < 0)
+                    {           // start a new run
+                    barbRunX1 = x1;
+                    barbRunX2 = x2;
+                    }
+                else if (barbMergePixels > 0 && x1 <= barbRunX2 + barbMergePixels)
+                    {           // this block touches the run: extend it
+                    if (x2 > barbRunX2)
+                        barbRunX2 = x2;
+                    }
+                else
+                    {           // real gap: flush the run and start a new one
+                    clippedBarbs(hvg, barbRunX1+1, midY, barbRunX2-barbRunX1-2,
+                                 tl.barbHeight, tl.barbSpacing, lf->orientation,
+                                 barbColor, TRUE);
+                    barbRunX1 = x1;
+                    barbRunX2 = x2;
+                    }
                 }
             }
 	}
     }
+
+/* Flush the final merged barb run. */
+if (barbRunX1 >= 0)
+    clippedBarbs(hvg, barbRunX1+1, midY, barbRunX2-barbRunX1-2,
+                 tl.barbHeight, tl.barbSpacing, lf->orientation, barbColor, TRUE);
 
 if ((intronGap > 0) || chainLines)
     lfDrawSpecialGaps(lf, intronGap, chainLines, gapFactor,
@@ -4525,8 +4903,11 @@ if (vis != tvDense)
     baseColorOverdrawDiff(tg, lf, hvg, xOff, y, scale, heightPer,
 			  qSeq, qOffset, psl, winStart, drawOpt);
     /* When codons are colored, distribute strand arrows across the exons on top
-     * of the boxes (coding exons when too small to label, plus the UTRs). */
-    baseColorDrawCdsArrows(tg, lf, hvg, xOff, y, scale, heightPer, winStart, drawOpt, color);
+     * of the boxes (coding exons when too small to label, plus the UTRs).  Not
+     * in squish, where these are too busy for the short rows and the strand is
+     * shown by the intron barbs instead. */
+    if (vis != tvSquish)
+        baseColorDrawCdsArrows(tg, lf, hvg, xOff, y, scale, heightPer, winStart, drawOpt, color);
     if (psl && (indelShowQueryInsert || indelShowPolyA))
 	baseColorOverdrawQInsert(tg, lf, hvg, xOff, y, scale, heightPer,
 				 qSeq, qOffset, psl, font, winStart, drawOpt,
@@ -4665,8 +5046,10 @@ void genericMapItem(struct track *tg, struct hvGfx *hvg, void *item,
 /* This is meant to be used by genericDrawItems to set to tg->mapItem in */
 /* case tg->mapItem isn't set to anything already. */
 {
-// Don't bother if we are imageV2 and a dense child.
-if (!theImgBox || tg->limitedVis != tvDense || !tdbIsCompositeChild(tg->tdb))
+// Don't bother if we are imageV2 and a dense child, unless denseClick is on for
+// this track, in which case the dense row is meant to be clickable per item.
+if (!theImgBox || tg->limitedVis != tvDense || !tdbIsCompositeChild(tg->tdb)
+||  denseClickEnabled(tg))
     {
     char *directUrl = trackDbSetting(tg->tdb, "directUrl");
     boolean withHgsid = (trackDbSetting(tg->tdb, "hgsid") != NULL);
@@ -4906,6 +5289,15 @@ if (tg->itemNameColor != NULL)
 	labelColor = somewhatDarkerColor(hvg, color);
     }
 
+// user-chosen per-item color (right-click "Color this item"): color the label to match the glyph
+struct itemColorSpec *userColorSpec = itemColorLookup(tg, item);
+if (userColorSpec != NULL && userColorSpec->wholeItem)
+    {
+    color = labelColor = userColorSpec->color;
+    if (withLeftLabels && isTooLightForTextOnWhite(hvg, color))
+	labelColor = somewhatDarkerColor(hvg, color);
+    }
+
 /* pgSnpDrawAt may change withIndividualLabels between items */
 boolean withLabels = (withLeftLabels && withIndividualLabels && ((vis == tvPack) || (vis == tvFull && isTypeBedLike(tg))) && (!sn->noLabel) && !tg->drawName);
 if (withLabels)
@@ -5101,58 +5493,225 @@ el->sumSquares = sumSquares * normFactor;
 return validCount;
 }
 
-static unsigned *countOverlaps(struct track *track)
-/* Count up overlap of linked features. */
+/* Item coverage for the "draw as a coverage graph" display mode.
+ *
+ * Coverage is a step function: it only changes where a feature starts or ends.
+ * So it is held as a list of runs rather than as one count per base of the
+ * window.  The per-base array this replaced was
+ *     needHugeZeroedMem((1 + winEnd - winStart) * sizeof(unsigned))
+ * which is 100 MB on a 25 Mb window, per track, incremented once per base of
+ * every feature and then read back in full to produce about 1,200 pixels.
+ * Sampling walks the runs instead, so both the memory and the two passes over
+ * it scale with the number of features and not with the width of the window.
+ * refs #38094
+ */
+
+struct covEvent
+/* A change in coverage at one base offset from winStart. */
+    {
+    unsigned pos;
+    int delta;          /* +1 where a feature starts, -1 where it ends */
+    };
+
+struct covRuns
+/* Coverage over the window as a step function.  Run i covers
+ * [pos[i], pos[i+1]) at depth cov[i]; the last run reaches size.  pos[0] is
+ * always 0, and the depth after the final event is always 0, so a lookup at
+ * size reads 0 the way the old counts[size] element did. */
+    {
+    unsigned *pos;
+    unsigned *cov;
+    int runCount;
+    unsigned size;
+    int cursor;         /* run holding the last position looked up */
+    };
+
+static int covEventCmp(const void *va, const void *vb)
+/* Sort coverage events by position. */
+{
+unsigned a = ((const struct covEvent *)va)->pos;
+unsigned b = ((const struct covEvent *)vb)->pos;
+if (a < b)
+    return -1;
+if (a > b)
+    return 1;
+return 0;
+}
+
+static void covAddInterval(struct covEvent *events, int *pCount,
+                           unsigned start, unsigned end, unsigned size)
+/* Clip one feature to the window and record its two coverage events.  The
+ * clipping is deliberately the same arithmetic the per-base loop used. */
+{
+if (positiveRangeIntersection(start, end, winStart, winEnd) <= 0)
+    return;
+
+int x1 = max((int)start - (int)winStart, 0);
+int x2 = min((int)end - (int)winStart, size);
+if (x1 >= x2)
+    return;
+
+int n = *pCount;
+events[n].pos = x1;
+events[n].delta = 1;
+events[n+1].pos = x2;
+events[n+1].delta = -1;
+*pCount = n + 2;
+}
+
+static struct covRuns *countOverlaps(struct track *track)
+/* Build the coverage step function for the linked features in the window. */
 {
 struct slList *items = track->items;
 struct slList *item;
 unsigned size = winEnd - winStart;
-unsigned *counts = needHugeZeroedMem((1+ size) * sizeof(unsigned));
 extern int linkedFeaturesItemStart(struct track *tg, void *item);
 boolean isLinkedFeature = ( track->itemStart == linkedFeaturesItemStart);
 
+/* Count the intervals first so the event array can be sized exactly. */
+int intervalCount = 0;
 for (item = items; item; item = item->next)
     {
     if (isLinkedFeature)
         {
         struct linkedFeatures *lf = (struct linkedFeatures *)item;
         struct simpleFeature *sf;
-
         for (sf = lf->components; sf != NULL; sf = sf->next)
-            {
-            unsigned start = sf->start;
-            unsigned end = sf->end;
-            if (start == end)
-                end++;
-            if (positiveRangeIntersection(start, end, winStart, winEnd) <= 0)
-                continue;
-
-            int x1 = max((int)start - (int)winStart, 0);
-            int x2 = min((int)end - (int)winStart, size);
-
-            for(; x1 < x2; x1++)
-                counts[x1]++;
-            }
+            intervalCount++;
         }
     else
-        {
-        unsigned start = track->itemStart(track, item);
-        unsigned end = track->itemEnd(track, item);
-        if (positiveRangeIntersection(start, end, winStart, winEnd) <= 0)
-            continue;
-
-        int x1 = max((int)start - (int)winStart, 0);
-        int x2 = min((int)end - (int)winStart, size);
-
-        for(; x1 < x2; x1++)
-            counts[x1]++;
-        }
+        intervalCount++;
     }
 
-return counts;
+struct covEvent *events = NULL;
+int eventCount = 0;
+if (intervalCount > 0)
+    {
+    events = needLargeMem(2 * (size_t)intervalCount * sizeof(*events));
+    for (item = items; item; item = item->next)
+        {
+        if (isLinkedFeature)
+            {
+            struct linkedFeatures *lf = (struct linkedFeatures *)item;
+            struct simpleFeature *sf;
+
+            for (sf = lf->components; sf != NULL; sf = sf->next)
+                {
+                unsigned start = sf->start;
+                unsigned end = sf->end;
+                if (start == end)
+                    end++;
+                covAddInterval(events, &eventCount, start, end, size);
+                }
+            }
+        else
+            {
+            unsigned start = track->itemStart(track, item);
+            unsigned end = track->itemEnd(track, item);
+            covAddInterval(events, &eventCount, start, end, size);
+            }
+        }
+    qsort(events, eventCount, sizeof(events[0]), covEventCmp);
+    }
+
+struct covRuns *runs;
+AllocVar(runs);
+runs->size = size;
+runs->cursor = 0;
+/* One run can start at each distinct event position, plus the run from 0. */
+AllocArray(runs->pos, eventCount + 1);
+AllocArray(runs->cov, eventCount + 1);
+runs->pos[0] = 0;
+runs->cov[0] = 0;
+int n = 1;
+int depth = 0;
+int i = 0;
+while (i < eventCount)
+    {
+    unsigned p = events[i].pos;
+    while (i < eventCount && events[i].pos == p)
+        {
+        depth += events[i].delta;
+        i++;
+        }
+    if (runs->pos[n-1] == p)            /* events at offset 0 */
+        runs->cov[n-1] = depth;
+    else if (runs->cov[n-1] != (unsigned)depth)
+        {
+        runs->pos[n] = p;
+        runs->cov[n] = depth;
+        n++;
+        }
+    }
+runs->runCount = n;
+freeMem(events);
+return runs;
 }
 
-static void countsToPixelsUp(unsigned *counts, struct preDrawContainer *pre)
+static void covRunsFree(struct covRuns **pRuns)
+/* Free a coverage step function. */
+{
+struct covRuns *runs = *pRuns;
+if (runs == NULL)
+    return;
+freeMem(runs->pos);
+freeMem(runs->cov);
+freez(pRuns);
+}
+
+static unsigned covAt(struct covRuns *runs, unsigned pos)
+/* Coverage at one base offset.  Lookups run forward through the window, so the
+ * cursor makes this amortized constant time; a backward lookup still works. */
+{
+if (pos < runs->pos[runs->cursor])
+    runs->cursor = 0;
+while (runs->cursor + 1 < runs->runCount && pos >= runs->pos[runs->cursor + 1])
+    runs->cursor++;
+return runs->cov[runs->cursor];
+}
+
+static void covSumRange(struct covRuns *runs, unsigned a, unsigned b,
+                        double *pCount, double *pSum, double *pSumSquares,
+                        double *pMin, double *pMax)
+/* Fold the whole bases of [a, b) into the running per-pixel statistics, a run
+ * at a time.  Every quantity here is an integer held in a double, so adding a
+ * run as cov*n reaches the same value the per-base loop reached by adding cov
+ * n times.  The square is formed with unsigned arithmetic first, because that
+ * is what the per-base loop did. */
+{
+if (a >= b)
+    return;
+covAt(runs, a);                         /* park the cursor on the first run */
+int ix = runs->cursor;
+double count = *pCount, sum = *pSum, sumSquares = *pSumSquares;
+double lowest = *pMin, highest = *pMax;
+while (ix < runs->runCount && runs->pos[ix] < b)
+    {
+    unsigned runEnd = (ix + 1 < runs->runCount) ? runs->pos[ix+1] : runs->size;
+    unsigned lo = (runs->pos[ix] > a) ? runs->pos[ix] : a;
+    unsigned hi = (runEnd < b) ? runEnd : b;
+    if (hi > lo)
+        {
+        unsigned cov = runs->cov[ix];
+        double n = hi - lo;
+        count += n;
+        sum += (double)cov * n;
+        sumSquares += (double)(cov * cov) * n;
+        if (highest < cov)
+            highest = cov;
+        if (lowest > cov)
+            lowest = cov;
+        }
+    if (runEnd >= b)
+        break;
+    ix++;
+    }
+runs->cursor = (ix < runs->runCount) ? ix : runs->runCount - 1;
+*pCount = count; *pSum = sum; *pSumSquares = sumSquares;
+*pMin = lowest; *pMax = highest;
+}
+
+static void countsToPixelsUp(struct covRuns *runs, struct preDrawContainer *pre)
 /* Up sample counts into pixels. */
 {
 int preDrawZero = pre->preDrawZero;
@@ -5164,15 +5723,16 @@ for (pixel=0; pixel<insideWidth; ++pixel)
     {
     struct preDrawElement *pe = &pre->preDraw[pixel + preDrawZero];
     unsigned index = pixel * countsPerPixel;
+    unsigned count = covAt(runs, index);
     pe->count = 1;
-    pe->min = counts[index];
-    pe->max = counts[index];
-    pe->sumData = counts[index] ;
-    pe->sumSquares = counts[index] * counts[index];
+    pe->min = count;
+    pe->max = count;
+    pe->sumData = count ;
+    pe->sumSquares = count * count;
     }
 }
 
-static void countsToPixelsDown(unsigned *counts, struct preDrawContainer *pre)
+static void countsToPixelsDown(struct covRuns *runs, struct preDrawContainer *pre)
 /* Down sample counts into pixels. */
 {
 int preDrawZero = pre->preDrawZero;
@@ -5190,7 +5750,7 @@ for (pixel=0; pixel<insideWidth; ++pixel)
     double realCount, realSum, realSumSquares, max, min;
 
     realCount = realSum = realSumSquares = 0.0;
-    max = min = counts[startUns];
+    max = min = covAt(runs, startUns);
 
     assert(startUns != endUns);
     unsigned ceilUns = ceil(startReal);
@@ -5200,32 +5760,25 @@ for (pixel=0; pixel<insideWidth; ++pixel)
 	/* need a fraction of the first count */
 	double frac = (double)ceilUns - startReal;
 	realCount = frac;
-	realSum = frac * counts[startUns];
+	realSum = frac * covAt(runs, startUns);
 	realSumSquares = realSum * realSum;
 	startUns++;
 	}
 
     // add in all the counts that are totally in this pixel
-    for(; startUns < endUns; startUns++)
-	{
-	realCount += 1.0;
-	realSum += counts[startUns];
-	realSumSquares += counts[startUns] * counts[startUns];
-	if (max < counts[startUns])
-	    max = counts[startUns];
-	if (min > counts[startUns])
-	    min = counts[startUns];
-	}
+    covSumRange(runs, startUns, endUns,
+		&realCount, &realSum, &realSumSquares, &min, &max);
 
     // add any fraction of the count that's only partially in this pixel
     double lastFrac = endReal - endUns;
-    double lastSum = lastFrac * counts[endUns];
+    double lastSum = lastFrac * covAt(runs, endUns);
     if ((lastFrac > 0.0) && (endUns < size))
 	{
-	if (max < counts[endUns])
-	    max = counts[endUns];
-	if (min > counts[endUns])
-	    min = counts[endUns];
+	unsigned lastCount = covAt(runs, endUns);
+	if (max < lastCount)
+	    max = lastCount;
+	if (min > lastCount)
+	    min = lastCount;
 	realCount += lastFrac;
 	realSum += lastSum;
 	realSumSquares += lastSum * lastSum;
@@ -5235,16 +5788,16 @@ for (pixel=0; pixel<insideWidth; ++pixel)
     }
 }
 
-static void countsToPixels(unsigned *counts, struct preDrawContainer *pre)
+static void countsToPixels(struct covRuns *runs, struct preDrawContainer *pre)
 /* Sample counts into pixels. */
 {
 unsigned size = winEnd - winStart;
 double countsPerPixel = size / (double) insideWidth;
 
 if (countsPerPixel <= 1.0)
-    countsToPixelsUp(counts, pre);
+    countsToPixelsUp(runs, pre);
 else
-    countsToPixelsDown(counts, pre);
+    countsToPixelsDown(runs, pre);
 }
 
 static void summaryToPixels(struct bbiSummaryElement *summary, struct preDrawContainer *pre)
@@ -5294,9 +5847,9 @@ if (tg->summary)
     summaryToPixels(tg->summary, pre);
 else
     {
-    unsigned *counts = countOverlaps(tg);
-    countsToPixels(counts, pre);
-    freez(&counts);
+    struct covRuns *runs = countOverlaps(tg);
+    countsToPixels(runs, pre);
+    covRunsFree(&runs);
     }
 
 tg->colorShades = shadesOfGray;
@@ -5371,6 +5924,58 @@ genericDrawNextItemStuff(tg, hvg, vis, item, scale, x2, x1, -1, y, tg->heightPer
                             doButtons);
 }
 
+boolean denseClickEnabled(struct track *tg)
+/* Should a dense row of this track get one clickable map box per item, instead
+ * of a single box that expands the track?  The hg.conf denseClick flag is a
+ * gate over the whole feature: while it is off, which is the default, no track
+ * gets this no matter what its trackDb says.  With the gate on, a track opts in
+ * with a denseClick trackDb setting. */
+{
+if (!cfgOptionBooleanDefault("denseClick", FALSE))
+    return FALSE;
+return trackDbSettingOn(tg->tdb, "denseClick");
+}
+
+static void denseMapItem(struct track *tg, struct hvGfx *hvg, struct slList *item,
+                         int xOff, int y, int width, double scale, char *pixelUsed)
+/* Put down a map box for one item of a dense row, so that a click on it reaches
+ * the item's details page instead of expanding the track.  A dense row can hold
+ * tens of thousands of items, so skip an item whose every pixel already belongs
+ * to an earlier item: that box would sit under the earlier one and could never
+ * be clicked.  This holds the row to at most one box per pixel. */
+{
+int s = tg->itemStart(tg, item);
+int e = tg->itemEnd(tg, item);
+int sClp = (s < winStart) ? winStart : s;
+int eClp = (e > winEnd)   ? winEnd   : e;
+int x1 = round((sClp - winStart)*scale) + xOff;
+int x2 = round((eClp - winStart)*scale) + xOff;
+if (x2 <= x1)
+    x2 = x1 + 1;
+int p1 = x1 - xOff;
+int p2 = x2 - xOff;
+if (p1 < 0)
+    p1 = 0;
+if (p2 > width)
+    p2 = width;
+if (p1 >= p2)
+    return;
+boolean anyFree = FALSE;
+int p;
+for (p = p1;  p < p2;  ++p)
+    {
+    if (!pixelUsed[p])
+        {
+        anyFree = TRUE;
+        pixelUsed[p] = TRUE;
+        }
+    }
+if (!anyFree)
+    return;
+tg->mapItem(tg, hvg, item, tg->itemName(tg, item), tg->mapItemName(tg, item),
+            s, e, x1, y, x2 - x1, tg->heightPer);
+}
+
 static void genericDrawItemsFullDense(struct track *tg, int seqStart, int seqEnd,
                                       struct hvGfx *hvg, int xOff, int yOff, int width,
                                       MgFont *font, Color color, enum trackVisibility vis)
@@ -5379,11 +5984,18 @@ static void genericDrawItemsFullDense(struct track *tg, int seqStart, int seqEnd
 double scale = scaleForWindow(width, seqStart, seqEnd);
 struct slList *item;
 int y = yOff;
+/* In dense the whole row is normally one box that expands the track.  With
+ * denseClick on, each item gets its own box instead; the whole-row box that
+ * doTrackMap puts down afterwards still covers the gaps between items. */
+boolean denseMaps = (vis == tvDense && width > 0 && !tg->mapsSelf && denseClickEnabled(tg));
+char *pixelUsed = (denseMaps ? needMem(width) : NULL);
 for (item = tg->items; item != NULL; item = item->next)
     {
     if (tg->itemColor != NULL)
         color = tg->itemColor(tg, item, hvg);
     tg->drawItemAt(tg, item, hvg, xOff, y, scale, font, color, vis);
+    if (denseMaps)
+        denseMapItem(tg, hvg, item, xOff, y, width, scale, pixelUsed);
     if (vis == tvFull)
         {
         /* The doMapItems will make the mapboxes normally but make */
@@ -5441,6 +6053,7 @@ for (item = tg->items; item != NULL; item = item->next)
         y += tg->lineHeight;
         }
     }
+freez(&pixelUsed);
 }
 
 void genericDrawItems(struct track *tg, int seqStart, int seqEnd,
@@ -5730,8 +6343,10 @@ void linkedFeaturesMapItem(struct track *tg, struct hvGfx *hvg, void *item,
  * Fallback to itemName if there is no mouseOver field.
  * (derived from genericMapItem) */
 {
-// Don't bother if we are imageV2 and a dense child.
-if (theImgBox && tg->limitedVis == tvDense && tdbIsCompositeChild(tg->tdb))
+// Don't bother if we are imageV2 and a dense child, unless denseClick is on for
+// this track, in which case the dense row is meant to be clickable per item.
+if (theImgBox && tg->limitedVis == tvDense && tdbIsCompositeChild(tg->tdb)
+&&  !denseClickEnabled(tg))
     return;
 
 struct linkedFeatures *lf = item;
@@ -6278,8 +6893,10 @@ static void bedPlusLabelMapItem(struct track *tg, struct hvGfx *hvg, void *item,
 				int x, int y, int width, int height)
 /* Special mouseover text from item->label. (derived from genericMapItem) */
 {
-// Don't bother if we are imageV2 and a dense child.
-if(!theImgBox || tg->limitedVis != tvDense || !tdbIsCompositeChild(tg->tdb))
+// Don't bother if we are imageV2 and a dense child, unless denseClick is on for
+// this track, in which case the dense row is meant to be clickable per item.
+if(!theImgBox || tg->limitedVis != tvDense || !tdbIsCompositeChild(tg->tdb)
+|| denseClickEnabled(tg))
     {
     struct bedPlusLabel *bpl = item;;
     char *mouseOverText = isEmpty(bpl->label) ? bpl->bed.name : bpl->label;
@@ -6508,7 +7125,7 @@ struct linkedFeatures *lf = item;
 char *full = lf->name;
 static char abbrev[32];
 
-strncpy(abbrev, full, sizeof(abbrev));
+safencpy(abbrev, sizeof(abbrev), full, sizeof(abbrev)-1);
 abbr(abbrev, "00000");
 abbr(abbrev, "0000");
 abbr(abbrev, "000");
@@ -8249,6 +8866,9 @@ else
 	lf->extra = cloneString(lf->name);
 }
 
+static struct hash *refSeqStatusHashLoad(struct track *tg);
+/* Build a name->refSeqStatus hash for tg's items (defined below). */
+
 void loadNcbiRefSeq(struct track *tg)
 /* Load up RefSeq known genes. */
 {
@@ -8257,6 +8877,8 @@ loadGenePredWithName2(tg);
 if (vis != tvDense)
     lookupRefNames(tg);
 vis = limitVisibility(tg);
+if (vis != tvHide)
+    tg->customPt = refSeqStatusHashLoad(tg);  // so refGeneColor does no draw-time SQL
 }
 
 void loadRefGene(struct track *tg)
@@ -8269,6 +8891,8 @@ if (vis != tvDense)
     lookupRefNames(tg);
     }
 vis = limitVisibility(tg);
+if (vis != tvHide)
+    tg->customPt = refSeqStatusHashLoad(tg);  // so refGeneColor does no draw-time SQL
 }
 
 /* A spectrum from blue to red signifying the percentage of methylation */
@@ -8397,38 +9021,78 @@ tg->ixAltColor = col;
 return(col);
 }
 
-Color refGeneColorByStatus(struct track *tg, char *name, struct hvGfx *hvg)
+static struct hash *refSeqStatusHashLoad(struct track *tg)
+/* Build (at load time) a name->refSeqStatus hash for this track's items, so that
+ * refGeneColorByStatus can shade items at draw time without asking the database
+ * once per item.  One batched query instead of one query per drawn gene.
+ * Returns NULL when no status table applies, in which case
+ * refGeneColorByStatus colors everything normally, exactly as an empty query
+ * result did before.  Call it after limitVisibility() and only for a track that
+ * will actually draw: a track limitVisibility hides needs no colors, and it is
+ * the tracks with the most items -- the ones it hides -- whose query is
+ * largest. */
+{
+if (tg->items == NULL)
+    return NULL;
+char *liftDb = trackDbSetting(tg->tdb, "quickLiftDb");
+char *db = (liftDb == NULL) ? database : liftDb;
+boolean isNcbi = startsWith("ncbiRefSeq", trackHubSkipHubName(tg->table));
+char *table = isNcbi ? "ncbiRefSeqLink" : refSeqStatusTable;
+char *keyCol = isNcbi ? "id" : "mrnaAcc";
+/* refSeqStatusTable is qualified with its database (usually hgFixed.refSeqStatus),
+ * so the existence test has to go through a connection like the old draw-time code
+ * did.  hTableExists() looks a name up in db's own list of tables and would answer
+ * FALSE for any name carrying a database prefix, which would quietly drop the
+ * shading for every non-NCBI RefSeq track. */
+struct sqlConnection *conn = hAllocConn(db);
+if (!sqlTableExists(conn, table))
+    {
+    hFreeConn(&conn);
+    return NULL;
+    }
+struct hash *hash = hashNew(0);
+struct dyString *query = sqlDyStringCreate("select %s, status from %s where %s in (",
+                                           keyCol, table, keyCol);
+struct linkedFeatures *lf;
+boolean first = TRUE;
+for (lf = tg->items; lf != NULL; lf = lf->next)
+    {
+    if (!first)
+        sqlDyStringPrintf(query, ",");
+    sqlDyStringPrintf(query, "'%s'", lf->name);
+    first = FALSE;
+    }
+sqlDyStringPrintf(query, ")");
+struct sqlResult *sr = sqlGetResult(conn, query->string);
+char **row;
+while ((row = sqlNextRow(sr)) != NULL)
+    hashAdd(hash, row[0], cloneString(row[1]));
+sqlFreeResult(&sr);
+hFreeConn(&conn);
+dyStringFree(&query);
+return hash;
+}
+
+static Color refGeneColorByStatus(struct track *tg, char *name, struct hvGfx *hvg)
 /* Get refseq gene color from refSeqStatus.
  * Reviewed, Validated -> normal, Provisional -> lighter,
  * Predicted, Inferred(other) -> lightest
- * If no refSeqStatus, color it normally.
- */
+ * If no refSeqStatus, color it normally.  Reads the status from the hash that
+ * refSeqStatusHashLoad built at load time and left on tg->customPt, so this
+ * does no database work while the image is being drawn. */
 {
 int col = tg->ixColor;
 struct rgbColor *normal = &(tg->color);
 struct rgbColor lighter, lightest;
-char *liftDb = cloneString(trackDbSetting(tg->tdb, "quickLiftDb"));
-char *db = (liftDb == NULL) ? database : liftDb;
-struct sqlConnection *conn = hAllocConn(db);
-struct sqlResult *sr;
-char **row;
-char query[256];
-
-if (startsWith("ncbiRefSeq", trackHubSkipHubName(tg->table)))
+struct hash *statusHash = tg->customPt;
+char *status = (statusHash != NULL) ? hashFindVal(statusHash, name) : NULL;
+if (status != NULL)
     {
-    sqlSafef(query, sizeof query, "select status from ncbiRefSeqLink where id = '%s'", name);
-    }
-else
-    sqlSafef(query, sizeof query, "select status from %s where mrnaAcc = '%s'",
-        refSeqStatusTable, name);
-sr = sqlGetResult(conn, query);
-if ((row = sqlNextRow(sr)) != NULL)
-    {
-    if (startsWith("Reviewed", row[0]) || startsWith("Validated", row[0]))
+    if (startsWith("Reviewed", status) || startsWith("Validated", status))
         {
         /* Use the usual color */
         }
-    else if (startsWith("Provisional", row[0]))
+    else if (startsWith("Provisional", status))
         {
         lighter.r = (6*normal->r + 4*255) / 10;
         lighter.g = (6*normal->g + 4*255) / 10;
@@ -8445,8 +9109,6 @@ if ((row = sqlNextRow(sr)) != NULL)
         col = hvGfxFindRgb(hvg, &lightest);
         }
     }
-sqlFreeResult(&sr);
-hFreeConn(&conn);
 return col;
 }
 
@@ -8462,16 +9124,11 @@ if (lf->itemAttr != NULL)
 /* If refSeqStatus is available, use it to determine the color.
  * Reviewed, Validated -> normal, Provisional -> lighter,
  * Predicted, Inferred(other) -> lightest
- * If no refSeqStatus, color it normally.
- */
-char *liftDb = cloneString(trackDbSetting(tg->tdb, "quickLiftDb"));
-char *db = (liftDb == NULL) ? database : liftDb;
-struct sqlConnection *conn = hAllocConn(db);
-Color color = tg->ixColor;
-if (sqlTableExists(conn,  refSeqStatusTable) || hTableExists(db,  "ncbiRefSeqLink"))
-    color = refGeneColorByStatus(tg, lf->name, hvg);
-hFreeConn(&conn);
-return color;
+ * If no refSeqStatus, color it normally.  The status comes from the hash
+ * refSeqStatusHashLoad built at load time, so this asks the database nothing.
+ * When no status table applied the hash is NULL and every item gets the
+ * normal color. */
+return refGeneColorByStatus(tg, lf->name, hvg);
 }
 
 void ncbiRefSeqMethods(struct track *tg)
@@ -8666,7 +9323,7 @@ struct linkedFeatures *lf = item;
 char *full = lf->name;
 static char abbrev[SMALLBUF];
 
-strncpy(abbrev, full, sizeof(abbrev));
+safencpy(abbrev, sizeof(abbrev), full, sizeof(abbrev)-1);
 abbr(abbrev, "Em:");
 abbr(abbrev, ".C22");
 //abbr(abbrev, ".mRNA");
@@ -11789,6 +12446,12 @@ boolean overrideComposite = (NULL != cartOptionalString(cart, subtrack->track));
 if (subtrack->limitedVisSet && subtrack->limitedVis == tvHide)
     return FALSE;
 bool enabledInTdb = subtrackEnabledInTdb(subtrack);
+// A faceted composite's children keep a display mode of their own, so having one says
+// nothing about whether the facet table selected them - leave that to the checkbox.
+// NOTE: subtrack->tdb can be the composite's tdb, hence getSubtrackTdb() rather than
+// subtrack->tdb->parent.
+if (overrideComposite && tdbIsFacetedComposite(getSubtrackTdb(subtrack)->parent))
+    overrideComposite = FALSE;
 char option[4096];
 safef(option, sizeof(option), "%s_sel", subtrack->track);
 boolean enabled = cartUsualBoolean(cart, option, enabledInTdb);
@@ -15011,7 +15674,7 @@ if (sameWord(type, "bed"))
     {
     char *trackName = trackHubSkipHubName(track->track);
 
-    complexBedMethods(track, tdb, FALSE, wordCount, words);
+    complexBedMethods(track, tdb, wordCount, words);
     /* bed.h includes genePred.h so should be able to use these trackDb
        settings. */
     if (trackDbSetting(track->tdb, GENEPRED_CLASS_TBL) !=NULL)
@@ -15033,7 +15696,7 @@ else if (sameWord(type, "bedLogR"))
     {
     wordCount++;
     words[1] = "9";
-    complexBedMethods(track, tdb, FALSE, wordCount, words);
+    complexBedMethods(track, tdb, wordCount, words);
     //track->bedSize = 10;
     }
     */
@@ -15041,7 +15704,7 @@ else if (sameWord(type, "bedTabix"))
     {
     knetUdcInstall();
     tdb->canPack = TRUE;
-    complexBedMethods(track, tdb, FALSE, wordCount, words);
+    complexBedMethods(track, tdb, wordCount, words);
     }
 else if (sameWord(type, "longTabix"))
     {
@@ -15049,7 +15712,7 @@ else if (sameWord(type, "longTabix"))
     words[0] = type;
     words[1] = "5";
     knetUdcInstall();
-    complexBedMethods(track, tdb, FALSE, 2, words);
+    complexBedMethods(track, tdb, 2, words);
     longRangeMethods(track, tdb);
     }
 else if (sameWord(type, "mathWig"))
@@ -15207,6 +15870,11 @@ else if (sameWord(type, "chain"))
     }
 else if (sameWord(type, "netAlign"))
     {
+    netMethods(track);
+    }
+else if (sameWord(type, "bigNet"))
+    {
+    track->isBigBed = TRUE;
     netMethods(track);
     }
 else if (sameWord(type, "maf"))
@@ -15429,7 +16097,8 @@ static bool isSubtrackVisibleTdb(struct cart *cart, struct trackDb *tdb)
 /* Has this subtrack not been deselected in hgTrackUi or declared with
  *  * "subTrack ... off"?  -- assumes composite track is visible. */
 {
-boolean overrideComposite = (NULL != cartOptionalString(cart, tdb->track));
+boolean overrideComposite = (NULL != cartOptionalString(cart, tdb->track))
+                            && !tdbIsFacetedComposite(tdb->parent);
 bool enabledInTdb = TRUE; // assume that this track is enabled in tdb
 char option[1024];
 safef(option, sizeof(option), "%s_sel", tdb->track);
@@ -15523,7 +16192,7 @@ unsigned char altR = track->altColor.r, altG = track->altColor.g,
                             altB = track->altColor.b, altA = track->altColor.a;
 unsigned char deltaR = 0, deltaG = 0, deltaB = 0, deltaA = 0;
 
-struct slRef *tdbRef, *tdbRefList = trackDbListGetRefsToDescendantLeaves(tdb->subtracks);
+struct slRef *tdbRef, *tdbRefList = trackDbListGetRefsToDescendantLeavesOrContainers(tdb->subtracks);
 
 struct trackDb *subTdb;
 int subCount = slCount(tdbRefList);
@@ -15571,9 +16240,20 @@ for (tdbRef = tdbRefList; tdbRef != NULL; tdbRef = tdbRef->next)
     subTdb = tdbRef->val;
 
     subtrack = trackFromTrackDb(subTdb);
-    boolean avoidHandler = trackDbSettingOn(tdb, "avoidHandler");
-    if (!avoidHandler && ( handler = lookupTrackHandlerClosestToHome(subTdb)) != NULL)
-        handler(subtrack);
+    boolean isNestedContainer = (trackDbLocalSetting(subTdb, "container") != NULL);
+    if (isNestedContainer)
+        {
+        /* A container (e.g. multiWig) nested inside the composite.  Build its children
+         * and install the container's aggregate methods (multiWigContainerMethods) so it
+         * draws as a single aggregated row rather than one row per child. */
+        makeContainerTrack(subtrack, subTdb);
+        }
+    else
+        {
+        boolean avoidHandler = trackDbSettingOn(tdb, "avoidHandler");
+        if (!avoidHandler && ( handler = lookupTrackHandlerClosestToHome(subTdb)) != NULL)
+            handler(subtrack);
+        }
 
     /* Add subtrack settings (table, colors, labels, vis & pri).  This is only
      * needed in the "not noInherit" case that hopefully will go away soon. */
@@ -15583,6 +16263,14 @@ for (tdbRef = tdbRefList; tdbRef != NULL; tdbRef = tdbRef->next)
     subtrack->longLabel = subTdb->longLabel;
     subtrack->priority = subTdb->priority;
     subtrack->parent = track;
+
+    if (isNestedContainer)
+        {
+        /* The container's wig children carry their own colors; skip the composite
+         * color gradient for the container track itself. */
+        slAddHead(&track->subtracks, subtrack);
+        continue;
+        }
 
     /* Add color gradient. */
     if (finalR || finalG || finalB)
@@ -16165,5 +16853,57 @@ for(name = nameList; name != NULL; name = name->next)
     }
 slFreeList(&nameList);
 hgFindMatchesShowHighlight = TRUE;  // default to showing the highlight searched item label.
+}
+
+void createItemColorHash()
+/* Read the itemColors cart variable into a hash of per-item colors keyed by "track\titemName",
+ * keeping only records for the current database. The cart format is db#track#mode#itemName#hexColor
+ * records joined by '|', where mode is "item" (recolor the glyph) or "bg" (background highlight).
+ * The color is the last '#' field so that item names containing '#' are tolerated; item names
+ * containing '|' are not supported. The cart value is user-editable, so malformed records (bad
+ * color, missing fields) are skipped rather than aborting the image. */
+{
+char *itemColors = cartOptionalString(cart, "itemColors");
+if (isEmpty(itemColors))
+    return;
+struct slName *recordList = slNameListFromString(itemColors, '|'), *record;
+struct dyString *colorSpec = dyStringNew(0);
+struct dyString *keyStr = dyStringNew(0);
+for (record = recordList; record != NULL; record = record->next)
+    {
+    char *p = record->name;
+    char *db = cloneNextWordByDelimiter(&p, '#');
+    char *track = cloneNextWordByDelimiter(&p, '#');
+    char *mode = cloneNextWordByDelimiter(&p, '#');
+    char *lastHash = (p != NULL) ? strrchr(p, '#') : NULL;
+    if (!isEmpty(db) && !isEmpty(track) && !isEmpty(mode) && lastHash != NULL
+            && sameString(db, database))
+        {
+        *lastHash = '\0';
+        char *itemName = p;
+        char *hex = lastHash + 1;
+        dyStringPrintf(colorSpec, "#%s", hex);
+        unsigned rgb;
+        if (!isEmpty(itemName) && htmlColorForCode(dyStringContents(colorSpec), &rgb))
+            {
+            struct itemColorSpec *spec;
+            AllocVar(spec);
+            spec->color = bedColorToGfxColor(rgb);
+            spec->wholeItem = sameString(mode, "item");
+            dyStringPrintf(keyStr, "%s\t%s", track, itemName);
+            if (itemColorHash == NULL)
+                itemColorHash = newHash(0);
+            hashAdd(itemColorHash, dyStringContents(keyStr), spec);
+            }
+        dyStringClear(keyStr);
+        dyStringClear(colorSpec);
+        }
+    freeMem(db);
+    freeMem(track);
+    freeMem(mode);
+    }
+dyStringFree(&keyStr);
+dyStringFree(&colorSpec);
+slFreeList(&recordList);
 }
 

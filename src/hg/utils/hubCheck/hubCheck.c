@@ -605,7 +605,7 @@ else
         strippedMessage = cloneString(message);
         while (lastChar(strippedMessage) == '\n')
             trimLastChar(strippedMessage);
-        numMessages = chopByChar(strippedMessage, '\n', splitMessages, sizeof(splitMessages));
+        numMessages = chopByChar(strippedMessage, '\n', splitMessages, ArraySize(splitMessages));
         }
 
     for (; i < numMessages; i++)
@@ -784,16 +784,6 @@ if (tdbIsSuper(tdb) || tdbIsComposite(tdb) || tdbIsCompositeView(tdb) || tdbIsCo
             "Remove 'bigDataUrl' from this stanza, or remove the parent declaration if this is "
             "a data track.", tdb->track);
         }
-
-    // multiWigs cannot be the child of a composite
-    if (tdbIsContainer(tdb) &&
-            (tdb->parent != NULL &&
-            (tdbIsComposite(tdb->parent) || tdbIsCompositeView(tdb->parent))))
-        {
-        errAbort("Track \"%s\" is declared container multiWig and has parent \"%s\"."
-            " Container multiWig tracks cannot be children of composites or views",
-            tdb->track, tdb->parent->track);
-        }
     }
 else if (tdb->subtracks != NULL)
     {
@@ -803,9 +793,18 @@ else if (tdb->subtracks != NULL)
 }
 
 static char *VALID_TRACK_TYPES[] = {
-    "bam", "bigBarChart", "bigBed", "bigChain", "bigGenePred", "bigInteract",
+    "bam", "bigBarChart", "bigBed", "bigChain", "bigGenePred", "bigInteract", "bigNet",
     "bigLolly", "bigMaf", "bigMethyl", "bigNarrowPeak", "bigPsl", "bigRmsk",
     "bigWig", "halSnake", "hic", "longTabix", "vcfPhasedTrio", "vcfTabix", NULL};
+
+static bool typeIsTurnedOff(char *trackType)
+/* Some types in VALID_TRACK_TYPES are gated in hg.conf.  Report the ones this
+ * machine has turned off, so hubCheck agrees with what the browser will load. */
+{
+if (sameString(trackType, "bigNet"))
+    return !trackHubBigNetEnabled();
+return FALSE;
+}
 
 static bool isValidTrackType(char *trackType)
 /* check that a track type is valid */
@@ -814,7 +813,7 @@ static bool isValidTrackType(char *trackType)
 // There is also code in trackHub.c that checks track names.
 // both places must be changed or common code created.
 for (int i = 0; VALID_TRACK_TYPES[i] != NULL; i++)
-    if (sameString(trackType, VALID_TRACK_TYPES[i]))
+    if (sameString(trackType, VALID_TRACK_TYPES[i]) && !typeIsTurnedOff(trackType))
         return TRUE;
 return FALSE;
 }
@@ -825,7 +824,9 @@ static char *getValidTrackTypesMsg()
 struct dyString *msg = dyStringNew(256);
 for (int i = 0; VALID_TRACK_TYPES[i] != NULL; i++)
     {
-    if (i > 0)
+    if (typeIsTurnedOff(VALID_TRACK_TYPES[i]))
+        continue;
+    if (msg->stringSize > 0)
         dyStringAppend(msg, ", ");
     dyStringAppend(msg, VALID_TRACK_TYPES[i]);
     }
@@ -840,7 +841,7 @@ if (errCatchStart(errCatch))
     {
     char *type = trackDbRequiredSetting(tdb, "type");
     char *splitType[4];
-    int numWords = chopByWhite(cloneString(type), splitType, sizeof(splitType));
+    int numWords = chopByWhite(cloneString(type), splitType, ArraySize(splitType));
     char *trackType = splitType[0];
     boolean isParentTrack = (tdbIsComposite(tdb) || tdbIsCompositeView(tdb) || tdbIsContainer(tdb));
     if (!isParentTrack && !isValidTrackType(trackType))
@@ -947,6 +948,59 @@ for(i = 0; i < 3; i++)
     }
 }
 
+void checkOrphanedRangeFilters(struct trackDb *tdb)
+/* A numeric filter is only DISCOVERED from a filter.<field> (or <field>Filter)
+ * setting -- see FILTER_NUMBER_WILDCARD and tdbGetTrackNumFilters(). A
+ * filterByRange.<field> or filterLimits.<field> with no matching filter.<field>
+ * is silently ignored and its control never appears, which is an easy and
+ * confusing mistake to make. Warn so the hub developer sees why a filter they
+ * configured did not show up. Only the settings on this stanza are inspected, so
+ * an inherited setting is reported once, on the stanza that declares it. */
+{
+struct slName *rangeSettings = slCat(trackDbLocalSettingsWildMatch(tdb, "filterByRange.*"),
+                                     trackDbLocalSettingsWildMatch(tdb, "filterLimits.*"));
+struct hash *seen = hashNew(0);
+struct slName *s;
+for (s = rangeSettings; s != NULL; s = s->next)
+    {
+    char *field = strchr(s->name, '.');
+    if (field == NULL)
+        continue;
+    field++; // skip past the '.'
+    if (hashLookup(seen, field) != NULL)
+        continue;
+    hashAdd(seen, field, NULL);
+    char setting[512];
+    safef(setting, sizeof setting, "filter.%s", field);
+    if (trackDbSettingClosestToHome(tdb, setting) != NULL)
+        continue;
+    safef(setting, sizeof setting, "%sFilter", field);
+    if (trackDbSettingClosestToHome(tdb, setting) != NULL)
+        continue;
+    warn("track \"%s\" has a filterByRange/filterLimits setting for field '%s' "
+         "but no 'filter.%s' (the default range), so this filter is not shown. "
+         "Add 'filter.%s min:max' to enable it.",
+         trackHubSkipHubName(tdb->track), field, field, field);
+    }
+hashFree(&seen);
+slFreeList(&rangeSettings);
+}
+
+static void hubCheckDescriptionRemovals(struct trackHubGenome *genome, struct trackDb *tdb)
+/* Tell the hub author about the parts of a description page that the Browser will not
+ * print, so that they hear it from us instead of from a page that comes out wrong. */
+{
+struct slName *removed = trackHubDescriptionRemovals(genome->trackDbFile, tdb);
+struct slName *el = removed;
+int count = 0;
+for (;  el != NULL && count < 10;  el = el->next, ++count)
+    warn("warning: on the '%s' description page the Browser %s", tdb->track, el->name);
+if (el != NULL)
+    warn("warning: the '%s' description page has %d more parts the Browser will not print",
+         tdb->track, slCount(el));
+slFreeList(&removed);
+}
+
 int hubCheckTrack(struct trackHub *hub, struct trackHubGenome *genome, struct trackDb *tdb,
                         struct trackHubCheckOptions *options, struct dyString *errors)
 /* Check track settings and optionally, files */
@@ -1031,12 +1085,16 @@ if (errCatchStart(errCatch))
 
     checkViewLimitsSettings(tdb);
 
+    checkOrphanedRangeFilters(tdb);
+
     if (!sameString(tdb->track, "cytoBandIdeo"))
         {
         trackHubAddDescription(genome->trackDbFile, tdb);
         if (!tdb->html)
             warn("warning: missing description page for track. Add 'html %s.html' line to the '%s' track stanza. ",
                  tdb->track, tdb->track);
+        else
+            hubCheckDescriptionRemovals(genome, tdb);
         }
 
     if (!trackIsContainer && sameString(trackDbRequiredSetting(tdb, "type"), "bigWig"))
@@ -1202,7 +1260,10 @@ if (errCatchStart(errCatch))
     boolean foundFirstGenome = FALSE;
     tdbList = trackHubTracksForGenome(hub, genome, NULL, &foundFirstGenome);
     tdbList = trackDbLinkUpGenerations(tdbList);
-    tdbList = trackDbPolishAfterLinkup(tdbList, genome->name);
+    /* Deliberately not trackDbPolishAfterLinkup(): its prune step silently drops any
+     * track whose data file cannot be opened, which is the single most important thing
+     * for hubCheck to complain about. */
+    tdbList = trackDbPolishAfterLinkupKeepAll(tdbList);
     checkTrackNamesForDots(tdbList);
     trackHubPolishTrackNames(hub, tdbList);
     }

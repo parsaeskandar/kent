@@ -795,11 +795,10 @@ void retroShowCdnaAli(char *mappedId)
 {
 char *track = cartString(cart, "aliTable");
 struct trackDb *tdb = hashMustFindVal(trackHash, track);
-char *table = cartString(cart, "table");
 int start = cartInt(cart, "o");
 struct sqlConnection *conn = hAllocConn(database);
 struct sqlConnection *defDbConn = NULL;
-struct mappingInfo *mi = mappingInfoNew(conn, table, mappedId);
+struct mappingInfo *mi = mappingInfoNew(conn, track, mappedId);
 struct genbankCds cds = getCds(conn, mi);
 struct psl *psl;
 struct dnaSeq *rnaSeq = NULL;
@@ -812,7 +811,7 @@ char acc[512];
 
 char title[1024];
 safef(title, sizeof title, "%s vs Genomic [%s]", mi->seqId, track);
-htmlFramesetStart(title);
+alnModernStart(title);
 
 /* Look up alignment and sequence in database.  Always get sequence
  * from defaultDb */

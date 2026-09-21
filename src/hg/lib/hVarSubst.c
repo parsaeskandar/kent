@@ -10,6 +10,8 @@
 #include "hdb.h"
 #include "hui.h"
 #include "sqlNum.h"
+#include "hubConnect.h"
+#include "htmshell.h"
 #include "hVarSubst.h"
 
 static boolean isVarEnd(boolean inBraces, char c)
@@ -42,6 +44,30 @@ if (nameIdx == varNameSize)
 varName[nameIdx] = '\0';
 if (inBraces)
     p++;
+return p;
+}
+
+static char *parseVarNameMaybe(char *varStart, char *varName, int varNameSize)
+/* Like parseVarName, but return NULL instead of aborting when what follows the `$' is not
+ * a well formed variable reference.  Used in html mode, where a stray dollar sign in a
+ * description page has to survive untouched. */
+{
+char *p = varStart+1;
+boolean inBraces = (*p == '{');
+if (inBraces)
+    p++;
+int nameIdx = 0;
+while ((nameIdx < varNameSize-1) && (*p != '\0') && !isVarEnd(inBraces, *p))
+    varName[nameIdx++] = *p++;
+if ((nameIdx == 0) || (nameIdx == varNameSize-1))
+    return NULL;
+varName[nameIdx] = '\0';
+if (inBraces)
+    {
+    if (*p != '}')
+        return NULL;
+    p++;
+    }
 return p;
 }
 
@@ -171,8 +197,7 @@ static boolean isDatabaseVar(char *varBase)
 return (strcasecmp(varBase, "organism") == 0)
     || (strcasecmp(varBase, "date") == 0)
     || (strcasecmp(varBase, "linkToGatewayPage") == 0)
-    || (strcasecmp(varBase, "db") == 0)
-    || (strcasecmp(varBase, "hgsid") == 0);
+    || (strcasecmp(varBase, "db") == 0);
 }
 
 static char *valOrDb(char *val, char *database)
@@ -183,8 +208,7 @@ if (val == NULL)
 return val;
 }
 
-static void substDatabaseVar(char *database, struct cart *cart, char *varBase,
-                             struct dyString *dest)
+static void substDatabaseVar(char *database, char *varBase, struct dyString *dest)
 /* substitute a variable resolved from the database name.
  * Specify the base name, excluding the o_ prefix. If database
  * can be looked up, just substitute the database name. */
@@ -223,8 +247,47 @@ else if (sameString(varBase, "date"))
     }
 else if (sameString(varBase, "db"))
     dyStringAppend(dest, database);
-else if (sameString(varBase, "hgsid") && cart != NULL)
-    dyStringAppend(dest, cartSessionId(cart));
+}
+
+static char *parentTrackName(struct trackDb *tdb)
+/* Name of the container holding tdb, in the form hgTrackUi's g= parameter needs: with the
+ * hub_<id>_ prefix when this is a hub track, since that is what trackHubAddNamePrefix put
+ * into tdb->track.  Views are skipped, a view has no description page of its own.  Returns
+ * the track's own name when it is not in a container. */
+{
+struct trackDb *parent = tdb->parent;
+char *viewName = NULL;
+while ((parent != NULL) && tdbIsView(parent, &viewName))
+    parent = parent->parent;
+return (parent != NULL) ? parent->track : tdb->track;
+}
+
+/* The variables a hub's description page may use.  Deliberately a short explicit list and
+ * not every trackDb setting the way native trackDb allows: a hub page written before this
+ * substitution existed can easily contain something like "$track" inside a shell example,
+ * and silently rewriting that would be worse than not substituting at all.
+ *
+ * There is no session id here, and none anywhere else in this file either.  A description
+ * page is often written by someone else and is only lightly sanitized (htmlSanitize allows
+ * an <img> with an http src), so a page containing <img src="https://example.com/px?s=...">
+ * could hand the reader's session id to that page's author, and a session id on its own is
+ * enough to read and write that cart.  A page does not need one: the links in a description
+ * page are given their session id in the browser, by addHgsidToLinks() in utils.js, which
+ * does it only for links that stay on this server. */
+static char *hubHtmlVars[] = {"db", "track", "parentTrack",
+                              "organism", "Organism", "ORGANISM", "date", "downloadsServer"};
+
+static boolean isHtmlVar(struct trackDb *tdb, char *varName, char **htmlVars, int htmlVarCount)
+/* Is varName one of the variables this description page may use?  Asked only in html mode,
+ * to tell a variable reference from a dollar sign that happens to be followed by a word. */
+{
+if (tdb == NULL)
+    return FALSE;
+int i;
+for (i = 0;  i < htmlVarCount;  i++)
+    if (sameString(varName, htmlVars[i]))
+        return TRUE;
+return FALSE;
 }
 
 static void substTrackDbVar(char *desc, struct trackDb *tdb, char *database,
@@ -239,33 +302,38 @@ else if (sameString(varName, "downloadsServer"))
     dyStringAppend(dest, hDownloadsServer());
 else if (sameString(varName, "track"))
     dyStringAppend(dest, tdb->track);
+else if (sameString(varName, "parentTrack"))
+    dyStringAppend(dest, parentTrackName(tdb));
 else
     dyStringAppend(dest, lookupTrackDbSubVar(desc, tdb, varName, varName));
 }
 
-static void substVar(char *desc, struct cart *cart, struct trackDb *tdb, char *database,
-                     char *varName, struct dyString *dest)
+static void substVar(char *desc, struct trackDb *tdb, char *database, char *varName,
+                     struct dyString *dest)
 /* look up varName and insert value in output string.  Error if variable
  * can't be found */
 {
 if (isDatabaseVar(varName))
-    substDatabaseVar(database, cart, varName, dest);
+    substDatabaseVar(database, varName, dest);
 else if (tdb == NULL)
     errAbort("invalid variable \"%s\" to substitute in %s",
              varName, desc);
 else if (startsWith("o_", varName) && isDatabaseVar(varName+2))
-    substDatabaseVar(lookupOtherDb(desc, tdb, varName), cart, varName+2, dest);
+    substDatabaseVar(lookupOtherDb(desc, tdb, varName), varName+2, dest);
 else
     substTrackDbVar(desc, tdb, database, varName, dest);
 }
 
-static char *hVarSubstExt(char *desc, struct cart *cart, struct trackDb *tdb, char *database,
-                          char *src)
+static char *hVarSubstExt(char *desc, struct trackDb *tdb, char *database,
+                          char *src, char **htmlVars, int htmlVarCount)
 /* Parse a string and substitute variable references.  Return NULL if
  * no variable references were found.  Error on missing variables (except
  * $matrix).  desc is a brief description to print on an error to help with
  * debugging. tdb maybe NULL to only do substitutions based on database
- * and organism.  cart may be NULL. See trackDb/README for more information.*/
+ * and organism. See trackDb/README for more information.
+ * When htmlVars is given nothing is an error and only those variables are recognized:
+ * every other `$' is copied through unchanged.  Pass NULL for the strict behaviour that
+ * shortLabel, longLabel and native trackDb html need. */
 {
 struct dyString *dest = NULL;
 char *start = src;  // start of current static string in src
@@ -283,11 +351,38 @@ while ((next = strchr(next, '$')) != NULL)
         dyStringAppendC(dest, '$');
         start = next = next + 2;
         }
+    else if (htmlVars != NULL)
+        {
+        // variable reference, or just a dollar sign in the text
+        char *after = parseVarNameMaybe(next, varName, sizeof(varName));
+        if ((after != NULL) && isHtmlVar(tdb, varName, htmlVars, htmlVarCount))
+            {
+            /* Escape the value before it goes into the page.  A hub's description html was
+             * sanitized once, when the hub was read (trackHub.c, htmlSanitize); this pass
+             * runs at render time, long after, so anything it inserted raw would be markup
+             * that nothing had ever looked at.  Two of the variables are exactly that:
+             * $organism and $date come straight out of a hub's genomes.txt with no
+             * validation.  None of the variables in either list is meant to carry markup,
+             * so escaping them all costs nothing and leaves no gap to keep track of. */
+            struct dyString *raw = dyStringNew(64);
+            substVar(desc, tdb, database, varName, raw);
+            char *escaped = htmlEncode(raw->string);
+            dyStringAppend(dest, escaped);
+            freeMem(escaped);
+            dyStringFree(&raw);
+            start = next = after;
+            }
+        else
+            {
+            dyStringAppendC(dest, '$');
+            start = next = next + 1;
+            }
+        }
     else
         {
         // variable reference
         start = next = parseVarName(desc, next, varName, sizeof(varName));
-        substVar(desc, cart, tdb, database, varName, dest);
+        substVar(desc, tdb, database, varName, dest);
         }
     }
 if (dest != NULL)
@@ -306,7 +401,7 @@ char *hVarSubst(char *desc, struct trackDb *tdb, char *database, char *src)
  * debugging. tdb maybe NULL to only do substitutions based on database
  * and organism. See trackDb/README for more information.*/
 {
-return hVarSubstExt(desc, NULL, tdb, database, src);
+return hVarSubstExt(desc, tdb, database, src, NULL, 0);
 }
 
 void hVarSubstInVar(char *desc, struct trackDb *tdb, char *database, char **varPtr)
@@ -314,7 +409,7 @@ void hVarSubstInVar(char *desc, struct trackDb *tdb, char *database, char **varP
  * occur, freeing the old memory if necessary.  See hVarSubst for details.
  */
 {
-char *dest = hVarSubstExt(desc, NULL, tdb, database, *varPtr);
+char *dest = hVarSubstExt(desc, tdb, database, *varPtr, NULL, 0);
 if (dest != NULL)
     {
     freez(varPtr);
@@ -330,14 +425,31 @@ hVarSubstInVar(tdb->track, tdb, database, &tdb->longLabel);
 hVarSubstInVar(tdb->track, tdb, database, &tdb->html);
 }
 
-void hVarSubstWithCart(char *desc, struct cart *cart, struct trackDb *tdb, char *database,
-                       char **varPtr)
-/* Like hVarSubstInVar, but if cart is non-NULL, $hgsid will be substituted. */
+void hVarSubstTrackDbHtml(struct trackDb *tdb, char *database)
+/* Substitute variables in a hub track's description page, at render time, where $db,
+ * $track and $parentTrack resolve to the hub_<id>_ names the CGIs actually use.
+ *
+ * Only a hub page needs this.  A hub's html comes straight off the hub's web server and
+ * has never been through substitution; a native page was already done by hgTrackDb when it
+ * loaded trackDb.
+ *
+ * Nothing is an error, so a dollar sign in a description page that was not written with
+ * this in mind stays a dollar sign. */
 {
-char *dest = hVarSubstExt(desc, cart, tdb, database, *varPtr);
-if (dest != NULL)
-    {
-    freez(varPtr);
-    *varPtr = dest;
-    }
+if ((tdb == NULL) || isEmpty(tdb->html) || !isHubTrack(tdb->track))
+    return;
+char *dest = hVarSubstExt(tdb->track, tdb, database, tdb->html,
+                          hubHtmlVars, ArraySize(hubHtmlVars));
+/* Assign without freeing, and only when something actually changed.  hVarSubstExt allocates
+ * its buffer at the first `$' whether or not it substitutes anything, so dest is non-NULL for
+ * any page that merely contains a dollar sign.  tdb->html can point into the trackDb cache,
+ * which is localmem carved out of an mmap'd file (trackDbCache.c, and trackDbHubCache does
+ * the same for a hub): that pointer never came from malloc, and freeing it aborts the CGI.
+ * The mapping is MAP_PRIVATE, so storing a new pointer is fine.  The old string is left
+ * alone; it is either the cache's, which is not ours to free, or one string per request in
+ * a CGI that is about to exit. */
+if ((dest != NULL) && !sameString(dest, tdb->html))
+    tdb->html = dest;
+else
+    freeMem(dest);
 }

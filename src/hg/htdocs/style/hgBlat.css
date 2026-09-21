@@ -1,0 +1,159 @@
+/* hgBlat.css - BLAT-specific styling for the modern search form and results pages (hgBlat.js).
+ * The shared UCSC house-style components (design tokens on .gbApp, plus .gbPill, .gbCard, .gbStrip,
+ * .gbStat, .gbSection, .gbShareBox, .gbBanner and the .gbModal* dialog) live in gbModern.css, which
+ * is loaded alongside this file via webIncludeResourceFile.  This file holds only the pieces unique
+ * to BLAT: the results table, score/coverage bars, the detail panel, and the search-form layout.
+ * (The classic C-rendered pages emit their own small .blatBanner rule in hgBlat.c instead, since
+ * they do not load these stylesheets.) */
+
+/* Page actions sit in the gold main header (#sectTtl); no separate toolbar. */
+.blatHeadActions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.blatShareIcon { vertical-align:-2px; margin-right:6px; }
+.blatSeqBar { flex:1 1 100%; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.blatSeqText { flex:1 1 100%; min-height:150px; margin-top:10px; padding:8px; white-space:pre;
+    font-family:'Roboto Mono','Courier New',monospace; font-size:13px; color:var(--ink);
+    border:1px solid var(--btnLine); background:#fff; overflow:auto; }
+#blatTable { font-size:13px; width:100%; border-collapse:collapse; }
+/* Let the long text columns wrap so the table shrinks to fit smaller screens, while the fixed
+ * bar columns keep a min-width so they never compress into an overlap; when even that won't fit,
+ * #blatTable_wrapper scrolls horizontally. */
+#blatTable td.blatPos, #blatTable td.queryCol { white-space:normal; word-break:break-word; }
+#blatTable td.scoreCol { min-width:118px; }
+#blatTable td.covCol { min-width:120px; }
+#blatTable thead th { background:var(--headrow); border-bottom:1px solid var(--headrowLine);
+    font-size:12px; color:var(--navy); font-weight:700; padding:8px 12px; white-space:nowrap; }
+#blatTable tbody td { padding:8px 12px; border-bottom:1px solid var(--lineSoft); white-space:nowrap;
+    vertical-align:middle; }
+#blatTable tbody tr { cursor:pointer; }
+#blatTable tbody tr:nth-child(even) { background:var(--stripe); }
+#blatTable tbody tr:hover { background:var(--hover); }
+#blatTable tbody tr.blatSel { background:var(--sel); box-shadow:inset 3px 0 0 var(--navy); }
+/* Every column reads left-justified (Lou, #38086 note-37): a table that mixes right-aligned
+ * numbers, a centred strand and left-aligned text has no single edge for the eye to follow.  The
+ * numeric columns keep tabular figures so their digits still line up under each other. */
+#blatTable thead th, #blatTable tbody td { text-align:left; }
+#blatTable td.rankCol, #blatTable td.scoreCol, #blatTable td.identCol,
+#blatTable td.spanCol { font-variant-numeric:tabular-nums; }
+#blatTable td.rankCol { color:var(--faint); }
+#blatTable td.strandCol { color:var(--muted); }
+#blatTable td.actionsCol a { color:var(--accent); font-weight:700; }
+#blatTable td.actionsCol .blatActSep { color:var(--line); margin:0 10px; }
+/* "New tab" shown as the usual box-with-arrow icon (via a CSS background so it isn't repeated in
+ * every row's markup), sitting right after the position link with just a space between them. */
+#blatTable a.blatNewTab { display:inline-block; width:11px; height:11px;
+    margin-left:4px; vertical-align:-1px; background-repeat:no-repeat; background-position:center;
+    background-size:contain; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Cpath fill='%23003a72' d='M320 0c-17.7 0-32 14.3-32 32s14.3 32 32 32h82.7L201.4 265.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0L448 109.3V192c0 17.7 14.3 32 32 32s32-14.3 32-32V32c0-17.7-14.3-32-32-32H320zM80 32C35.8 32 0 67.8 0 112V432c0 44.2 35.8 80 80 80H400c44.2 0 80-35.8 80-80V320c0-17.7-14.3-32-32-32s-32 14.3-32 32V432c0 8.8-7.2 16-16 16H80c-8.8 0-16-7.2-16-16V112c0-8.8 7.2-16 16-16H192c17.7 0 32-14.3 32-32s-14.3-32-32-32H80z'/%3E%3C/svg%3E"); }
+#blatTable a.blatNewTab:hover { opacity:.65; }
+#blatTable a { color:var(--accent); text-decoration:none; }
+#blatTable a:hover { color:var(--accentHover); text-decoration:underline; }
+.blatRowHint { padding:11px 18px 2px; font-size:13px; color:var(--muted); }
+.blatLocus { max-width:280px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+/* The alt/fix explanation icon is the one thing on the row a user really should notice, so it is
+ * red rather than the faint grey it started as (Lou, #38086 note-37).  The selector carries
+ * #blatTable so it outranks the table's generic "#blatTable a" link colour, which would otherwise
+ * repaint the icon navy through currentColor. */
+#blatTable a.chrNote { color:#b1301f; text-decoration:none; margin-left:5px; }
+#blatTable a.chrNote:hover { color:var(--accentHover); }
+/* Score is a number followed by a bar.  The number gets a fixed width so that left-justifying the
+ * column does not leave the bars in a ragged column of their own. */
+.blatScoreWrap { display:flex; align-items:center; gap:9px; }
+.blatScoreVal { font-size:13px; font-weight:700; min-width:42px; font-variant-numeric:tabular-nums; }
+.blatScoreBar { flex:0 0 54px; height:8px; background:var(--headrow); border:1px solid var(--headrowLine); overflow:hidden; }
+.blatScoreBar > i { display:block; height:100%; background:var(--accent); }
+.blatIdPct { font-size:13px; font-weight:700; font-variant-numeric:tabular-nums; }
+.blatCov { position:relative; display:block; width:150px; max-width:100%; height:10px; background:var(--headrow); border:1px solid var(--headrowLine); }
+.blatCov > i { position:absolute; top:0; bottom:0; background:var(--accent); }
+#blatTable_filter { float:left; margin:0 0 10px; }
+#blatTable_filter input { width:300px; max-width:55vw; border:1px solid var(--btnLine);
+    border-radius:0; padding:5px 9px; font-size:14px; }
+#blatTable_wrapper { padding:6px 0 4px; overflow-x:auto; }
+.blatDetail { border-bottom:1px solid var(--line); background:var(--panel); padding:14px 18px 16px; }
+.blatDetail .dhead { display:flex; align-items:baseline; gap:10px; margin-bottom:12px; flex-wrap:wrap; }
+.blatDetail .dhead .lab { font-size:13px; color:var(--muted); }
+.blatSelectHint { font-size:14px; color:var(--ink); }
+.blatSelectHint a { color:var(--accent); }
+.blatSelectHint a:hover { color:var(--accentHover); }
+.blatDetail .dhead .loc { font-size:14px; font-weight:700; color:var(--ink); }
+.blatDetailCard { display:flex; gap:26px; flex-wrap:wrap; padding:14px 16px; background:var(--card);
+    border:1px solid var(--line); border-radius:0; }
+.blatTiles { display:grid; grid-template-columns:repeat(4,auto); gap:14px 26px; }
+.blatTile .k { font-size:13px; color:var(--muted); cursor:help; }
+.blatTile .v { font-size:14px; font-weight:700; color:var(--ink); }
+.blatDetailActions { display:flex; gap:8px; margin-top:14px; flex-wrap:wrap; }
+/* Detail panel layout (was inline styles in blatDetailSkeleton). */
+.blatDetailCol { display:flex; flex-direction:column; gap:16px; min-width:250px; }
+.blatAlignBox { flex:1; min-width:320px; border-left:1px solid var(--line); padding-left:24px;
+    display:flex; flex-direction:column; justify-content:center; }
+.blatAlignBox .gbPill { align-self:flex-start; }
+.blatAlignText { font-size:14px; color:var(--muted); line-height:1.55; margin:8px 0 14px; max-width:360px; }
+/* Rename modal.  On this page the old C-emitted inline rename form (#renameFormItem / #renameForm)
+ * is replaced by the JS button + .gbModal dialog, so keep the C markup hidden even though hgBlat.c
+ * flips its display to block after buildBigPsl (our !important beats that inline style). */
+#renameFormItem, #renameForm { display:none !important; }
+
+/* ---- search form (blatFormBuild) -------------------------------------
+ * Shares the design tokens (.gbApp on #blatFormBox), .gbPill buttons, .gbSection bars, .gbBanner
+ * and the gold .subheadingBar header from gbModern.css with the results page, so the two pages
+ * read as one design. */
+#blatFormBox { font-family:'Helvetica Neue',Helvetica,Arial,sans-serif; color:var(--ink); font-size:14px; }
+#blatFormBox .blatFormGrid { display:grid; grid-template-columns:minmax(0,1fr) 300px; gap:28px;
+    align-items:start; margin:12px 0 24px; }
+@media (max-width:900px) { #blatFormBox .blatFormGrid { grid-template-columns:minmax(0,1fr); } }
+/* flex-start, not flex-end: the genome field carries a "Current genome:" line under its input,
+ * so bottom-aligning the row would push Query type down by the height of that line. */
+#blatFormBox .blatRow { display:flex; align-items:flex-start; gap:16px; flex-wrap:wrap; margin-bottom:14px; }
+#blatFormBox .blatField { display:flex; flex-direction:column; gap:5px; }
+#blatFormBox .blatField > span { font-size:13px; font-weight:700; color:var(--muted); line-height:19px; }
+/* Same font size as the genome combobox input (.gsField, utils.js) and 1px less vertical padding
+ * (a select draws its own inner chrome), so the two boxes on the row come out the same rendered
+ * height and their tops line up. */
+#blatFormBox .blatField select { padding:8px; font-size:15px; border:1px solid var(--btnLine);
+    border-radius:0; background:#fff; color:var(--ink); font-family:inherit; }
+#blatFormBox .blatGenomeSlot { flex:1 1 650px; min-width:260px; max-width:650px; }
+#blatFormBox .blatChecks { display:flex; align-items:center; gap:22px; flex-wrap:wrap; margin-bottom:16px;
+    font-size:14px; }
+#blatFormBox .blatCheck { display:flex; align-items:center; gap:6px; }
+#blatFormBox .blatCheck label { display:flex; align-items:center; gap:6px; cursor:pointer; }
+#blatFormBox .blatCheck input { margin:0; }
+#blatFormBox .blatInfo { display:inline-flex; align-items:center; cursor:help; }
+#blatFormBox .blatTabs { display:flex; border-bottom:1px solid var(--line); margin-bottom:12px; }
+#blatFormBox .blatTab { padding:8px 16px; font-size:14px; font-weight:700; cursor:pointer; background:none;
+    border:none; border-bottom:3px solid transparent; color:var(--accent); font-family:inherit; }
+#blatFormBox .blatTab.on { border-bottom-color:var(--title); color:var(--ink); }
+#blatFormBox .blatPaneHint { display:flex; justify-content:space-between; align-items:center; gap:16px;
+    flex-wrap:wrap; font-size:13px; color:var(--muted); margin-bottom:6px; }
+/* "Load example" is an action, not a navigation, so it is a small chip-style button rather than a
+ * hyperlink (Lou, #38086).  Sized and colored like the genome search bar's quick-pick pills
+ * (.gsPick in utils.js) so the two read as the same species of control. */
+#blatFormBox .blatChip { font-family:inherit; font-size:12.5px; font-weight:600; padding:3px 10px;
+    border:1px solid var(--btnLine); background:#fff; color:var(--accent); cursor:pointer;
+    border-radius:999px; white-space:nowrap; }
+#blatFormBox .blatChip:hover { border-color:var(--accent); }
+#blatFormBox .blatChip:disabled { color:var(--muted); border-color:var(--btnLine); cursor:default; }
+#blatFormBox textarea.blatSeq { width:100%; height:200px; resize:vertical; padding:9px 11px; box-sizing:border-box;
+    font-family:'Roboto Mono','Courier New',monospace; font-size:13px; line-height:1.6;
+    border:1px solid var(--btnLine); border-radius:0; color:var(--ink); background:#fff; }
+#blatFormBox .blatCount { display:flex; justify-content:space-between; align-items:center; gap:16px;
+    padding:6px 1px 0; font-size:13px; color:var(--muted); }
+#blatFormBox .blatCount .over { color:#b1301f; font-weight:700; }
+#blatFormBox .blatDrop { border:2px dashed var(--headrowLine); background:#fafafa; padding:30px 20px;
+    text-align:center; }
+#blatFormBox .blatDrop.hot { background:var(--hover); border-color:var(--accent); }
+#blatFormBox .blatDropTitle { font-size:15px; font-weight:700; color:var(--accent); margin-bottom:4px; }
+#blatFormBox .blatDropSub { font-size:13px; color:var(--muted); margin-bottom:14px; }
+#blatFormBox .blatFileName { margin-top:12px; font-size:13px; color:var(--ink); font-weight:700; }
+#blatFormBox .blatActions { display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    border-top:1px solid var(--line); padding-top:16px; margin-top:16px; }
+/* Sidebar cards on the form add padding to the shared .gbCard (which supplies the border/shadow). */
+#blatFormBox .gbCard { border:1px solid var(--line); padding:14px 16px; background:var(--card); }
+#blatFormBox .gbCard + .gbCard { margin-top:16px; }
+#blatFormBox .gbCard h3 { margin:0 0 9px; font-size:14px; font-weight:700; color:var(--accent); }
+#blatFormBox .gbCard div { font-size:13px; line-height:1.5; color:var(--ink); }
+#blatFormBox .gbCard div + div { margin-top:9px; }
+#blatFormBox .gbCard a { color:var(--accent); }
+#blatFormBox .gbCard a:hover { color:var(--accentHover); }
+/* The genome search bar is emitted by hgBlat.c (printGenomeSearchBar) and relocated into the
+ * layout by JS, so it keeps its real autocomplete over every assembly. */
+/* The genome picker is setupGenomeSelector (utils.js), which builds its own combobox; only
+ * its width is a page concern.  HGStyle.css does not style .gsWrap, so nothing to override. */
+#blatFormBox .gsWrap { max-width:650px; }

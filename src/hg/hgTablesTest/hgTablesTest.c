@@ -14,6 +14,7 @@
 #include "htmlPage.h"
 #include "../hgTables/hgTables.h"
 #include "hdb.h"
+#include "dbDb.h"
 #include "qa.h"
 #include "chromInfo.h"
 #include "obscure.h"
@@ -26,6 +27,12 @@
 #endif
 
 #define MAX_ATTEMPTS 10
+
+/* Row limit for a table tested WITH position filtering.  Far above the 500000
+ * used when the whole table gets scanned, because a region restricts the output;
+ * this only screens out the handful of whole-genome tables so dense that even one
+ * test region's all-fields output can exceed the carefulAlloc ceiling. */
+#define MAX_ROWS_REGION_FILTERED 250000000
 
 
 /* Command line variables. */
@@ -143,6 +150,25 @@ for (i=0; i<ArraySize(test->info); ++i)
 fprintf(f, "%s\n", test->status->errMessage);
 }
 
+static void recordAbort(char *message, char *type, char *org, char *db,
+	char *group, char *track, char *table)
+/* Turn a caught errAbort into a hard error in the summary.  quickSubmit records
+ * how the page fetch went; nothing records what a test made of the page it got,
+ * so without this an abort inside a test would vanish from the counts. */
+{
+struct qaStatus *qs;
+AllocVar(qs);
+qs->hardError = TRUE;
+qs->errMessage = cloneString(message);
+tablesTestNew(qs, type, org, db, group, track, table);
+verbose(1, "Caught abort testing %s (%s %s %s %s %s): %s\n",
+	type, naForNull(org), naForNull(db), naForNull(group),
+	naForNull(track), naForNull(table), naForNull(message));
+fprintf(logFile, "Caught abort testing %s (%s %s %s %s %s): %s\n",
+	type, naForNull(org), naForNull(db), naForNull(group),
+	naForNull(track), naForNull(table), naForNull(message));
+}
+
 struct htmlPage *quickSubmit(struct htmlPage *basePage,
 	char *org, char *db, char *group, char *track, char *table,
 	char *testName, char *button, char *buttonVal)
@@ -181,6 +207,18 @@ if (basePage != NULL)
 	          verbose(1, "Response html page too large (500MB) (%s %s %s %s %s)\n", org, db, group, track, table);
 	    fprintf(logFile, "Response html page too large (500MB) (%s %s %s %s %s)\n", org, db, group, track, table);
 	    }
+	else
+	    {
+	    /* Without this the caller reports only which track it was on, and the
+	     * reason the page was unusable is lost unless someone happens to re-run
+	     * at -verbose=2. */
+	    verbose(1, "No usable page (%s %s %s %s %s): %s\n",
+		naForNull(org), naForNull(db), naForNull(group),
+		naForNull(track), naForNull(table), naForNull(qs->errMessage));
+	    fprintf(logFile, "No usable page (%s %s %s %s %s): %s\n",
+		naForNull(org), naForNull(db), naForNull(group),
+		naForNull(track), naForNull(table), naForNull(qs->errMessage));
+	    }
 	}
 
     /* 
@@ -209,10 +247,15 @@ if (oldPage != NULL)
 }
 
 int tableSize(char *db, char *table)
-/* Return number of rows in table. */
+/* Return number of rows in table, or -1 if there is no such SQL table.
+ * Plenty of tracks are offered in the table list but keep their data in a file
+ * rather than a SQL table -- bigBed, bigWig, bigMaf and the chain/net and multiz
+ * tracks built on them -- and counting rows on one of those used to abort the
+ * whole process.  hg38.multiz11way and mm39.netHs1 each ended a run this way.
+ * A caller comparing against a row limit treats -1 as "no limit to apply". */
 {
 struct sqlConnection *conn = sqlConnect(db);
-long size = sqlTableSize(conn, table);
+long size = sqlTableSizeIfExists(conn, table);
 sqlDisconnect(&conn);
 return size;
 }
@@ -689,7 +732,7 @@ if (obsolete)
 return obsolete;
 }
 
-void testOneTable(struct htmlPage *trackPage, char *org, char *db,
+static void testOneTableBody(struct htmlPage *trackPage, char *org, char *db,
 	char *group, char *track, char *table)
 /* Test stuff on one table if we haven't already tested this table. */
 {
@@ -725,7 +768,21 @@ if (!hashLookup(uniqHash, fullName))
 	    if (outTypeAvailable(mainForm, "bed")) 
 		{
 		verbose(3, "testOneTable bed output avail means can filter on position got here 2\n");
-		if (outTypeAvailable(mainForm, "primaryTable"))
+		/* A region bounds the output for almost every table, but a whole-genome
+		 * table of hundreds of millions of rows is dense enough that all-fields
+		 * output for the test region can still pass the carefulAlloc ceiling.
+		 * carefulAlloc exits the process outright, which forfeits every table
+		 * left in the run, so screen the worst offenders out the way the
+		 * no-position-filter branch below does. */
+		int tableRows = tableSize(db, table);
+		if (tableRows >= MAX_ROWS_REGION_FILTERED)
+		    {
+		    verbose(1, "%s.%s tableRows=%d, too large >= %d even with position filtering, skipping.\n",
+			db, table, tableRows, MAX_ROWS_REGION_FILTERED);
+		    fprintf(logFile, "%s.%s tableRows=%d, too large >= %d even with position filtering, skipping.\n",
+			db, table, tableRows, MAX_ROWS_REGION_FILTERED);
+		    }
+		else if (outTypeAvailable(mainForm, "primaryTable"))
 		    {
 		    verbose(3, "testOneTable got here 3\n");
 		    int rowCount = testAllFields(tablePage, mainForm, org, db, group, track, table);
@@ -767,7 +824,22 @@ if (!hashLookup(uniqHash, fullName))
     }
 }
 
-void testOneTrack(struct htmlPage *groupPage, char *org, char *db,
+void testOneTable(struct htmlPage *trackPage, char *org, char *db,
+	char *group, char *track, char *table)
+/* Test one table, surviving an abort from anything it calls.  Most of the
+ * errAborts in this program are in the output tests below testOneTableBody, and
+ * any one of them used to end the whole run. */
+{
+struct errCatch *errCatch = errCatchNew();
+if (errCatchStart(errCatch))
+    testOneTableBody(trackPage, org, db, group, track, table);
+errCatchEnd(errCatch);
+if (errCatch->gotError)
+    recordAbort(errCatch->message->string, "table", org, db, group, track, table);
+errCatchFree(&errCatch);
+}
+
+static void testOneTrackBody(struct htmlPage *groupPage, char *org, char *db,
 	char *group, char *track, int maxTables)
 /* Test a little something on up to maxTables in one track. */
 {
@@ -778,28 +850,33 @@ struct htmlFormVar *tableVar;
 struct slName *table;
 int tableIx;
 
+/* A track whose page does not come back, or comes back unusable, is skipped
+ * rather than fatal.  quickSubmit has already recorded the failure in
+ * tablesTestList, so it is counted in the final summary either way.  Aborting
+ * here used to end the whole run, which meant the summary that carries the
+ * error counts was never written at all, and a single bad page - often just a
+ * truncated response from a busy server - threw away an hour of testing.  This
+ * also covers the old bigPsl special case (2016-06-20). */
 if (trackPage == NULL)
     {
-    // is this an exception?
-    // exception for bigPsl (2016-06-20), may be short-lived.
-    struct sqlConnection *conn = sqlConnect(db);
-    char query[256];
-    sqlSafef(query, sizeof query, "select type from trackDb where tableName='%s'", track);
-    char *type = sqlQuickString(conn, query);
-    sqlDisconnect(&conn);
-    if (sameString(type, "bigPsl"))
-	{
-    	      verbose(1, "Skipping testing track %s since type bigPsl not supported by hgTables at this time (2016-06-20)\n", track);
-    	fprintf(logFile, "Skipping testing track %s since type bigPsl not supported by hgTables at this time (2016-06-20)\n", track);
-	return;
-	}
-    else
-	errAbort("Couldn't select track %s", track);
+    verbose(1, "Skipping track %s: no page returned\n", track);
+    fprintf(logFile, "Skipping track %s: no page returned\n", track);
+    return;
     }
 if ((mainForm = htmlFormGet(trackPage, "mainForm")) == NULL)
-    errAbort("Couldn't get main form on trackPage");
+    {
+    verbose(1, "Skipping track %s: no main form on track page\n", track);
+    fprintf(logFile, "Skipping track %s: no main form on track page\n", track);
+    htmlPageFree(&trackPage);
+    return;
+    }
 if ((tableVar = htmlFormVarGet(mainForm, hgtaTable)) == NULL)
-    errAbort("Can't find table var");
+    {
+    verbose(1, "Skipping track %s: no table var on track page\n", track);
+    fprintf(logFile, "Skipping track %s: no table var on track page\n", track);
+    htmlPageFree(&trackPage);
+    return;
+    }
 
 // put the tables in random order:
 if (!noShuffle)
@@ -818,7 +895,20 @@ for (table = tableVar->values, tableIx = 0;
 htmlPageFree(&trackPage);
 }
 
-void testOneGroup(struct htmlPage *dbPage, char *org, char *db, char *group, 
+void testOneTrack(struct htmlPage *groupPage, char *org, char *db,
+	char *group, char *track, int maxTables)
+/* Test one track, surviving an abort. */
+{
+struct errCatch *errCatch = errCatchNew();
+if (errCatchStart(errCatch))
+    testOneTrackBody(groupPage, org, db, group, track, maxTables);
+errCatchEnd(errCatch);
+if (errCatch->gotError)
+    recordAbort(errCatch->message->string, "track", org, db, group, track, NULL);
+errCatchFree(&errCatch);
+}
+
+static void testOneGroupBody(struct htmlPage *dbPage, char *org, char *db, char *group, 
 	int maxTracks)
 /* Test a little something on up to maxTracks in one group */
 {
@@ -829,12 +919,28 @@ struct htmlFormVar *trackVar;
 struct slName *track;
 int trackIx;
 
+/* As in testOneTrack, a group we cannot read is skipped rather than fatal, so
+ * that one bad page does not cost the whole run. */
 if (groupPage == NULL)
-    errAbort("Error when changing group to %s", group);
+    {
+    verbose(1, "Skipping group %s: no page returned\n", group);
+    fprintf(logFile, "Skipping group %s: no page returned\n", group);
+    return;
+    }
 if ((mainForm = htmlFormGet(groupPage, "mainForm")) == NULL)
-    errAbort("Couldn't get main form on groupPage");
+    {
+    verbose(1, "Skipping group %s: no main form on group page\n", group);
+    fprintf(logFile, "Skipping group %s: no main form on group page\n", group);
+    htmlPageFree(&groupPage);
+    return;
+    }
 if ((trackVar = htmlFormVarGet(mainForm, hgtaTrack)) == NULL)
-    errAbort("Can't find track var");
+    {
+    verbose(1, "Skipping group %s: no track var on group page\n", group);
+    fprintf(logFile, "Skipping group %s: no track var on group page\n", group);
+    htmlPageFree(&groupPage);
+    return;
+    }
 
 // put the tracks in random order:
 if (!noShuffle)
@@ -852,6 +958,19 @@ for (track = trackVar->values, trackIx = 0;
 
 /* Clean up. */
 htmlPageFree(&groupPage);
+}
+
+void testOneGroup(struct htmlPage *dbPage, char *org, char *db, char *group,
+	int maxTracks)
+/* Test one group, surviving an abort. */
+{
+struct errCatch *errCatch = errCatchNew();
+if (errCatchStart(errCatch))
+    testOneGroupBody(dbPage, org, db, group, maxTracks);
+errCatchEnd(errCatch);
+if (errCatch->gotError)
+    recordAbort(errCatch->message->string, "group", org, db, group, NULL, NULL);
+errCatchFree(&errCatch);
 }
 
 void testGroups(struct htmlPage *dbPage, char *org, char *db, int maxGroups)
@@ -907,7 +1026,64 @@ sqlFreeResult(&sr);
 sqlDisconnect(&conn);
 }
 
-void testDb(struct htmlPage *orgPage, char *org, char *db)
+/* The hgTables page no longer carries clade/organism/assembly dropdowns -- the
+ * gateway moved to a search box -- so there are no <option> tags left to scrape
+ * for the list of organisms and assemblies.  Read them from hgcentral dbDb
+ * instead, the way the browser itself does.  Only the *enumeration* was lost;
+ * htmlFormVarSet still creates org/db on the form, so submitting works. */
+
+boolean isTestableDb(struct dbDb *db)
+/* TRUE if this assembly is one we can actually drive: active, and with a
+ * chromInfo table, which getTestRegion needs to pick a test region.  GenArk
+ * entries (hs1 and the like) are listed in dbDb and do have a database, but
+ * keep their data in files rather than SQL tables, so they have no chromInfo
+ * and used to be absent from the assembly dropdown we no longer read. */
+{
+return db->active && hTableExists(db->name, "chromInfo");
+}
+
+struct slName *organismsToTest(int maxOrgs)
+/* Return up to maxOrgs distinct testable organism names, in dbDb order. */
+{
+struct slName *list = NULL;
+struct dbDb *dbList = hDbDbList(), *db;
+struct hash *seen = newHash(8);
+int count = 0;
+
+for (db = dbList; db != NULL && count < maxOrgs; db = db->next)
+    {
+    if (isTestableDb(db) && !hashLookup(seen, db->organism))
+	{
+	hashAdd(seen, db->organism, NULL);
+	slNameAddTail(&list, db->organism);
+	++count;
+	}
+    }
+hashFree(&seen);
+dbDbFreeList(&dbList);
+return list;
+}
+
+struct slName *dbsForOrganism(char *org, int maxDbs)
+/* Return up to maxDbs testable assembly names for organism, in dbDb order. */
+{
+struct slName *list = NULL;
+struct dbDb *dbList = hDbDbList(), *db;
+int count = 0;
+
+for (db = dbList; db != NULL && count < maxDbs; db = db->next)
+    {
+    if (isTestableDb(db) && sameWord(db->organism, org))
+	{
+	slNameAddTail(&list, db->name);
+	++count;
+	}
+    }
+dbDbFreeList(&dbList);
+return list;
+}
+
+static void testDbBody(struct htmlPage *orgPage, char *org, char *db)
 /* Test on one database. */
 {
 struct htmlPage *dbPage;
@@ -923,35 +1099,39 @@ htmlPageFree(&dbPage);
 }
 
 
+void testDb(struct htmlPage *orgPage, char *org, char *db)
+/* Test one database, surviving an abort.  The setup steps here - the test
+ * region, the group list - abort on their own, and one bad database should not
+ * cost the databases after it. */
+{
+struct errCatch *errCatch = errCatchNew();
+if (errCatchStart(errCatch))
+    testDbBody(orgPage, org, db);
+errCatchEnd(errCatch);
+if (errCatch->gotError)
+    recordAbort(errCatch->message->string, "db", org, db, NULL, NULL, NULL);
+errCatchFree(&errCatch);
+}
+
 void testOrg(struct htmlPage *rootPage, struct htmlForm *rootForm, char *org)
 /* Test on organism.  */
 {
-struct htmlPage *orgPage;
-struct htmlForm *mainForm;
-struct htmlFormVar *dbVar;
-struct slName *db;
-int dbIx;
+struct slName *dbList, *db;
 
-/* Get page with little selected beyond organism.  This page
- * will get whacked around a little by testDb, so set range
- * position and db to something safe each time through. */
-htmlPageSetVar(rootPage, rootForm, "org", org);
-htmlPageSetVar(rootPage, NULL, "db", NULL); 
-htmlPageSetVar(rootPage, NULL, hgtaRegionType, NULL); 
-htmlPageSetVar(rootPage, NULL, "position", NULL); 
-orgPage = htmlPageFromForm(rootPage, rootPage->forms, "submit", "Go");
-if ((mainForm = htmlFormGet(orgPage, "mainForm")) == NULL)
+/* There is no organism round-trip left to make: the gateway's clade/organism/
+ * assembly dropdowns and the "Go" button that submitted them are gone from the
+ * page, so submitting for an "organism page" just yields a page with no
+ * mainForm.  Name the assembly directly instead, the way the -db= path does --
+ * testDb sets db, position and region type on each pass, so rootPage needs no
+ * preparation here. */
+dbList = dbsForOrganism(org, clDbs);
+if (dbList == NULL)
+    errAbort("No active assembly in dbDb for organism %s", org);
+for (db = dbList; db != NULL; db = db->next)
     {
-    errAbort("Couldn't get main form on orgPage");
+    testDb(rootPage, org, db->name);
     }
-if ((dbVar = htmlFormVarGet(mainForm, "db")) == NULL)
-    errAbort("Couldn't get org var");
-for (db = dbVar->values, dbIx=0; db != NULL && dbIx < clDbs; 
-	db = db->next, ++dbIx)
-    {
-    testDb(orgPage, org, db->name);
-    }
-htmlPageFree(&orgPage);
+slNameFreeList(&dbList);
 }
 
 void verifyJoinedFormat(char *s)
@@ -1200,6 +1380,17 @@ for (type = typeList; type != NULL; type = type->next)
 }
 
 
+static int countHardErrors(struct tablesTest *list)
+/* Count the tests that ended in a hard error. */
+{
+int count = 0;
+struct tablesTest *test;
+for (test = list; test != NULL; test = test->next)
+    if (test->status->errMessage != NULL && test->status->hardError)
+        ++count;
+return count;
+}
+
 void reportSummary(struct tablesTest *list, FILE *f)
 /* Report summary of test results. */
 {
@@ -1228,11 +1419,46 @@ for (test = list; test != NULL; test = test->next)
     }
 }
 
-void hgTablesTest(char *url, char *logName)
-/* hgTablesTest - Test hgTables web page. */
+static void catchRootTest(void (*test)(struct htmlPage *rootPage), char *name,
+	struct htmlPage *rootPage)
+/* Run one of the whole-program uniProt tests, surviving an abort.  These run
+ * last, so an abort in the first of them used to take the other two and the
+ * summary with it. */
+{
+struct errCatch *errCatch = errCatchNew();
+if (errCatchStart(errCatch))
+    test(rootPage);
+errCatchEnd(errCatch);
+if (errCatch->gotError)
+    recordAbort(errCatch->message->string, name, NULL, "uniProt", NULL, NULL, NULL);
+errCatchFree(&errCatch);
+}
+
+static struct htmlPage *rootPageGet(char *url)
+/* Fetch the page the whole run starts from, following a redirect if the server
+ * sends one.  Both hgwdev and a sandbox answer plain http with a 301 to https,
+ * and a url given with no scheme is fetched over http, so without this the run
+ * parses the redirect page, finds no form in it, and dies several steps later
+ * saying "Null form in htmlPageSetVar", which names neither the url nor the
+ * redirect.  Every later request is built from this page, so following the
+ * redirect here also puts the rest of the run on the url the server asked for. */
+{
+struct htmlPage *page = htmlPageForwarded(url, NULL);
+if (page == NULL)
+    errAbort("Couldn't get %s", url);
+if (!sameString(page->url, url))
+    verbose(1, "%s redirected to %s\n", url, page->url);
+if (page->status->status != 200)
+    errAbort("%s returned HTTP status code %d", page->url, page->status->status);
+return page;
+}
+
+int hgTablesTest(char *url, char *logName)
+/* hgTablesTest - Test hgTables web page.  Returns the exit code: zero only if
+ * the run finished and no test hit a hard error. */
 {
 /* Get default page, and open log. */
-struct htmlPage *rootPage = htmlPageGet(url);
+struct htmlPage *rootPage = rootPageGet(url);
 if (appendLog)
     logFile = mustOpen(logName, "a");
 else
@@ -1245,8 +1471,8 @@ fprintf(logFile,"seed=%d\n",seed);
  
 showRunningHostName();
 
-verbose(1, "Testing URL %s\n", url);
-fprintf(logFile, "Testing URL %s\n", url);
+verbose(1, "Testing URL %s\n", rootPage->url);
+fprintf(logFile, "Testing URL %s\n", rootPage->url);
 
 /* Show what database server we are connecting to. 
 Matters for expected rows in tables. */
@@ -1262,29 +1488,27 @@ if (clDb != NULL)
 else
     {
     struct htmlForm *mainForm;
-    struct htmlFormVar *orgVar;
     if ((mainForm = htmlFormGet(rootPage, "mainForm")) == NULL)
 	errAbort("Couldn't get main form");
-    if ((orgVar = htmlFormVarGet(mainForm, "org")) == NULL)
-	errAbort("Couldn't get org var");
     if (clOrg != NULL)
 	testOrg(rootPage, mainForm, clOrg);
     else
 	{
-	struct slName *org;
-	int orgIx;
-	for (org = orgVar->values, orgIx=0; org != NULL && orgIx < clOrgs; 
-		org = org->next, ++orgIx)
+	struct slName *orgList = organismsToTest(clOrgs), *org;
+	if (orgList == NULL)
+	    errAbort("No active organisms in dbDb");
+	for (org = orgList; org != NULL; org = org->next)
 	    {
 	    testOrg(rootPage, mainForm, org->name);
 	    }
+	slNameFreeList(&orgList);
 	}
     }
 
 /* Do some more complex tests on uniProt. */
-testJoining(rootPage);
-testFilter(rootPage);
-testIdentifier(rootPage);
+catchRootTest(testJoining, "joining", rootPage);
+catchRootTest(testFilter, "filter", rootPage);
+catchRootTest(testIdentifier, "identifier", rootPage);
 
 /* Clean up and report. */
 htmlPageFree(&rootPage);
@@ -1293,6 +1517,32 @@ reportSummary(tablesTestList, stdout);
 reportAll(tablesTestList, logFile);
 fprintf(logFile, "---------------------------------------------\n");
 reportSummary(tablesTestList, logFile);
+
+/* A run that tested nothing, or that could not read a page it asked for, is
+ * not a pass.  Before #38356 the first unreadable page ended the run with
+ * errAbort, so the caller at least saw a nonzero exit.  Now that the run
+ * carries on and counts such a page as a hard error, the exit code has to
+ * carry the same news, or a caller reading only the exit code is told a run
+ * that failed on every track succeeded.  Soft errors are deliberately not
+ * counted here: the page was read and the answer was wrong, which is a report
+ * about hgTables rather than about this run.  They are still in the summary. */
+int testCount = slCount(tablesTestList);
+int hardCount = countHardErrors(tablesTestList);
+if (testCount == 0)
+    {
+    verbose(1, "No tests ran.\n");
+    fprintf(logFile, "No tests ran.\n");
+    return 1;
+    }
+if (hardCount > 0)
+    {
+    verbose(1, "Exiting nonzero: %d of %d tests hit a hard error.\n",
+	hardCount, testCount);
+    fprintf(logFile, "Exiting nonzero: %d of %d tests hit a hard error.\n",
+	hardCount, testCount);
+    return 1;
+    }
+return 0;
 }
 
 int main(int argc, char *argv[])
@@ -1319,7 +1569,7 @@ appendLog = optionExists("appendLog");
 noShuffle = optionExists("noShuffle");
 if (clOrg != NULL)
    clOrgs = BIGNUM;
-hgTablesTest(argv[1], argv[2]);
+int status = hgTablesTest(argv[1], argv[2]);
 carefulCheckHeap();
-return 0;
+return status;
 }

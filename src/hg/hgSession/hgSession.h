@@ -25,8 +25,33 @@ extern char *database;		/* Current database, often but not always dbDatabase. */
 // set, or when no user is logged in) saves under the reserved anonymous user "l".
 #define hgsDoSaveSessionJson hgSessionPrefix "doSaveSessionJson"
 #define hgsShareAnon hgSessionPrefix "shareAnon"
+// AJAX endpoint that reserves (server-generates) a unique anonymous snapshot name and returns it as
+// JSON without saving, so the Share dialog can preview the exact link before the user commits.
+#define hgsDoAnonName hgSessionPrefix "doAnonName"
+// When set, doSaveSessionJson returns {"exists": true} instead of overwriting a session the logged-in
+// user already has under the requested name, so the Share dialog can warn before clobbering it.
+#define hgsFailIfExists hgSessionPrefix "failIfExists"
+// When set to a registered snapshotType (e.g. "blat"), doSaveSessionJson saves a lightweight
+// "snapshot" session holding only that feature's declared cart vars (see lib/snapshotSession.c)
+// instead of the whole cart.  The stored name is forced to the "__" snapshot prefix.
+#define hgsSnapshotType hgSessionPrefix "snapshotType"
 // Rename an existing session (hgsOldSessionName -> hgsNewSessionName) for the "Specify name" step.
 #define hgsDoRenameSessionJson hgSessionPrefix "doRenameSessionJson"
+
+// AJAX endpoints for the experimental client-rendered Sessions page (hgSession.js).  Each acts on
+// the session named by hgsOldSessionName (decoded) under the current user and returns JSON instead
+// of re-rendering the whole page.  All are covered by the hgsDo prefix in cleanHgSessionFromCart.
+#define hgsDoDeleteJson hgSessionPrefix "doDeleteJson"
+#define hgsDoShareJson hgSessionPrefix "doShareJson"
+#define hgsDoGalleryJson hgSessionPrefix "doGalleryJson"
+#define hgsDoOverwriteJson hgSessionPrefix "doOverwriteJson"
+#define hgsDoDescribeJson hgSessionPrefix "doDescribeJson"
+/* Asked for by hgSession.js on another mirror node; answered without a cart, see
+ * doSessionListJson(). */
+#define hgsDoSessionListJson hgSessionPrefix "doSessionListJson"
+/* Asked for by this server's own hgSession.js; fetches the above from every other node, see
+ * doMirrorSessionsJson(). */
+#define hgsDoMirrorSessions hgSessionPrefix "doMirrorSessions"
 
 #define hgsSharePrefix hgSessionPrefix "share_"
 #define hgsGalleryPrefix hgSessionPrefix "gallery_"

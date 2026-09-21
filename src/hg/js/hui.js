@@ -1594,6 +1594,24 @@ function makeHighlightPicker(cartVar, parentEl, trackName, label, cartColor = hl
         alert("Must supply parentNode to append color picker");
         throw new Error();
     }
+    let keepPickerOffButtons = function() {
+        // The picker opens downwards, covering whatever sits below the swatch. In a jQuery UI
+        // dialog that is the row of buttons ("Save Color", "Add Highlight", ...), which then
+        // cannot be clicked at all, so open above the swatch instead when that would happen.
+        let container = $(inpSpec).spectrum("container");
+        let buttons = $(inpSpec).closest(".ui-dialog").find(".ui-dialog-buttonpane");
+        let swatch = $(colorPickerContainer).find(".sp-replacer");
+        if (container.length === 0 || buttons.length === 0 || swatch.length === 0)
+            return;
+        let cRect = container[0].getBoundingClientRect();
+        let bRect = buttons[0].getBoundingClientRect();
+        if (cRect.bottom <= bRect.top || cRect.top >= bRect.bottom)
+            return;  // does not cover the buttons, leave it where spectrum put it
+        if (swatch[0].getBoundingClientRect().top - cRect.height < 0)
+            return;  // no room above either, moving it would push it off the page
+        container.css("top", (swatch.offset().top - cRect.height) + "px");
+    };
+
     let opt = {
         hideAfterPaletteSelect: true,
         color: $(inpSpec).val(),
@@ -1603,8 +1621,21 @@ function makeHighlightPicker(cartVar, parentEl, trackName, label, cartColor = hl
         showInitial: true,
         preferredFormat: "hex",
         localStorageKey: "genomebrowser",
+        move: function(color) {
+            // Dragging in the picker only repaints the picker itself, spectrum does not
+            // consider the color chosen until 'choose' is clicked. Show it in the text box
+            // anyway: that box is what the buttons of the drag select dialog read, so
+            // otherwise they act on the color that was showing before the drag.
+            $(inpText).val(color.toHexString());
+        },
+        hide: function(color) {
+            // Resync with the picker, so a cancelled drag does not leave the dragged
+            // color behind in the text box.
+            $(inpText).val(color.toHexString());
+        },
+        show: keepPickerOffButtons,
         change: function() {
-            let color = $(inpSpec).spectrum("get");
+            let color = $(inpSpec).spectrum("get").toHexString();
             $(inpText).val(color);
             saveHlColor(color, trackName);
         },
@@ -1627,15 +1658,15 @@ function makeHighlightPicker(cartVar, parentEl, trackName, label, cartColor = hl
     $(inpSpec).spectrum("set", $(inpText).val());
 }
 
-function superUiSetAllTracks(onlyVisible) {
-    /* called when user clicks the 'Apply to all' buttons: sets all viz dropdowns to the #superSubViz value */
-    let newVal = $('#superSubViz').val();
+function superUiSetAllTracks(newVal) {
+    /* called when user clicks one of the buttons above the track list: sets all viz dropdowns
+     * to newVal, e.g. 'hide' or 'pack'. Without an argument, the #superSubViz value is used. */
+    if (newVal === undefined)
+        newVal = $('#superSubViz').val();
     var selects = document.querySelectorAll('#superTrackTable select');
     for (var i = 0; i < selects.length; i++) {
         var sel = selects[i];
         if (sel.id==="superSubViz")
-            continue;
-        if (onlyVisible && sel.value === 'hide')
             continue;
         sel.value = newVal;
         // if the dropdown cannot be set to a value (e.g. bigWig has no pack), set it to full or dense

@@ -9,6 +9,8 @@
 
 #include "common.h"
 #include "hash.h"
+#include "portable.h"
+#include "hmac.h"
 #include "obscure.h"
 #include "hgConfig.h"
 #include "cheapcgi.h"
@@ -26,12 +28,14 @@
 #include "wikiLink.h"
 #include "hgLogin.h"
 #include "gbMembers.h"
+#include "oauthLogin.h"
 #include "versionInfo.h"
 #include "mailViaPipe.h"
 #include "dystring.h"
 #include "autoUpgrade.h"
 #include "hCommon.h"
 #include "botDelay.h"
+#include "errCatch.h"
 
 #define EMAILSEP ";"
 
@@ -40,9 +44,12 @@ char msg[4096] = "";
 char *incorrectUsernameOrPassword="The username or password you entered is incorrect.";
 char *incorrectUsername="The username you entered is incorrect.";
 /* The excludeVars are not saved to the cart. */
-char *excludeVars[] = { "submit", "Submit", "debug", "fixMembers", "update", 
+char *excludeVars[] = { "submit", "Submit", "debug", "fixMembers", "update",
      "hgLogin_password", "hgLogin_password2", "hgLogin_newPassword1",
-     "hgLogin_newPassword2", NULL };
+     "hgLogin_newPassword2", "hgLogin_newEmail1", "hgLogin_newEmail2",
+     "hgLogin_curPassword", "code", "state", "provider", "user", "token",
+     "newEmail", "recovEmail", "exp", "sig",
+     "hgLogin_newRecovEmail1", "hgLogin_newRecovEmail2", NULL };
 struct cart *cart;	/* This holds cgi and other variables between clicks. */
 char *database;		/* Name of genome database - hg15, mm3, or the like. */
 struct hash *oldCart;	/* Old cart hash. */
@@ -51,12 +58,32 @@ char brwName[64];
 char brwAddr[256];
 char signature[256];
 char returnAddr[256];
-char *hgLoginUrl = NULL; /* full absolute URL to hgLogin as seen from browser, 
-    e.g. http://genome.ucsc.edu/cgi-bin/hgLogin. Can be a relative URL /cgi-bin/hgLogin if 
+char *hgLoginUrl = NULL; /* full absolute URL to hgLogin as seen from browser,
+    e.g. http://genome.ucsc.edu/cgi-bin/hgLogin. Can be a relative URL /cgi-bin/hgLogin if
     hg.conf login.relativeLink is on. */
+boolean pwdEyeIconEnabled = TRUE; /* show/hide eye icon on password fields;
+    set from hg.conf login.pwdEyeIcon in doMiddle() */
+boolean recovEmailVerifyOk = FALSE; /* TRUE when gbMembers has the recovEmailVerified column, so
+    a confirmed recovery address can be told apart from one that was merely typed into the signup
+    form.  Set in doMiddle() after the auto-upgrade; FALSE on a mirror where the ALTER failed. */
 
 /* for earlyBotCheck() function at the beginning of main() */
 #define delayFraction   1.0    /* standard penalty is 1.0 for most CGIs */
+
+/* Forward declarations for functions used before their definitions. */
+static void printSocialButtons(boolean dividerAbove, boolean dividerBelow, char *action);
+static void printEmailLinkButton(boolean dividerAbove);
+static boolean emailLinkEnabled();
+static boolean recovEmailChangeEnabled();
+void changeRecovEmailPage(struct sqlConnection *conn);
+static void printUsernameNote();
+void emailLinkPage(struct sqlConnection *conn);
+void displayLoginPage(struct sqlConnection *conn);
+void displayAccHelpPage(struct sqlConnection *conn);
+void completeAccountPage(struct sqlConnection *conn);
+void sendEmailLink(struct sqlConnection *conn);
+static void loginAndReturn(struct sqlConnection *conn, char *userName, uint idx);
+static boolean pendingIdentityValid();
 
 /* ---- Global helper functions ---- */
 char *browserName()
@@ -318,52 +345,45 @@ for (sl = newCookies;  sl != NULL;  sl = sl->next)
 return result; 
 }
 
-static boolean isValidReturnUrl(char *returnUrl)
-/* Verify that returnUrl startswith an hg.conf approved set of hosts. */
-{
-struct slName *approvedHosts = slNameListFromComma(cfgOptionDefault(CFG_APPROVED_HOSTS, NULL));
-slAddHead(&approvedHosts, slNameNew(hLoginHostCgiBinUrl()));
-if (approvedHosts)
-    {
-    struct slName *approvedStart;
-    for (approvedStart = approvedHosts; approvedStart != NULL; approvedStart = approvedStart->next)
-        {
-        if (startsWith(approvedStart->name, returnUrl))
-            return TRUE;
-        }
-    }
-return FALSE;
-}
-
 char *getReturnToURL()
 /* get URL from cart var returnto; if empty, make URL to hgSession on login host.  */
 {
 char *returnURL = cartUsualString(cart, "returnto", "");
-char returnTo[2048];
-  
-if (!returnURL || sameString(returnURL,""))
-    safef(returnTo, sizeof(returnTo), "%shgSession?hgS_doMainPage=1", hLoginHostCgiBinUrl());
-else if (cfgOptionDefault(CFG_APPROVED_HOSTS, NULL))
+
+if (isEmpty(returnURL))
     {
-    if (isValidReturnUrl(returnURL))
-        safecpy(returnTo, sizeof(returnTo), returnURL);
-    else
-        {
-        hDumpStackDisallow();
-        errAbort("Error: Invalid returnto URL. Please send email to genome-www@soe.ucsc.edu "
-                "with the returnto argument from the URL (or just the full URL) so we can "
-                "fix this.");
-        }
+    char returnTo[2048];
+    safef(returnTo, sizeof(returnTo), "%shgSession?hgS_doMainPage=1", hLoginHostCgiBinUrl());
+    return cloneString(returnTo);
     }
-else
-    safecpy(returnTo, sizeof(returnTo), returnURL);
-return cloneString(returnTo);
+
+/* Check the shape of the URL on every install.  login.approvedReturn is optional, and
+ * where it is set it only matches the front of the URL, so the rest of the URL is
+ * unchecked either way.  The check lives in wikiLink.c so that the CGIs building a
+ * returnto can apply the same rules before they write the link. */
+if (!loginReturnUrlIsAcceptable(returnURL))
+    {
+    hDumpStackDisallow();
+    errAbort("Error: Invalid returnto URL. Please send email to genome-www@soe.ucsc.edu "
+            "with the returnto argument from the URL (or just the full URL) so we can "
+            "fix this.");
+    }
+return cloneString(returnURL);
+}
+
+static char *getReturnToUrlForAttr()
+/* getReturnToURL() escaped for printing inside an href="" attribute.  Escaping the ampersand
+ * is the part that matters here: the browser expands an entity in an attribute value, so
+ * javascript&colon;alert(1) would otherwise become a javascript: URL after the checks above
+ * have passed it. */
+{
+return htmlEncode(getReturnToURL());
 }
 
 void returnToURL(int delay)
 /* delay for delay mill-seconds then return to the "returnto" URL */
 {
-char *returnURL = getReturnToURL();
+char *returnURL = javaScriptLiteralEncode(getReturnToURL());
 jsInlineF(
     "setTimeout(function(){location='%s';}, %d);\n"
     , returnURL, delay);
@@ -380,20 +400,98 @@ jsInlineF(
 void  displayActMailSuccess()
 /* display Activate mail success box */
 {
-char *returnURL = getReturnToURL(); 
+char *returnURL = getReturnToUrlForAttr();
 hPrintf(
     "<div id=\"confirmationBox\" class=\"centeredContainer formBox\">"
     "\n"
     "<h2>%s</h2>", brwName);
+/* Arriving here straight after a social sign-in is confusing on its own: the user asked to sign
+ * in, not to fill in a form, and gets told to go and read their mail.  Say first what happened
+ * and which address it turns on.  These are set only by the two flows that send a user here
+ * from a provider sign-in; a plain email signup sets none of them and the page reads as before.
+ * Everything below is either config or an address, both of which can reach the cart from a
+ * request, so encode all of it. */
+char *provider = cartUsualString(cart, "hgLogin_actMailProvider", "");
+char *address = cartUsualString(cart, "hgLogin_actMailTo", "");
+char *existingUser = cartUsualString(cart, "hgLogin_actMailUser", "");
+char *unverified = cartUsualString(cart, "hgLogin_actMailUnverified", "");
+boolean justChanged = isNotEmpty(cartUsualString(cart, "hgLogin_actMailChanged", ""));
+boolean fromProvider = isNotEmpty(provider) && isNotEmpty(address);
+/* Decide up front whether the "use a different address" form is coming, so the generic "we
+ * have sent you a mail" paragraph can be printed above it.  Below the form it read as if a
+ * confirmation had already gone to whatever was about to be typed into it.  The form is only
+ * for an existing account whose address was never confirmed, and only for the person who just
+ * came back from the provider -- pendingIdentityValid() is that check. */
+boolean offerNewAddress = fromProvider && isNotEmpty(existingUser) && pendingIdentityValid();
+char *encProvider = htmlEncode(provider);
+char *encAddress = htmlEncode(address);
+if (fromProvider)
+    {
+    if (isEmpty(existingUser))
+        {
+        /* An address the provider released and we would not take is not the same as no address
+         * at all, and CILogon is the first case of it (#38339). */
+        if (isNotEmpty(unverified))
+            hPrintf("<p>You signed in with %s, and %s does not tell us whether the email "
+                "address it gave us belongs to you. A new %s account has been created because "
+                "no account uses <b>%s</b>.</p>",
+                encProvider, encProvider, brwName, encAddress);
+        else
+            hPrintf("<p>You signed in with %s, and %s did not tell us an email address, so we "
+                "asked you for one. No %s account uses <b>%s</b> yet, so we are making a new "
+                "account for it. Confirming the address is the last step.</p>",
+                encProvider, encProvider, brwName, encAddress);
+        }
+    else
+        {
+        char *encUser = htmlEncode(existingUser);
+        /* Say that the address was changed.  Without this the page comes back looking exactly
+         * as it did before the change, the new address being the only sign anything happened. */
+        if (justChanged)
+            hPrintf("<p>The email address on the %s account <b>%s</b> is now <b>%s</b>.</p>",
+                brwName, encUser, encAddress);
+        else
+            hPrintf("<p>Your %s sign-in is linked to the %s account <b>%s</b>, but the email "
+                "address on that account, <b>%s</b>, has not been confirmed. Once it is "
+                "confirmed, %s will sign you in directly.</p>",
+                encProvider, brwName, encUser, encAddress, encProvider);
+        freeMem(encUser);
+        }
+    }
+/* A rejected address (changePendingEmail) leaves its reason here, and this page is where the
+ * user sees it -- nothing else prints it on the way through. */
+if (isNotEmpty(errMsg))
+    hPrintf("<p><span style='color:red;'>%s</span></p>", errMsg);
 hPrintf(
     "<p id=\"confirmationMsg\" class=\"confirmationTxt\">A confirmation email has been sent to you. \n"
     "Please click the confirmation link in the email to activate your account.</p>"
     "<p>You may have to look in your spam folder for an email from genome-www@soe.ucsc.edu, "
-    "especially if you use Microsoft Outlook or Hotmail.</p>"
-    "\n"
-    "<p><a href=\"%s\">Return</a></p>", returnURL);
+    "especially if you use Microsoft Outlook or Hotmail.</p>");
+if (offerNewAddress)
+    {
+    /* If that address is wrong the confirmation can never arrive, and this account has no other
+     * way in, so offer to replace it here. */
+    hPrintf("<p>If <b>%s</b> is not the right email address, enter the right one, and we will "
+        "send the confirmation there instead.</p>", encAddress);
+    hPrintf("<form method=\"post\" action=\"%s\" name=\"fixEmailForm\">", hgLoginUrl);
+    hPrintf("<div class=\"inputGroup\">"
+        "<label for=\"fixEmailAddr\">Email address</label>"
+        "<input type=\"text\" name=\"hgLogin_email\" value=\"\" size=\"30\" "
+        "id=\"fixEmailAddr\"></div>");
+    hPrintf("<div class=\"formControls\">"
+        "<input type=\"submit\" name=\"hgLogin.do.changePendingEmail\" "
+        "value=\"Use this address instead\" class=\"largeButton\"></div></form>");
+    }
+hPrintf("\n<p><a href=\"%s\">Return</a></p>", returnURL);
+freeMem(encProvider);
+freeMem(encAddress);
 cartRemove(cart, "hgLogin_email");
 cartRemove(cart, "hgLogin_userName");
+cartRemove(cart, "hgLogin_actMailProvider");
+cartRemove(cart, "hgLogin_actMailTo");
+cartRemove(cart, "hgLogin_actMailUser");
+cartRemove(cart, "hgLogin_actMailUnverified");
+cartRemove(cart, "hgLogin_actMailChanged");
 }
 
 void sendActMailOut(char *email, char *subject, char *msg)
@@ -420,7 +518,7 @@ if (result == -1)
 void  displayMailSuccess()
 /* display mail success confirmation box */
 {
-char *sendMailTo = cartUsualString(cart, "hgLogin_sendMailTo", "");
+char *sendMailTo = htmlEncode(cartUsualString(cart, "hgLogin_sendMailTo", ""));  // printed into the page; escape (XSS)
 hPrintf(
     "<div id=\"confirmationBox\" class=\"centeredContainer formBox\">"
     "<h2>%s</h2>", brwName);
@@ -441,7 +539,7 @@ cartRemove(cart, "hgLogin_sendMailContain");
 void  displayMailSuccessPwd()
 /* display mail success confirmation box */
 {
-char *username = cgiUsualString("user","");
+char *username = htmlEncode(cgiUsualString("user",""));  // printed into the page; escape (XSS)
 hPrintf(
     "<div id=\"confirmationBoxPwd\" class=\"centeredContainer formBox\">"
     "<h2>%s</h2>", brwName);
@@ -481,8 +579,8 @@ if (result == -1)
         "<p align=\"left\">"
         "</p>"
         "<h3>Error emailing %s to: %s</h3>"
-        "Click <a href=%s?hgLogin.do.displayAccHelpPage=1>here</a> to return.<br>", 
-        hgLoginUrl, obj, email );
+        "Click <a href=\"%s?hgLogin.do.displayAccHelpPage=1\">here</a> to return.<br>",
+        htmlEncode(obj), htmlEncode(email), hgLoginUrl );
     }
 else
     {
@@ -506,16 +604,44 @@ safef(msg, sizeof(msg),
 sendMailOut(email, subject, msg);
 }
 
+static char *sqlAddressMatch(char *email)
+/* Return a SQL fragment matching the gbMembers rows that belong to whoever controls email: the
+ * accounts carrying it as their primary address, plus the accounts carrying it as a *confirmed*
+ * recovery address.  An unconfirmed recovEmail is only a string that a signup form typed in --
+ * nobody ever proved they can read mail there -- so matching it would let someone who registered
+ * with a victim's address as their recovery address capture that victim's login (see
+ * confirmRecovEmail).  An empty email matches nothing: rows with a blank recovEmail would
+ * otherwise all match, which is every account on a mirror that has just added the column.
+ * Result is allocd and carries the sqlSafef prefix; embed it with %-s. */
+{
+if (isEmpty(email))
+    {
+    struct dyString *dyNone = sqlDyStringCreate("(0)");
+    return dyStringCannibalize(&dyNone);
+    }
+struct dyString *dy = sqlDyStringCreate("(email='%s'", email);
+if (recovEmailVerifyOk)
+    sqlDyStringPrintf(dy, " OR (recovEmail='%s' AND recovEmailVerified='Y')", email);
+else
+    /* A mirror whose gbMembers predates the column: we cannot tell confirmed from unconfirmed,
+     * so keep the old behavior rather than locking those users out of their own accounts. */
+    sqlDyStringPrintf(dy, " OR recovEmail='%s'", email);
+sqlDyStringPrintf(dy, ")");
+return dyStringCannibalize(&dy);
+}
+
 void sendUsername(struct sqlConnection *conn, char *email)
 /* email user username(s)  */
 {
 struct sqlResult *sr;
 char **row;
-char query[256];
+char query[1024];
 
 /* find all the user names associated with this email address */
 char userList[512]="";
-sqlSafef(query,sizeof(query),"SELECT * FROM gbMembers WHERE email='%s' or recovEmail='%s'", email, email);
+char *addrMatch = sqlAddressMatch(email);
+sqlSafef(query,sizeof(query),"SELECT * FROM gbMembers WHERE %-s", addrMatch);
+freeMem(addrMatch);
 sr = sqlGetResult(conn, query);
 int numUser = 0;
 while ((row = sqlNextRow(sr)) != NULL)
@@ -548,14 +674,14 @@ if (result == -1)
         "<p align=\"left\">"
         "</p>"
         "<h3>Error emailing %s to: %s</h3>"
-        "Click <a href=%s?hgLogin.do.displayAccHelpPage=1>here</a> to return.<br>",
-        hgLoginUrl, obj, email );
+        "Click <a href=\"%s?hgLogin.do.displayAccHelpPage=1\">here</a> to return.<br>",
+        htmlEncode(obj), htmlEncode(email), hgLoginUrl );
     }
 else
     {
     jsInlineF(
         "window.location = '%s?hgLogin.do.displayMailSuccessPwd=1&user=%s';\n"
-        , hgLoginUrl, username);
+        , hgLoginUrl, cgiEncodeFull(username));
     }
 }
 
@@ -576,8 +702,9 @@ sendPwdMailOut(email, recovEmail, subject, msg, username);
 void displayAccHelpPage(struct sqlConnection *conn)
 /* draw the account help page */
 {
-char *email = cartUsualString(cart, "hgLogin_email", "");
-char *username = cartUsualString(cart, "hgLogin_userName", "");
+// these go into value="" attributes further down; escape them (reflected XSS)
+char *email = htmlEncode(cartUsualString(cart, "hgLogin_email", ""));
+char *username = htmlEncode(cartUsualString(cart, "hgLogin_userName", ""));
 
 jsInline(
     "function toggle(value){\n"
@@ -600,14 +727,19 @@ hPrintf("<h3>Having trouble signing in?</h3>"
     "\n"
     "<p><span style='color:red;'>%s</span><p>"
     "\n", hgLoginUrl, errMsg ? errMsg : "");
-hPrintf("<div class=\"inputGroup\">"
-    "<div class=\"acctHelpSection\"><input name=\"hgLogin_helpWith\" type=\"radio\" value=\"password\" id=\"password\">"
-    "<label for=\"password\" class=\"radioLabel\">I forgot my <b>password</b>. Send me a new one.</label></div>"
-    "<div class=\"acctHelpSection\"><input name=\"hgLogin_helpWith\" type=\"radio\" value=\"username\" id=\"username\">"
-    "<label for=\"username\" class=\"radioLabel\">I forgot my <b>username</b>. Please email it to me.</label></div>"
-    "\n"
-    "</div>"
-    "\n");
+// A "Forgot username/password" link may preselect a radio via hgLogin_helpWith in the URL.
+char *pre = cartUsualString(cart, "hgLogin_helpWith", "");
+hPrintf("<div class=\"inputGroup\">");
+hPrintf("<div class=\"acctHelpSection\"><input name=\"hgLogin_helpWith\" type=\"radio\" value=\"password\" id=\"password\"%s>"
+    "<label for=\"password\" class=\"radioLabel\">I forgot my <b>password</b>. Send me a new one.</label></div>",
+    sameString(pre, "password") ? " checked" : "");
+hPrintf("<div class=\"acctHelpSection\"><input name=\"hgLogin_helpWith\" type=\"radio\" value=\"username\" id=\"username\"%s>"
+    "<label for=\"username\" class=\"radioLabel\">I forgot my <b>username</b>. Please email it to me.</label></div>",
+    sameString(pre, "username") ? " checked" : "");
+if (emailLinkEnabled())
+    hPrintf("<div class=\"acctHelpSection\"><input name=\"hgLogin_helpWith\" type=\"radio\" value=\"loginLink\" id=\"loginLink\">"
+        "<label for=\"loginLink\" class=\"radioLabel\">Email me a <b>login link</b> so I can sign in without a password.</label></div>");
+hPrintf("</div>\n");
 hPrintf("<div class=\"inputGroup\" id=\"usernameBox\" style=\"display: none;\">"
     "<label for=\"emailUsername\">Username</label>"
     "<input type=\"text\" name=\"hgLogin_userName\" value=\"%s\" size=\"30\" id=\"emailUsername\">"
@@ -620,12 +752,19 @@ hPrintf("<div class=\"inputGroup\" id=\"usernameBox\" style=\"display: none;\">"
     "\n"
     "<div class=\"formControls\">"
     "    <input type=\"submit\" name=\"hgLogin.do.accountHelp\" value=\"Continue\" class=\"largeButton\">"
-    "     &nbsp;<a href=\"%s\">Cancel</a>"
+    "     &nbsp;<a href=\"%s\" class=\"cancelButton\">Cancel</a>"
     "</div>"
     "</form>"
-    "</div><!-- END - accountHelpBox -->", username, email, getReturnToURL());
+    "</div><!-- END - accountHelpBox -->", username, email, getReturnToUrlForAttr());
 jsOnEventById("click", "password", "toggle('showU');");
 jsOnEventById("click", "username", "toggle('showE');");
+if (emailLinkEnabled())
+    jsOnEventById("click", "loginLink", "toggle('showE');");
+// If a radio was preselected via the URL, open its matching input box on load.
+if (sameString(pre, "password"))
+    jsInline("toggle('showU');");
+else if (sameString(pre, "username") || sameString(pre, "loginLink"))
+    jsInline("toggle('showE');");
 cartSaveSession(cart);
 }
 
@@ -645,7 +784,15 @@ if (!email || sameString(email,""))
     return;
     }
 
-sqlSafef(query,sizeof(query),"SELECT recovEmail FROM gbMembers WHERE userName='%s'", username);
+/* Only a confirmed recovery address gets a copy: an unconfirmed one never proved it belongs to
+ * this account, and a new password must not be mailed to a stranger whose address someone typed
+ * into the signup form. */
+if (recovEmailVerifyOk)
+    sqlSafef(query,sizeof(query),
+        "SELECT recovEmail FROM gbMembers WHERE userName='%s' AND recovEmailVerified='Y'",
+        username);
+else
+    sqlSafef(query,sizeof(query),"SELECT recovEmail FROM gbMembers WHERE userName='%s'", username);
 char *recovEmail = sqlQuickString(conn, query);
 
 sendNewPwdMail(username, email, recovEmail, password);
@@ -700,7 +847,12 @@ void setupNewAccount(struct sqlConnection *conn, char *email, char *username)
 /* Set up  new user account and send activation mail to user */
 {
 char query[256];
-char *token = generateRandomPassword();
+/* Draw the activation token from the same source as the other one-time tokens in this file
+ * (the email-link login token and the OAuth state nonce, both makeRandomKey) rather than from
+ * generateRandomPassword, whose output is far shorter and far less varied.  The token is opaque
+ * -- it is hashed on the next line and only the hash is ever stored or mailed -- so nothing
+ * downstream depends on its shape. */
+char *token = makeRandomKey(128+33);
 char *tokenMD5 = generateTokenMD5(token);
 sqlSafef(query,sizeof(query), "UPDATE gbMembers SET lastUse=NOW(),emailToken='%s', emailTokenExpires=DATE_ADD(NOW(), INTERVAL 7 DAY), accountActivated='N' WHERE userName='%s'",
     tokenMD5,
@@ -711,17 +863,77 @@ sendActivateMail(email, username, tokenMD5);
 return;
 }
 
+void resendActivateMail(struct sqlConnection *conn, char *email, char *username)
+/* Mail the activation link for an account that already has one outstanding, reusing the token
+ * rather than minting a new one.  Every fresh token silently kills the link in the mail before
+ * it, so a user who clicks the provider button twice and then opens the first message is told
+ * their link is invalid.  Falls back to a new token once the old one has expired. */
+{
+char query[256];
+sqlSafef(query, sizeof(query),
+    "SELECT emailToken FROM gbMembers WHERE userName='%s' AND emailToken<>'' "
+    "AND emailTokenExpires > NOW()", username);
+char *token = sqlQuickString(conn, query);
+if (isEmpty(token))
+    {
+    setupNewAccount(conn, email, username);
+    return;
+    }
+sendActivateMail(email, username, token);
+freeMem(token);
+}
+
+void printPwdEyeIcon(char *iconId, char *slashId)
+/* print a clickable eye icon as a normal sibling right after a password
+ * input (not overlapping it); slashId is the <line> toggled to show
+ * "hidden". No-op if disabled via hg.conf login.pwdEyeIcon. */
+{
+if (!pwdEyeIconEnabled)
+    return;
+hPrintf(
+    "<span id=\"%s\" title=\"Show/hide password\" "
+    "style=\"display:inline-block; margin-left:6px; vertical-align:middle; "
+    "cursor:pointer; user-select:none;\">"
+    "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" "
+    "stroke=\"#666\" stroke-width=\"2\">"
+    "<path d=\"M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z\"/>"
+    "<circle cx=\"12\" cy=\"12\" r=\"3\"/>"
+    "<line id=\"%s\" x1=\"2\" y1=\"2\" x2=\"22\" y2=\"22\" style=\"display:none;\"/>"
+    "</svg>"
+    "</span>", iconId, slashId);
+}
+
+void printPwdToggleJS()
+/* define the password show/hide toggle function used by all eye icons */
+{
+jsInline(
+    "function togglePwdVisibility(inputId, slashId) {\n"
+    "  var inp = document.getElementById(inputId);\n"
+    "  var slash = document.getElementById(slashId);\n"
+    "  if (inp.type === 'password') {\n"
+    "    inp.type = 'text';\n"
+    "    slash.style.display = 'inline';\n"
+    "  } else {\n"
+    "    inp.type = 'password';\n"
+    "    slash.style.display = 'none';\n"
+    "  }\n"
+    "}\n"
+    );
+}
+
 void displayLoginPage(struct sqlConnection *conn)
 /* draw the account login page */
 {
-char *username = cartUsualString(cart, "hgLogin_userName", "");
+// goes into a value="" attribute further down; escape it (reflected XSS)
+char *username = htmlEncode(cartUsualString(cart, "hgLogin_userName", ""));
 hPrintf("<div id=\"loginBox\" class=\"centeredContainer formBox\">"
     "\n"
     "<h2>%s</h2>"
     "\n", brwName);
 hPrintf(
     "<h3>Login</h3>"
-    "\n");
+    "<p>Do not have an account? <a href=\"%s?hgLogin.do.signupPage=1\">Go to the sign up page</a>.</p>"
+    "\n", hgLoginUrl);
 if (errMsg && sameString(errMsg, "Your account has been activated."))
     hPrintf("<span style='color:green;'>%s</span>\n", errMsg ? errMsg : "");
 else
@@ -731,32 +943,40 @@ hPrintf("<form method=post action=\"%s\" name=\"accountLoginForm\" id=\"accountL
     "<div class=\"inputGroup\">"
     "<label for=\"userName\">Username</label>"
     "<input type=text name=\"hgLogin_userName\" value=\"%s\" size=\"30\" id=\"userName\">"
+    "<a class=\"forgotLink\" href=\"%s?hgLogin.do.displayAccHelpPage=1&hgLogin_helpWith=username\">Forgot username</a>"
     "</div>"
     "\n"
     "<div class=\"inputGroup\">"
     "<label for=\"password\">Password</label>"
+    "<span style=\"display:inline-flex; align-items:center;\">"
     "<input type=password name=\"hgLogin_password\" value=\"\" size=\"30\" id=\"password\">"
+    , hgLoginUrl, username, hgLoginUrl);
+printPwdEyeIcon("pwdEyeIcon", "pwdEyeSlash");
+hPrintf(
+    "</span>"
+    "<a class=\"forgotLink\" href=\"%s?hgLogin.do.displayAccHelpPage=1&hgLogin_helpWith=password\">Forgot password</a>"
     "</div>"
     "\n"
     "<div class=\"formControls\">"
     "   <input type=\"submit\" name=\"hgLogin.do.displayLogin\" value=\"Login\" class=\"largeButton\">"
-    "    &nbsp;<a href=\"%s\">Cancel</a>"
+    "    &nbsp;<a href=\"%s\" class=\"cancelButton\">Cancel</a>"
     "</div>"
-    , hgLoginUrl, username, getReturnToURL());
+    , hgLoginUrl, getReturnToUrlForAttr());
+if (pwdEyeIconEnabled)
+    {
+    printPwdToggleJS();
+    jsOnEventById("click", "pwdEyeIcon", "togglePwdVisibility('password','pwdEyeSlash');");
+    }
 cartSaveSession(cart);
+hPrintf("</form>\n");
+printEmailLinkButton(TRUE);
+printSocialButtons(TRUE, FALSE, "Sign in");
 hPrintf(
-    "</form>"
-    "\n"
-    "\n"
-    "<div id=\"helpBox\">"
-    "<a href=\"%s?hgLogin.do.displayAccHelpPage=1\">Can't access your account?</a><br>"
-    "Need an account? <a href=\"%s?hgLogin.do.signupPage=1\">Sign up</a>.<br>"
-    "</div><!-- END - helpBox -->"
     "</div><!-- END - loginBox -->"
     "\n"
     "\n"
     "</body>"
-    "</html>", hgLoginUrl, hgLoginUrl);
+    "</html>");
 }
 
 void activateAccount(struct sqlConnection *conn)
@@ -765,21 +985,43 @@ void activateAccount(struct sqlConnection *conn)
 char query[256];
 char *token = cgiUsualString("token", "");
 char *username = cgiUsualString("user","");
+/* Let the database decide whether the token is still current: setupNewAccount sets
+ * emailTokenExpires seven days out and the activation mail says the code expires then, so a
+ * link older than that must no longer work.  An unknown user name gives NULL here, and an
+ * account that has already been activated has an empty emailToken, so both fall through to
+ * the same message as a wrong token. */
 sqlSafef(query,sizeof(query),
-    "SELECT emailToken FROM gbMembers WHERE userName='%s'", username);
+    "SELECT emailToken FROM gbMembers WHERE userName='%s' AND emailTokenExpires > NOW()",
+    username);
 char *emailToken = sqlQuickString(conn, query);
-if (sameString(emailToken, token))
+if (isNotEmpty(emailToken) && sameString(emailToken, token))
     {
     sqlSafef(query,sizeof(query), "UPDATE gbMembers SET lastUse=NOW(), dateActivated=NOW(), emailToken='', emailTokenExpires='', accountActivated='Y' WHERE userName='%s'",
     username);
     sqlUpdate(conn, query);
+    /* An account with no password was created by a social login, and the provider button is its
+     * only other way in.  Opening this link proves the mailbox is theirs, which is the same
+     * proof the passwordless email link accepts (see emailLogin), so finish the job and sign
+     * them in rather than bouncing them to a login page with nothing to type.  Accounts that do
+     * have a password keep the old behavior: they know it, and a mailed link should not be worth
+     * a session on its own. */
+    sqlSafef(query, sizeof(query),
+        "SELECT * FROM gbMembers WHERE userName='%s' AND password=''", username);
+    struct gbMembers *m = gbMembersLoadByQuery(conn, query);
+    if (m != NULL)
+        {
+        loginAndReturn(conn, m->userName, m->idx);
+        gbMembersFree(&m);
+        return;
+        }
     freez(&errMsg);
     errMsg = cloneString("Your account has been activated.");
     } 
 else
     {
     freez(&errMsg);
-    errMsg = cloneString("Token does not match.");
+    errMsg = cloneString("This activation link is not valid, has expired, or has already "
+        "been used.");
     }
 cartSetString(cart, "hgLogin_userName", username);
 
@@ -796,7 +1038,7 @@ hPrintf("<div id=\"changePwBox\" class=\"centeredContainer formBox\">"
     "\n"
     "<h2>%s</h2>", brwName);
 hPrintf(
-    "<h3>Change Password</h3>"
+    "<h3>Change password</h3>"
     "\n"
     "<p> <span style='color:red;'>%s</span> </p>"
     "\n"
@@ -807,32 +1049,51 @@ hPrintf(
     "<input type=\"text\" name=\"hgLogin_userName\" size=\"30\" value=\"%s\" id=\"email\">"
     "</div>"
     "\n", errMsg ? errMsg : "", hgLoginUrl,
-    cartUsualString(cart, "hgLogin_userName", ""));
+    htmlEncode(cartUsualString(cart, "hgLogin_userName", "")));  // value="" attribute; escape (XSS)
 hPrintf("<div class=\"inputGroup\">"
     "\n"
-    "<label for=\"currentPw\">Current or Emailed Password</label>"
-    "<input type=\"password\" name=\"hgLogin_password\" value=\"\" size=\"30\" id=\"currentPw\">"
+    "<label for=\"currentPw\">Current or emailed password</label>"
+    "<span style=\"display:inline-flex; align-items:center;\">"
+    "<input type=\"password\" name=\"hgLogin_password\" value=\"\" size=\"30\" id=\"currentPw\">");
+printPwdEyeIcon("curPwEyeIcon", "curPwEyeSlash");
+hPrintf(
+    "</span>"
     "</div>"
     "\n"
     "<div class=\"inputGroup\">"
-    "<label for=\"newPw1\">New Password</label>"
-    "<input type=\"password\" name=\"hgLogin_newPassword1\" value=\"\" size=\"30\" id=\"newPw\">"
+    "<label for=\"newPw1\">New password</label>"
+    "<span style=\"display:inline-flex; align-items:center;\">"
+    "<input type=\"password\" name=\"hgLogin_newPassword1\" value=\"\" size=\"30\" id=\"newPw1\">");
+printPwdEyeIcon("newPw1EyeIcon", "newPw1EyeSlash");
+hPrintf(
+    "</span>"
     "</div>"
     "\n"
     "<div class=\"inputGroup\">"
-    "<label for=\"newPw2\">Re-enter New Password</label>"
-    "<input type=\"password\" name=\"hgLogin_newPassword2\" value=\"\" size=\"30\" id=\"newPw\">"
+    "<label for=\"newPw2\">Re-enter new password</label>"
+    "<span style=\"display:inline-flex; align-items:center;\">"
+    "<input type=\"password\" name=\"hgLogin_newPassword2\" value=\"\" size=\"30\" id=\"newPw2\">");
+printPwdEyeIcon("newPw2EyeIcon", "newPw2EyeSlash");
+hPrintf(
+    "</span>"
     "</div>"
     "\n"
     "<div class=\"formControls\">"
-    "    <input type=\"submit\" name=\"hgLogin.do.changePassword\" value=\"Change Password\" class=\"largeButton\"> &nbsp; "
-    "    <a href=\"%s\">Cancel</a>"
+    "    <input type=\"submit\" name=\"hgLogin.do.changePassword\" value=\"Change password\" class=\"largeButton\"> &nbsp; "
+    "    <a href=\"%s\" class=\"cancelButton\">Cancel</a>"
     "\n"
     "</div>"
     "</form>"
     "\n"
     "</div><!-- END - changePwBox -->"
-    "\n", getReturnToURL());
+    "\n", getReturnToUrlForAttr());
+if (pwdEyeIconEnabled)
+    {
+    printPwdToggleJS();
+    jsOnEventById("click", "curPwEyeIcon", "togglePwdVisibility('currentPw','curPwEyeSlash');");
+    jsOnEventById("click", "newPw1EyeIcon", "togglePwdVisibility('newPw1','newPw1EyeSlash');");
+    jsOnEventById("click", "newPw2EyeIcon", "togglePwdVisibility('newPw2','newPw2EyeSlash');");
+    }
 cartSaveSession(cart);
 }
 
@@ -863,14 +1124,14 @@ if (!currentPassword || sameString(currentPassword,""))
 if (!newPassword1 || sameString(newPassword1,"") || (strlen(newPassword1)<5))
     {
     freez(&errMsg);
-    errMsg = cloneString("New Password must be at least 5 characters long.");
+    errMsg = cloneString("New password must be at least 5 characters long.");
     changePasswordPage(conn);
     return;
     }
 if (!newPassword2 || sameString(newPassword2,"") )
     {
     freez(&errMsg);
-    errMsg = cloneString("Re-enter New Password field cannot be blank.");
+    errMsg = cloneString("Re-enter new password field cannot be blank.");
     changePasswordPage(conn);
     return;
     }
@@ -928,19 +1189,579 @@ jsInline(cookieJS->string);
 returnToURL(150);
 }
 
+static char *changeEmailSig(char *user, char *curEmail, char *newEmail, char *expStr)
+/* HMAC-MD5 over a pending email change, keyed by the secret login.cookieSalt.  It goes in the
+ * confirmation link so that clicking the link -- and only clicking it -- applies the change,
+ * proving the new address really reaches the requester.  curEmail is the account's address when
+ * the link was minted; because confirmChangeEmail recomputes the signature from the address
+ * currently on the account, a link stops validating once it has been used (the address is no
+ * longer curEmail), so each link works exactly once and a stale link cannot silently undo a
+ * newer change.  Result is allocd. */
+{
+char *salt = cfgOption(CFG_LOGIN_COOKIE_SALT);
+if (isEmpty(salt))
+    errAbort("Confirming an email change requires %s in hg.conf, set to a secret random "
+        "string.  Without a secret we cannot sign the confirmation link.", CFG_LOGIN_COOKIE_SALT);
+char buf[1024];
+safef(buf, sizeof(buf), "changeEmail|%s|%s|%s|%s",
+    emptyForNull(user), emptyForNull(curEmail), emptyForNull(newEmail), emptyForNull(expStr));
+return hmacMd5(salt, buf);
+}
+
+static void sendChangeEmailConfirmMail(char *newEmail, char *user, char *curEmail)
+/* Email a one-time link to newEmail that, when opened, changes user's address to newEmail.
+ * curEmail is the account's current address; it is folded into the signature so the link stops
+ * working once the change has been applied (see changeEmailSig). */
+{
+char expStr[32];
+safef(expStr, sizeof(expStr), "%ld", clock1() + 3600);   // link good for one hour
+char *sig = changeEmailSig(user, curEmail, newEmail, expStr);
+char url[1024];
+safef(url, sizeof(url),
+    "%s?hgLogin.do.confirmChangeEmail=1&user=%s&newEmail=%s&exp=%s&sig=%s",
+    hgLoginUrl, cgiEncode(user), cgiEncode(newEmail), expStr, sig);
+char subject[256];
+safef(subject, sizeof(subject), "Confirm your new %s email address", brwName);
+char *remoteAddr = getenv("REMOTE_ADDR");
+char message[4096];
+safef(message, sizeof(message),
+    "Someone (probably you, from IP address %s) asked to change the email address on the %s "
+    "account \"%s\" to this address.\nTo confirm the change, open this link in your browser:\n\n"
+    "%s\n\nThe link works once and expires in one hour.\n\n%s\n%s",
+    emptyForNull(remoteAddr), brwName, user, url, signature, returnAddr);
+sendActMailOut(newEmail, subject, message);
+freeMem(sig);
+}
+
+static void sendChangeEmailAlertMail(char *oldEmail, char *user, char *newEmail)
+/* Tell the OLD address that the account's email was just changed, so its owner finds out if the
+ * change was not theirs and can ask us to undo it.  This is the notice that protects the current
+ * owner -- confirming the new address only proves the new mailbox is reachable. */
+{
+char subject[256];
+safef(subject, sizeof(subject), "Your %s email address was changed", brwName);
+char *remoteAddr = getenv("REMOTE_ADDR");
+char message[4096];
+safef(message, sizeof(message),
+    "The email address on the %s account \"%s\" was just changed to %s (request from IP address "
+    "%s).\n\nIf you made this change, nothing more is needed.  If you did NOT, please reply to "
+    "this message right away so we can help you secure the account.\n\n%s\n%s",
+    brwName, user, newEmail, emptyForNull(remoteAddr), signature, returnAddr);
+sendActMailOut(oldEmail, subject, message);
+}
+
+static char *recovEmailSig(char *user, char *newRecov, char *curRecov, char *curVerified,
+                           char *expStr)
+/* HMAC-MD5 over a pending recovery address, keyed by the secret login.cookieSalt.  It goes in
+ * the link mailed to that address, so that opening the link -- and only opening it -- puts the
+ * address on the account and marks it confirmed, proving the mailbox really does reach the
+ * person who claimed it.  One signature serves both cases: the address given at signup (where
+ * newRecov is already stored, unconfirmed) and a later change (where it is not stored at all
+ * until the link is opened, so a typo cannot cost the user a working recovery address).
+ * curRecov and curVerified are the account's stored address and flag when the link was minted;
+ * because confirmRecovEmail recomputes the signature from what is on the account now, applying a
+ * link stops it validating, so a stale link cannot quietly undo a newer change.  Note this is a
+ * check on the account's state, not a one-time token: put the account back the way it was when the
+ * link was minted and, within the week, the same link applies again.  That only ever moves the
+ * owner between addresses they have already confirmed for themselves.  Result is allocd. */
+{
+char *salt = cfgOption(CFG_LOGIN_COOKIE_SALT);
+if (isEmpty(salt))
+    errAbort("Confirming a recovery email address requires %s in hg.conf, set to a secret random "
+        "string.  Without a secret we cannot sign the confirmation link.", CFG_LOGIN_COOKIE_SALT);
+char buf[1024];
+safef(buf, sizeof(buf), "recovEmail|%s|%s|%s|%s|%s",
+    emptyForNull(user), emptyForNull(newRecov), emptyForNull(curRecov),
+    emptyForNull(curVerified), emptyForNull(expStr));
+return hmacMd5(salt, buf);
+}
+
+static void sendRecovEmailConfirmMail(char *recovEmail, char *user, char *curRecov,
+                                      char *curVerified)
+/* Email a one-time link to recovEmail that, when opened, puts it on account user as a confirmed
+ * recovery address.  Until that happens the address counts for nothing: it cannot sign anyone in
+ * and it gets no copy of a password reset.  The link lasts a week, like the account activation
+ * mail, because a recovery mailbox is often not the one its owner reads every day. */
+{
+char expStr[32];
+safef(expStr, sizeof(expStr), "%ld", clock1() + 7*24*3600);   // link good for a week
+char *sig = recovEmailSig(user, recovEmail, curRecov, curVerified, expStr);
+char url[1024];
+safef(url, sizeof(url),
+    "%s?hgLogin.do.confirmRecovEmail=1&user=%s&recovEmail=%s&exp=%s&sig=%s",
+    hgLoginUrl, cgiEncode(user), cgiEncode(recovEmail), expStr, sig);
+char subject[256];
+safef(subject, sizeof(subject), "Confirm your %s recovery email address", brwName);
+char *remoteAddr = getenv("REMOTE_ADDR");
+char message[4096];
+safef(message, sizeof(message),
+    "Someone (probably you, from IP address %s) gave this address as the recovery email address "
+    "for the %s account \"%s\".\nTo confirm that this mailbox is yours, open this link in your "
+    "browser:\n\n%s\n\nThe link works once and expires in seven days.  Until it is opened, this "
+    "email address cannot be used to sign in to that account and will not receive a "
+    "password-reset email.\n\n"
+    "If this is *not* you, do not open the link: someone typed your address by mistake, and "
+    "ignoring this message is all it takes to keep them from using it.\n\n%s\n%s",
+    emptyForNull(remoteAddr), brwName, user, url, signature, returnAddr);
+/* Not sendActMailOut(): that exits the CGI when the address will not take mail, which would
+ * end the signup response after the account has already been created and its activation mail
+ * sent.  A recovery address is optional and easy to mistype, so a bad one must not derail
+ * signing up -- the address simply stays unconfirmed, which is the safe state. */
+if (mailViaPipeBounce(recovEmail, subject, message, returnAddr) == -1)
+    fprintf(stderr, "hgLogin: could not mail recovery-address confirmation to %s for account "
+        "%s\n", recovEmail, user);
+freeMem(sig);
+}
+
+static void sendRecovEmailChangeAlertMail(char *email, char *user, char *newRecov)
+/* Tell the account's main address that its recovery address just changed, so its owner finds
+ * out if the change was not theirs.  A confirmed recovery address can sign in to the account,
+ * so moving it deserves the same notice as changing the main address itself. */
+{
+char subject[256];
+safef(subject, sizeof(subject), "Your %s recovery email address was changed", brwName);
+char *remoteAddr = getenv("REMOTE_ADDR");
+char message[4096];
+safef(message, sizeof(message),
+    "The recovery email address on the %s account \"%s\" was just changed to %s (request from "
+    "IP address %s).\n\nIf you made this change, nothing more is needed.  If you did NOT, please "
+    "reply to this message right away so we can help you secure the account.\n\n%s\n%s",
+    brwName, user, newRecov, emptyForNull(remoteAddr), signature, returnAddr);
+sendActMailOut(email, subject, message);
+}
+
+void changeEmailPage(struct sqlConnection *conn)
+/* Draw the change-email page for the currently logged-in user.  The account is taken from
+ * the validated login cookie (wikiLinkUserName), never from a form field, so a user can only
+ * change their own email.  Where the account has a password we also ask for it here, so a
+ * borrowed login cookie alone cannot change the address (and from there take over the account
+ * via password recovery).  Social-login accounts have no password and are asked for none; for
+ * them the new address is instead confirmed by email before it takes effect (see changeEmail). */
+{
+if (!emailLinkEnabled())
+    {
+    displayLoginPage(conn);
+    return;
+    }
+char *user = wikiLinkUserName();
+if (isEmpty(user))
+    {
+    freez(&errMsg);
+    errMsg = cloneString("Please log in first to change your email address.");
+    displayLoginPage(conn);
+    return;
+    }
+char query[256];
+sqlSafef(query, sizeof(query), "SELECT email FROM gbMembers WHERE userName='%s'", user);
+char *curEmail = sqlQuickString(conn, query);
+sqlSafef(query, sizeof(query), "SELECT password FROM gbMembers WHERE userName='%s'", user);
+boolean hasPassword = isNotEmpty(sqlQuickString(conn, query));
+char *encUser = htmlEncode(user);
+char *encCurEmail = htmlEncode(isNotEmpty(curEmail) ? curEmail : "(none)");
+
+hPrintf("<div id=\"changeEmailBox\" class=\"centeredContainer formBox\">"
+    "<h2>%s</h2>", brwName);
+hPrintf("<h3>Change email</h3>");
+hPrintf("<p><span style='color:red;'>%s</span></p>", errMsg ? errMsg : "");
+hPrintf("<form method=\"post\" action=\"%s\" name=\"changeEmailForm\">", hgLoginUrl);
+hPrintf("<p>Signed in as <b>%s</b>.<br>Current email address: <b>%s</b></p>",
+    encUser, encCurEmail);
+freeMem(encUser);
+freeMem(encCurEmail);
+if (hasPassword)
+    hPrintf("<div class=\"inputGroup\">"
+        "<label for=\"curPassword\">Current password</label>"
+        "<input type=\"password\" name=\"hgLogin_curPassword\" value=\"\" size=\"30\" id=\"curPassword\">"
+        "</div>");
+hPrintf("<div class=\"inputGroup\">"
+    "<label for=\"newEmail1\">New email address</label>"
+    "<input type=\"text\" name=\"hgLogin_newEmail1\" value=\"\" size=\"30\" id=\"newEmail1\">"
+    "</div>");
+hPrintf("<div class=\"inputGroup\">"
+    "<label for=\"newEmail2\">Re-enter new email address</label>"
+    "<input type=\"text\" name=\"hgLogin_newEmail2\" value=\"\" size=\"30\" id=\"newEmail2\">"
+    "</div>");
+hPrintf("<div class=\"formControls\">"
+    "<input type=\"submit\" name=\"hgLogin.do.changeEmail\" value=\"Change email\" class=\"largeButton\">"
+    " &nbsp;<a href=\"%s\" class=\"cancelButton\">Cancel</a>"
+    "</div></form></div><!-- END - changeEmailBox -->", getReturnToUrlForAttr());
+cartSaveSession(cart);
+}
+
+void changeEmail(struct sqlConnection *conn)
+/* Process the change-email form for the currently logged-in user. */
+{
+if (!emailLinkEnabled())
+    {
+    displayLoginPage(conn);
+    return;
+    }
+char *user = wikiLinkUserName();
+if (isEmpty(user))
+    {
+    freez(&errMsg);
+    errMsg = cloneString("Please log in first to change your email address.");
+    displayLoginPage(conn);
+    return;
+    }
+char *email1 = cartUsualString(cart, "hgLogin_newEmail1", "");
+char *email2 = cartUsualString(cart, "hgLogin_newEmail2", "");
+if (isEmpty(email1) || spc_email_isvalid(email1) == 0)
+    {
+    freez(&errMsg);
+    errMsg = cloneString("Please enter a valid email address.");
+    changeEmailPage(conn);
+    return;
+    }
+if (differentString(email1, email2))
+    {
+    freez(&errMsg);
+    errMsg = cloneString("Email addresses do not match.");
+    changeEmailPage(conn);
+    return;
+    }
+/* Re-authenticate where we can: if the account has a password, require the current one.  A
+ * stolen login cookie by itself must not be enough to change the address. */
+char query[512];
+sqlSafef(query, sizeof(query), "SELECT password FROM gbMembers WHERE userName='%s'", user);
+char *curPwd = sqlQuickString(conn, query);
+if (isNotEmpty(curPwd))
+    {
+    char *given = cartUsualString(cart, "hgLogin_curPassword", "");
+    if (isEmpty(given) || !checkPwd(given, curPwd))
+        {
+        freez(&errMsg);
+        errMsg = cloneString("Please enter your current password.");
+        changeEmailPage(conn);
+        return;
+        }
+    }
+/* Do not change the address yet: email a one-time confirmation link to the NEW address and
+ * apply the change only when it is clicked (see confirmChangeEmail).  This proves the address
+ * is real and controlled by the requester, so an unconfirmed address cannot silently become
+ * the account's recovery address. */
+sqlSafef(query, sizeof(query), "SELECT email FROM gbMembers WHERE userName='%s'", user);
+char *curEmail = sqlQuickString(conn, query);
+sendChangeEmailConfirmMail(email1, user, curEmail);
+cartRemove(cart, "hgLogin_newEmail1");
+cartRemove(cart, "hgLogin_newEmail2");
+cartRemove(cart, "hgLogin_curPassword");
+char *encEmail = htmlEncode(email1);
+hPrintf("<div class=\"centeredContainer formBox\"><h2>%s</h2>", brwName);
+hPrintf("<h3>Almost done. Please check your email</h3>");
+hPrintf("<p>We sent a confirmation link to <b>%s</b>. Open the link in that message to finish "
+    "changing your email address. The link works once and expires in one hour.</p></div>",
+    encEmail);
+freeMem(encEmail);
+returnToURL(3000);
+}
+
+void confirmChangeEmail(struct sqlConnection *conn)
+/* Apply a confirmed email change.  Reached by opening the signed link sent to the new address
+ * (see sendChangeEmailConfirmMail); the signature and its expiry are the authorization, so this
+ * does not require a login cookie -- the link may be opened from the new mailbox in any browser. */
+{
+if (!emailLinkEnabled())
+    {
+    displayLoginPage(conn);
+    return;
+    }
+char *user = cgiUsualString("user", "");
+char *newEmail = cgiUsualString("newEmail", "");
+char *expStr = cgiUsualString("exp", "");
+char *sig = cgiUsualString("sig", "");
+/* Recompute the signature over the address currently on the account.  Once the change has been
+ * applied that address is newEmail, so re-opening the same link no longer matches: the link works
+ * exactly once, and a stale link cannot silently undo a newer change. */
+char query[512];
+sqlSafef(query, sizeof(query), "SELECT email FROM gbMembers WHERE userName='%s'", user);
+char *oldEmail = sqlQuickString(conn, query);
+char *expected = changeEmailSig(user, emptyForNull(oldEmail), newEmail, expStr);
+boolean sigOk = isNotEmpty(sig) && sameString(sig, expected);
+freeMem(expected);
+if (!sigOk || isEmpty(user) || spc_email_isvalid(newEmail) == 0)
+    {
+    freez(&errMsg);
+    errMsg = cloneString("This confirmation link is not valid or has already been used.");
+    displayLoginPage(conn);
+    return;
+    }
+if (clock1() > atol(expStr))
+    {
+    freez(&errMsg);
+    errMsg = cloneString("This confirmation link has expired. Please request the change again.");
+    displayLoginPage(conn);
+    return;
+    }
+/* Opening this link proved the user reads mail at newEmail, which is exactly what activation
+ * asks for, so activate the account here too.  Without this an account created by a social
+ * login that released no address (ORCID) stayed unactivated forever even after its owner
+ * confirmed an address the proper way, and so stayed invisible to email-link login and to
+ * auto-linking from another provider.  Any activation token still outstanding pointed at the
+ * old address, so drop it rather than leave a stale link alive. */
+sqlSafef(query, sizeof(query),
+    "UPDATE gbMembers SET email='%s', lastUse=NOW(), accountActivated='Y', "
+    "emailToken='', emailTokenExpires='' WHERE userName='%s'", newEmail, user);
+sqlUpdate(conn, query);
+/* Alert the previous address that the change happened, so a hijack is noticed. */
+if (isNotEmpty(oldEmail) && differentWord(oldEmail, newEmail))
+    sendChangeEmailAlertMail(oldEmail, user, newEmail);
+char *encEmail = htmlEncode(newEmail);
+hPrintf("<div class=\"centeredContainer formBox\"><h2>%s</h2>", brwName);
+hPrintf("<h3>Your email address has been changed.</h3>");
+hPrintf("<p>Your email address is now <b>%s</b>.</p></div>", encEmail);
+freeMem(encEmail);
+returnToURL(1500);
+}
+
+void confirmRecovEmail(struct sqlConnection *conn)
+/* Mark a recovery address confirmed.  Reached by opening the signed link mailed to that address
+ * (see sendRecovEmailConfirmMail); the signature and its expiry are the authorization, so this
+ * needs no login cookie -- the link may be opened from that mailbox in any browser. */
+{
+if (!recovEmailVerifyOk || isEmpty(cfgOption(CFG_LOGIN_COOKIE_SALT)))
+    {
+    /* No column to record the answer in, or no secret to check the signature against, so the
+     * link cannot have come from us.  Checked before recovEmailSig(), which aborts without a
+     * secret: a link is only ever minted where one is configured, so reaching here means a
+     * hand-made URL and it deserves the ordinary refusal, not an error page. */
+    freez(&errMsg);
+    errMsg = cloneString("This confirmation link is not valid.");
+    displayLoginPage(conn);
+    return;
+    }
+char *user = cgiUsualString("user", "");
+char *recovEmail = cgiUsualString("recovEmail", "");
+char *expStr = cgiUsualString("exp", "");
+char *sig = cgiUsualString("sig", "");
+/* Recompute the signature over the address and flag currently on the account.  Applying the
+ * link changes both, so re-opening it no longer matches: the link works exactly once. */
+char query[1024];
+sqlSafef(query, sizeof(query),
+    "SELECT recovEmail, recovEmailVerified FROM gbMembers WHERE userName='%s'", user);
+struct sqlResult *sr = sqlGetResult(conn, query);
+char **row = sqlNextRow(sr);
+char *curRecov = (row != NULL) ? cloneString(emptyForNull(row[0])) : NULL;
+char *curVerified = (row != NULL) ? cloneString(emptyForNull(row[1])) : NULL;
+sqlFreeResult(&sr);
+char *expected = recovEmailSig(user, recovEmail, emptyForNull(curRecov),
+                               emptyForNull(curVerified), expStr);
+boolean sigOk = isNotEmpty(sig) && sameString(sig, expected);
+freeMem(expected);
+if (!sigOk || isEmpty(user) || spc_email_isvalid(recovEmail) == 0)
+    {
+    freez(&errMsg);
+    errMsg = cloneString("This confirmation link is not valid or has already been used.");
+    displayLoginPage(conn);
+    return;
+    }
+if (clock1() > atol(expStr))
+    {
+    freez(&errMsg);
+    errMsg = cloneString("This confirmation link has expired. Please request a new one.");
+    displayLoginPage(conn);
+    return;
+    }
+/* Set the address as well as the flag: for a signup this rewrites the same value, and for a
+ * change this is the point at which the new address takes effect. */
+sqlSafef(query, sizeof(query),
+    "UPDATE gbMembers SET recovEmail='%s', recovEmailVerified='Y', lastUse=NOW() "
+    "WHERE userName='%s'", recovEmail, user);
+sqlUpdate(conn, query);
+/* A change, not a signup confirmation: tell the main address, so a hijack gets noticed. */
+if (isNotEmpty(curRecov) && differentWord(curRecov, recovEmail))
+    {
+    sqlSafef(query, sizeof(query), "SELECT email FROM gbMembers WHERE userName='%s'", user);
+    char *email = sqlQuickString(conn, query);
+    if (isNotEmpty(email))
+        sendRecovEmailChangeAlertMail(email, user, recovEmail);
+    }
+char *encEmail = htmlEncode(recovEmail);
+hPrintf("<div class=\"centeredContainer formBox\"><h2>%s</h2>", brwName);
+hPrintf("<h3>Your recovery email address has been confirmed.</h3>");
+hPrintf("<p><b>%s</b> can now be used to sign in to your account and to recover your "
+    "password.</p></div>", encEmail);
+freeMem(encEmail);
+returnToURL(1500);
+}
+
+void changeRecovEmailPage(struct sqlConnection *conn)
+/* Draw the set/change-recovery-address page for the currently logged-in user.  As on the
+ * change-email page the account comes from the validated login cookie, never from a form
+ * field, and an account that has a password must supply it: a confirmed recovery address can
+ * sign in to the account, so a borrowed login cookie alone must not be able to point it
+ * somewhere new. */
+{
+if (!recovEmailChangeEnabled())
+    {
+    displayLoginPage(conn);
+    return;
+    }
+char *user = wikiLinkUserName();
+if (isEmpty(user))
+    {
+    freez(&errMsg);
+    errMsg = cloneString("Please log in first to change your recovery email address.");
+    displayLoginPage(conn);
+    return;
+    }
+char query[512];
+sqlSafef(query, sizeof(query),
+    "SELECT recovEmail, recovEmailVerified FROM gbMembers WHERE userName='%s'", user);
+struct sqlResult *sr = sqlGetResult(conn, query);
+char **row = sqlNextRow(sr);
+char *curRecov = (row != NULL) ? cloneString(emptyForNull(row[0])) : cloneString("");
+boolean curConfirmed = (row != NULL) && sameWord(emptyForNull(row[1]), "Y");
+sqlFreeResult(&sr);
+sqlSafef(query, sizeof(query), "SELECT password FROM gbMembers WHERE userName='%s'", user);
+boolean hasPassword = isNotEmpty(sqlQuickString(conn, query));
+char *encUser = htmlEncode(user);
+char *encCurRecov = htmlEncode(isNotEmpty(curRecov) ? curRecov : "(none)");
+
+hPrintf("<div id=\"changeRecovEmailBox\" class=\"centeredContainer formBox\">"
+    "<h2>%s</h2>", brwName);
+hPrintf("<h3>Change recovery email</h3>");
+hPrintf("<p><span style='color:red;'>%s</span></p>", errMsg ? errMsg : "");
+hPrintf("<form method=\"post\" action=\"%s\" name=\"changeRecovEmailForm\">", hgLoginUrl);
+hPrintf("<p>Signed in as <b>%s</b>.<br>Current recovery email address: <b>%s</b>%s</p>",
+    encUser, encCurRecov,
+    (isNotEmpty(curRecov) && !curConfirmed) ? " (waiting to be confirmed)" : "");
+hPrintf("<p style=\"font-size:0.9em\">You can add a second email address to get back into "
+    "your account. Once confirmed, it can sign you in, including through the Google and "
+    "ORCID buttons, and it will get a copy of the password-reset email whenever one is sent "
+    "for this account. We will email a confirmation link to the new address. Until that "
+    "link is opened, the email address cannot be used to sign in and will not receive a "
+    "password-reset email.%s</p>",
+    isNotEmpty(curRecov) ? " Your current recovery email address keeps working until then." : "");
+freeMem(encUser);
+freeMem(encCurRecov);
+if (hasPassword)
+    hPrintf("<div class=\"inputGroup\">"
+        "<label for=\"curPassword\">Current password</label>"
+        "<input type=\"password\" name=\"hgLogin_curPassword\" value=\"\" size=\"30\" "
+        "id=\"curPassword\">"
+        "</div>");
+hPrintf("<div class=\"inputGroup\">"
+    "<label for=\"newRecovEmail1\">New recovery email address</label>"
+    "<input type=\"text\" name=\"hgLogin_newRecovEmail1\" value=\"\" size=\"30\" "
+    "id=\"newRecovEmail1\">"
+    "</div>");
+hPrintf("<div class=\"inputGroup\">"
+    "<label for=\"newRecovEmail2\">Re-enter new recovery email address</label>"
+    "<input type=\"text\" name=\"hgLogin_newRecovEmail2\" value=\"\" size=\"30\" "
+    "id=\"newRecovEmail2\">"
+    "</div>");
+hPrintf("<div class=\"formControls\">"
+    "<input type=\"submit\" name=\"hgLogin.do.changeRecovEmail\" value=\"Change recovery email\" "
+    "class=\"largeButton\">"
+    " &nbsp;<a href=\"%s\" class=\"cancelButton\">Cancel</a>"
+    "</div></form></div><!-- END - changeRecovEmailBox -->", getReturnToUrlForAttr());
+cartSaveSession(cart);
+}
+
+void changeRecovEmail(struct sqlConnection *conn)
+/* Process the set/change-recovery-address form for the currently logged-in user. */
+{
+if (!recovEmailChangeEnabled())
+    {
+    displayLoginPage(conn);
+    return;
+    }
+char *user = wikiLinkUserName();
+if (isEmpty(user))
+    {
+    freez(&errMsg);
+    errMsg = cloneString("Please log in first to change your recovery email address.");
+    displayLoginPage(conn);
+    return;
+    }
+char *recov1 = cartUsualString(cart, "hgLogin_newRecovEmail1", "");
+char *recov2 = cartUsualString(cart, "hgLogin_newRecovEmail2", "");
+if (isEmpty(recov1) || spc_email_isvalid(recov1) == 0)
+    {
+    freez(&errMsg);
+    errMsg = cloneString("Please enter a valid email address.");
+    changeRecovEmailPage(conn);
+    return;
+    }
+if (differentString(recov1, recov2))
+    {
+    freez(&errMsg);
+    errMsg = cloneString("Email addresses do not match.");
+    changeRecovEmailPage(conn);
+    return;
+    }
+char query[512];
+/* Re-authenticate where we can: if the account has a password, require the current one. */
+sqlSafef(query, sizeof(query), "SELECT password FROM gbMembers WHERE userName='%s'", user);
+char *curPwd = sqlQuickString(conn, query);
+if (isNotEmpty(curPwd))
+    {
+    char *given = cartUsualString(cart, "hgLogin_curPassword", "");
+    if (isEmpty(given) || !checkPwd(given, curPwd))
+        {
+        freez(&errMsg);
+        errMsg = cloneString("Please enter your current password.");
+        changeRecovEmailPage(conn);
+        return;
+        }
+    }
+sqlSafef(query, sizeof(query),
+    "SELECT recovEmail, recovEmailVerified, email FROM gbMembers WHERE userName='%s'", user);
+struct sqlResult *sr = sqlGetResult(conn, query);
+char **row = sqlNextRow(sr);
+char *curRecov = (row != NULL) ? cloneString(emptyForNull(row[0])) : cloneString("");
+char *curVerified = (row != NULL) ? cloneString(emptyForNull(row[1])) : cloneString("");
+char *curEmail = (row != NULL) ? cloneString(emptyForNull(row[2])) : cloneString("");
+sqlFreeResult(&sr);
+/* An address the account already uses needs no second proof. */
+if (sameWord(recov1, curEmail))
+    {
+    freez(&errMsg);
+    errMsg = cloneString("That is already the main address on this account.");
+    changeRecovEmailPage(conn);
+    return;
+    }
+if (sameWord(recov1, curRecov) && sameWord(curVerified, "Y"))
+    {
+    freez(&errMsg);
+    errMsg = cloneString("That is already your confirmed recovery email address.");
+    changeRecovEmailPage(conn);
+    return;
+    }
+/* Do not store the address yet: mail a one-time confirmation link and put it on the account
+ * only when that link is opened (see confirmRecovEmail).  Until then the address the user has
+ * now keeps working, so a typo here costs them nothing. */
+sendRecovEmailConfirmMail(recov1, user, curRecov, curVerified);
+cartRemove(cart, "hgLogin_newRecovEmail1");
+cartRemove(cart, "hgLogin_newRecovEmail2");
+cartRemove(cart, "hgLogin_curPassword");
+char *encRecov = htmlEncode(recov1);
+hPrintf("<div class=\"centeredContainer formBox\"><h2>%s</h2>", brwName);
+hPrintf("<h3>Almost done. Please check your email</h3>");
+hPrintf("<p>We sent a confirmation link to <b>%s</b>. Open the link in that message to finish "
+    "setting your recovery email address. The link works once and expires in seven days. Until "
+    "that link is opened, nothing about your account changes.</p></div>", encRecov);
+freeMem(encRecov);
+returnToURL(3000);
+}
+
 void signupPage(struct sqlConnection *conn)
 /* draw the signup page */
 {
 hPrintf("<div id=\"signUpBox\" class=\"centeredContainer formBox\">"
     "<h2>%s</h2>", brwName);
 hPrintf(
-    "<p>Signing up enables you to save multiple sessions and to share your sessions with others.</p>"
-    "Already have an account? <a href=\"%s?hgLogin.do.displayLoginPage=1\">Login</a>.<br>"
-    "\n", hgLoginUrl);
-hPrintf("<h3>Sign Up</h3>"
+    "<p>Signing up enables you to save multiple sessions, share your sessions with others via short and stable session links and manage previously uploaded custom tracks and track hubs.</p>"
+    "\n");
+hPrintf("<p>Already have an account? "
+    "<a href=\"%s?hgLogin.do.displayLoginPage=1\">Go to the login page</a>.</p>", hgLoginUrl);
+printSocialButtons(FALSE, TRUE, "Sign up");
+hPrintf("<h3>Sign up using email</h3>"
     "<form method=\"post\" action=\"%s\" name=\"mainForm\">"
     "<span style='color:red;'>%s</span>"
     "\n", hgLoginUrl, errMsg ? errMsg : "");
+printUsernameNote();
 hPrintf("<div class=\"inputGroup\">"
     "<label for=\"userName\">Username</label>"
     "<input type=text name=\"hgLogin_userName\" value=\"%s\" size=\"30\" id=\"userName\">"
@@ -952,39 +1773,57 @@ hPrintf("<div class=\"inputGroup\">"
     "</div>"
     "\n"
     "<div class=\"inputGroup\">"
-    "<label for=\"reenterEmail\">Re-enter Email address</label>"
+    "<label for=\"reenterEmail\">Re-enter email address</label>"
     "<input type=text name=\"hgLogin_email2\" value=\"%s\" size=\"30\" id=\"emailCheck\">"
     "</div>\n",
-    cartUsualString(cart, "hgLogin_userName", ""), cartUsualString(cart, "hgLogin_email", ""),
-    cartUsualString(cart, "hgLogin_email2", ""));
+    htmlEncode(cartUsualString(cart, "hgLogin_userName", "")),   // all three go into value="" attributes; escape (XSS)
+    htmlEncode(cartUsualString(cart, "hgLogin_email", "")),
+    htmlEncode(cartUsualString(cart, "hgLogin_email2", "")));
 
 if (sqlFieldIndex(conn, "gbMembers", "recovEmail") != -1)
     hPrintf("<div class=\"inputGroup\">"
-        "<label for=\"recovEmail\">Optional Secondary Recovery Email</label>"
+        "<label for=\"recovEmail\">Optional secondary recovery email</label>"
         "<input type=text name=\"hgLogin_recovEmail\" size=\"30\" id=\"recovEmail\">"
+        "<p style=\"font-size:0.9em\">We will email this address a link to confirm it. Until "
+        "you open that link, the address cannot be used to sign in or to recover your "
+        "password.</p>"
         "</div>"
         "\n");
 
 hPrintf("<div class=\"inputGroup\">"
     "<label for=\"password\">Password <small>(must be at least 5 characters)</small></label>"
-    "<input type=password name=\"hgLogin_password\" value=\"%s\" size=\"30\" id=\"password\">"
+    "<span style=\"display:inline-flex; align-items:center;\">"
+    "<input type=password name=\"hgLogin_password\" value=\"%s\" size=\"30\" id=\"password\">",
+    htmlEncode(cartUsualString(cart, "hgLogin_password", "")));  // value="" attribute; escape (XSS)
+printPwdEyeIcon("signupPwEyeIcon", "signupPwEyeSlash");
+hPrintf(
+    "</span>"
     "</div>"
     "\n"
     "<div class=\"inputGroup\">"
-    "<label for=\"password\">Re-enter Password</label>"
-    "<input type=password name=\"hgLogin_password2\" value=\"%s\" size=\"30\" id=\"passwordCheck\">"
+    "<label for=\"passwordCheck\">Re-enter password</label>"
+    "<span style=\"display:inline-flex; align-items:center;\">"
+    "<input type=password name=\"hgLogin_password2\" value=\"%s\" size=\"30\" id=\"passwordCheck\">",
+    htmlEncode(cartUsualString(cart, "hgLogin_password2", "")));  // value="" attribute; escape (XSS)
+printPwdEyeIcon("signupPwCheckEyeIcon", "signupPwCheckEyeSlash");
+hPrintf(
+    "</span>"
     "\n"
     "</div>"
     "\n"
     "<div class=\"formControls\">"
-    "    <input type=\"submit\" name=\"hgLogin.do.signup\" value=\"Sign Up\" class=\"largeButton\"> &nbsp; "
-    "    <a href=\"%s\">Cancel</a>"
+    "    <input type=\"submit\" name=\"hgLogin.do.signup\" value=\"Sign up using email\" class=\"largeButton\"> &nbsp; "
+    "    <a href=\"%s\" class=\"cancelButton\">Cancel</a>"
     "</div>"
     "</form>"
     "</div><!-- END - signUpBox -->",
-    cartUsualString(cart, "hgLogin_password", ""), 
-    cartUsualString(cart, "hgLogin_password2", ""),
-    getReturnToURL());
+    getReturnToUrlForAttr());
+if (pwdEyeIconEnabled)
+    {
+    printPwdToggleJS();
+    jsOnEventById("click", "signupPwEyeIcon", "togglePwdVisibility('password','signupPwEyeSlash');");
+    jsOnEventById("click", "signupPwCheckEyeIcon", "togglePwdVisibility('passwordCheck','signupPwCheckEyeSlash');");
+    }
 cartSaveSession(cart);
 }
 
@@ -1114,9 +1953,19 @@ struct dyString *query2 = sqlDyStringCreate(
     "userName='%s',realName='%s',password='%s',email='%s',"
     "lastUse=NOW(),accountActivated='%s'",
     user,user,encPwd,email,accActStatus);
+/* A recovery address is confirmed by mail before it counts for anything (see
+ * sendRecovEmailConfirmMail).  Two kinds of install cannot confirm anything: one that sends no
+ * mail at all, and one with no login.cookieSalt to sign the link with (plain login does not
+ * need the salt, so an install can run happily without one).  There, leave the address as
+ * usable as it is today rather than storing one that could never be confirmed. */
+boolean confirmRecov = !isEmpty(recovEmail) && recovEmailVerifyOk
+                        && !sameWord(returnAddr, "NOEMAIL")
+                        && isNotEmpty(cfgOption(CFG_LOGIN_COOKIE_SALT));
 // set the recov email only if we got one (and we only got one if the table has this field)
 if (!isEmpty(recovEmail))
     sqlDyStringPrintf(query2, ",recovEmail='%s'", recovEmail);
+if (confirmRecov)
+    sqlDyStringPrintf(query2, ",recovEmailVerified='N'");
 
 sqlUpdate(conn, dyStringContents(query2));
 dyStringFree(&query2);
@@ -1128,22 +1977,40 @@ if (sameWord(returnAddr, "NOEMAIL"))
     }
 
 setupNewAccount(conn, email, user);
+if (confirmRecov)
+    sendRecovEmailConfirmMail(recovEmail, user, recovEmail, "N");
 /* send out activate code mail, and display the mail confirmation box */
 cartRemove(cart, "hgLogin_email");
 cartRemove(cart, "hgLogin_email2");
 cartRemove(cart, "hgLogin_userName");
 cartRemove(cart, "user");
 cartRemove(cart, "token");
+/* This page is shared with the social-login flows, which leave it a note saying which provider
+ * and address to explain.  Those are cleared when that page renders, but the hand-off is a
+ * JavaScript redirect and a user who never lands on it keeps them in the cart.  Drop them here
+ * so a plain signup can never inherit somebody else's explanation. */
+cartRemove(cart, "hgLogin_actMailProvider");
+cartRemove(cart, "hgLogin_actMailTo");
+cartRemove(cart, "hgLogin_actMailUser");
+cartRemove(cart, "hgLogin_actMailUnverified");
+cartRemove(cart, "hgLogin_actMailChanged");
 redirectToLoginPage("hgLogin.do.displayActMailSuccess=1");
 }
 
 void accountHelp(struct sqlConnection *conn)
 /* email user username(s) or new password */
 {
-char query[256];
+char query[1024];   // room for an address-matching clause holding a long address twice
 char *email = cartUsualString(cart, "hgLogin_email", "");
 char *username = cartUsualString(cart, "hgLogin_userName", "");
 char *helpWith = cartUsualString(cart, "hgLogin_helpWith", "");
+
+/* Passwordless email login link */
+if (sameString(helpWith,"loginLink"))
+    {
+    sendEmailLink(conn);
+    return;
+    }
 
 /* Forgot username */
 if (sameString(helpWith,"username"))
@@ -1164,8 +2031,10 @@ if (sameString(helpWith,"username"))
         }
     else 
         {
+        char *addrMatch = sqlAddressMatch(email);
         sqlSafef(query,sizeof(query),
-            "SELECT password FROM gbMembers WHERE email='%s' or recovEmail='%s'", email, email);
+            "SELECT password FROM gbMembers WHERE %-s", addrMatch);
+        freeMem(addrMatch);
         char *password = sqlQuickString(conn, query);
         cartSetString(cart, "hgLogin_sendMailTo", email);
         cartSetString(cart, "hgLogin_sendMailContain", "username(s)");
@@ -1326,6 +2195,1204 @@ jsInline(javascript->string);
 returnToURL(150);
 }
 
+/* ---- Social login (OAuth) and passwordless email-link login ---- */
+
+static void printSocialButtons(boolean dividerAbove, boolean dividerBelow, char *action)
+/* Print social login buttons for any enabled providers, optionally bracketed by "or"
+ * dividers.  action is the button verb ("Sign in" on the login page, "Sign up" on the signup
+ * page).  Prints nothing if no provider is configured, so mirrors without OAuth credentials
+ * are unaffected. */
+{
+if (!oauthAnyProviderEnabled())
+    return;
+hPrintf("<div class=\"socialLogin\">");
+if (dividerAbove)
+    hPrintf("<div class=\"orDivider\"><span>or</span></div>");
+struct slName *prov, *providers = oauthProviderNames();
+for (prov = providers;  prov != NULL;  prov = prov->next)
+    hPrintf("<a class=\"socialButton\" href=\"%s?hgLogin.do.oauthStart=1&provider=%s\">"
+            "%s with %s</a>",
+            hgLoginUrl, cgiEncode(prov->name), action, oauthProviderLabel(prov->name));
+if (dividerBelow)
+    hPrintf("<div class=\"orDivider\"><span>or</span></div>");
+hPrintf("</div>");
+}
+
+static boolean emailLinkEnabled()
+/* Return TRUE if passwordless email-link login is turned on in hg.conf.  It needs working
+ * outbound email, so it is off unless the admin explicitly enables it with login.emailLink=on. */
+{
+return cfgOptionBooleanDefault(CFG_LOGIN_EMAIL_LINK, FALSE);
+}
+
+static boolean recovEmailChangeEnabled()
+/* Return TRUE if users may set or change their own recovery email address.  Needs working
+ * outbound mail to confirm the new address, a login.cookieSalt to sign the confirmation link,
+ * and the recovEmailVerified column to record the answer in, so all three are required on top
+ * of the admin turning it on with login.recovEmailChange=on in hg.conf. */
+{
+if (!cfgOptionBooleanDefault(CFG_LOGIN_RECOV_EMAIL_CHANGE, FALSE))
+    return FALSE;
+if (!recovEmailVerifyOk || isEmpty(cfgOption(CFG_LOGIN_COOKIE_SALT)))
+    return FALSE;
+return !sameWord(returnAddr, "NOEMAIL");
+}
+
+static void printEmailLinkButton(boolean dividerAbove)
+/* Print a grey button that opens the passwordless email-link login page, if enabled,
+ * optionally preceded by an "or" divider. */
+{
+if (!emailLinkEnabled())
+    return;
+if (dividerAbove)
+    hPrintf("<div class=\"orDivider\"><span>or</span></div>");
+hPrintf("<a class=\"socialButton\" href=\"%s?hgLogin.do.emailLinkPage=1\">"
+    "Email me a sign-in link</a>", hgLoginUrl);
+}
+
+static void printUsernameNote()
+/* Print a short hint, shown wherever a new username is chosen, explaining that the username
+ * shows up in every short link the user later creates, so it should be short and easy to type. */
+{
+hPrintf("<p style=\"font-size:0.9em\">Note: your username becomes part of every short link "
+    "you create later (for example <code>%s/s/<b>username</b>/MySession</code>), so choose "
+    "something short and easy to type.</p>", brwAddr);
+}
+
+static void loginAndReturn(struct sqlConnection *conn, char *userName, uint idx)
+/* Set the permanent login cookies for userName and bounce back to the returnto URL.
+ * Every social/email-link login funnels through here, so they all produce the same
+ * long-lived cookies and all record the sign-in in gbMembers.lastUse.  (The password
+ * path uses displayLoginSuccess and stamps lastUse via clearNewPasswordFields.) */
+{
+char query[256];
+sqlSafef(query, sizeof(query), "UPDATE gbMembers SET lastUse=NOW() WHERE idx=%u", idx);
+sqlUpdate(conn, query);
+hPrintf("<h2>%s</h2>", brwName);
+hPrintf("<p>Login successful, setting cookies now&hellip;</p>");
+struct dyString *cookieJS = getLoginCookieJS(userName, idx);
+jsInline(cookieJS->string);
+cartRemove(cart, "hgLogin_userName");
+returnToURL(150);
+}
+
+static void createIdentityTable(struct sqlConnection *conn)
+/* Create the gbMemberIdentity table if it does not exist.  On a mirror whose central db
+ * is read-only this may fail; social login simply won't work there (and won't be enabled
+ * without client secrets anyway), so ignore any error. */
+{
+if (sqlTableExists(conn, "gbMemberIdentity"))
+    return;
+struct errCatch *errCatch = errCatchNew();
+if (errCatchStart(errCatch))
+    {
+    struct dyString *dy = sqlDyStringCreate(
+        "CREATE TABLE IF NOT EXISTS gbMemberIdentity ("
+        "idx int unsigned NOT NULL,"
+        "provider varchar(64) NOT NULL,"
+        "subject varchar(255) NOT NULL,"
+        "email varchar(255) NOT NULL default '',"
+        "created DATETIME NOT NULL,"
+        "lastUse DATETIME NOT NULL,"
+        "UNIQUE KEY provSub (provider, subject),"
+        "INDEX(idx))");
+    sqlUpdate(conn, dyStringContents(dy));
+    dyStringFree(&dy);
+    }
+errCatchEnd(errCatch);
+errCatchFree(&errCatch);
+}
+
+static boolean userNameTaken(struct sqlConnection *conn, char *userName)
+/* Return TRUE if userName already exists in gbMembers. */
+{
+char query[512];
+sqlSafef(query, sizeof(query), "SELECT count(*) FROM gbMembers WHERE userName='%s'", userName);
+return sqlQuickNum(conn, query) > 0;
+}
+
+static char *suggestUsername(struct sqlConnection *conn, char *email, char *displayName)
+/* Suggest an available username from the email local-part (falling back to the display
+ * name), keeping only valid username characters and appending a number to avoid clashes. */
+{
+char raw[256];
+raw[0] = 0;
+if (isNotEmpty(email) && strchr(email, '@'))
+    {
+    safecpy(raw, sizeof(raw), email);
+    char *at = strchr(raw, '@');
+    *at = 0;
+    }
+else if (isNotEmpty(displayName))
+    safecpy(raw, sizeof(raw), displayName);
+char clean[256];
+int j = 0;
+char *s;
+for (s = raw; *s != 0 && j < (int)sizeof(clean)-1; s++)
+    if (isalnum((unsigned char)*s) || *s == '_' || *s == '-')
+        clean[j++] = tolower((unsigned char)*s);
+clean[j] = 0;
+if (strlen(clean) < 2)
+    safecpy(clean, sizeof(clean), "user");
+char candidate[288];
+safecpy(candidate, sizeof(candidate), clean);
+int n = 1;
+while (userNameTaken(conn, candidate))
+    safef(candidate, sizeof(candidate), "%s%d", clean, ++n);
+return cloneString(candidate);
+}
+
+static struct gbMembers *memberForIdentity(struct sqlConnection *conn, struct oauthIdentity *id)
+/* Return the gbMembers account already linked to this provider identity, or NULL. */
+{
+char query[512];
+sqlSafef(query, sizeof(query),
+    "SELECT idx FROM gbMemberIdentity WHERE provider='%s' AND subject='%s'",
+    id->provider, id->subject);
+uint idx = (uint)sqlQuickLongLong(conn, query);
+if (idx == 0)
+    return NULL;
+sqlSafef(query, sizeof(query), "SELECT * FROM gbMembers WHERE idx=%u", idx);
+return gbMembersLoadByQuery(conn, query);
+}
+
+/* A pending social identity is good for this many seconds -- long enough to choose a username
+ * or an account, short enough that a leaked signature is quickly useless. */
+#define OAUTH_PENDING_TTL 900
+
+static char *oauthPendingSig(char *provider, char *subject, char *email, char *emailVerified,
+                             char *timeStr)
+/* HMAC-MD5 over a pending social identity, keyed by the secret login.cookieSalt.  Only
+ * resolveIdentity (which runs after a genuine provider verification) can produce a valid one,
+ * so a pending identity injected through cart/CGI variables will not validate.  The signature
+ * also covers this browser's hguid (cart->userId, which -- unlike the hgsid -- survives the
+ * provider redirect) and the time it was minted, so a signature that leaks into a saved or
+ * shared session cannot be replayed by a different browser or after it expires (see
+ * pendingIdentityValid).  Result is allocd. */
+{
+char *salt = cfgOption(CFG_LOGIN_COOKIE_SALT);
+if (isEmpty(salt))
+    errAbort("Signing in with an external identity provider requires %s in hg.conf, set to a "
+        "secret random string.  Without a secret we cannot sign the pending identity, and the "
+        "account chooser would accept a forged one.", CFG_LOGIN_COOKIE_SALT);
+char buf[1024];
+safef(buf, sizeof(buf), "%s|%s|%s|%s|%s|%s",
+    emptyForNull(provider), emptyForNull(subject), emptyForNull(email),
+    emptyForNull(emailVerified), emptyForNull(cart->userId), emptyForNull(timeStr));
+return hmacMd5(salt, buf);
+}
+
+static boolean pendingIdentityValid()
+/* TRUE only if the pending-identity cart variables carry a signature we minted, for this
+ * browser, within the last OAUTH_PENDING_TTL seconds.  Guards the OAuth chooser and
+ * completeAccount against forged, injected, replayed, or stale pending identities. */
+{
+char *sig = cartUsualString(cart, "oauth_pending_sig", "");
+char *timeStr = cartUsualString(cart, "oauth_pending_time", "");
+if (isEmpty(sig) || isEmpty(timeStr))
+    return FALSE;
+if (clock1() - atol(timeStr) > OAUTH_PENDING_TTL)
+    return FALSE;
+char *expected = oauthPendingSig(cartUsualString(cart, "oauth_pending_provider", ""),
+                                 cartUsualString(cart, "oauth_pending_subject", ""),
+                                 cartUsualString(cart, "oauth_pending_email", ""),
+                                 cartUsualString(cart, "oauth_pending_email_verified", ""),
+                                 timeStr);
+boolean ok = sameString(sig, expected);
+freeMem(expected);
+return ok;
+}
+
+static void setPendingIdentity(struct oauthIdentity *id)
+/* Stash an authenticated-but-not-yet-linked identity in the cart so it survives a form
+ * round-trip (the "choose a username" or "choose an account" page).  The signature is what
+ * proves, on the way back, that we really verified this identity, for this browser, recently. */
+{
+char timeStr[32];
+safef(timeStr, sizeof(timeStr), "%ld", clock1());
+cartSetString(cart, "oauth_pending_provider", id->provider);
+cartSetString(cart, "oauth_pending_subject", id->subject);
+cartSetString(cart, "oauth_pending_email", emptyForNull(id->email));
+/* Not signed, the same as oauth_pending_name: it decides nothing, it only picks the wording of
+ * the page that asks for an address.  dropRequestSuppliedFlowVars keeps a request-supplied copy
+ * from standing in for ours. */
+cartSetString(cart, "oauth_pending_email_unverified", emptyForNull(id->emailUnverified));
+char *emailVerified = id->emailVerified ? "1" : "0";
+cartSetString(cart, "oauth_pending_email_verified", emailVerified);
+cartSetString(cart, "oauth_pending_name", emptyForNull(id->displayName));
+cartSetString(cart, "oauth_pending_time", timeStr);
+cartSetString(cart, "oauth_pending_sig",
+    oauthPendingSig(id->provider, id->subject, emptyForNull(id->email), emailVerified, timeStr));
+}
+
+static void clearPendingIdentity()
+/* Remove the pending-identity cart variables.  Call this on every path that finishes with the
+ * pending identity -- success or definitive failure -- so a stale signature is not left behind
+ * in the cart to be swept into a saved session. */
+{
+cartRemove(cart, "oauth_pending_provider");
+cartRemove(cart, "oauth_pending_subject");
+cartRemove(cart, "oauth_pending_email");
+cartRemove(cart, "oauth_pending_email_unverified");
+cartRemove(cart, "oauth_pending_email_verified");
+cartRemove(cart, "oauth_pending_name");
+cartRemove(cart, "oauth_pending_time");
+cartRemove(cart, "oauth_pending_sig");
+}
+
+static void linkIdentity(struct sqlConnection *conn, uint idx, struct oauthIdentity *id)
+/* Insert or refresh the gbMemberIdentity row linking idx to this provider identity. */
+{
+char query[1024];
+char *email = emptyForNull(id->email);
+sqlSafef(query, sizeof(query),
+    "INSERT INTO gbMemberIdentity SET idx=%u, provider='%s', subject='%s', email='%s', "
+    "created=NOW(), lastUse=NOW() "
+    "ON DUPLICATE KEY UPDATE idx=%u, email='%s', lastUse=NOW()",
+    idx, id->provider, id->subject, email, idx, email);
+sqlUpdate(conn, query);
+}
+
+/* What we trust about an email address in a social login is that the *provider* released it,
+ * not that the provider set email_verified.  CILogon leaves that flag at 0 even for a real
+ * institutional sign-in (#37984 note-50), and its addresses come from the university's own
+ * identity provider rather than from anything the person can type, so insisting on the flag
+ * would make every CILogon user confirm an address by mail and would still never let them reach
+ * an account they already have.  What we do not trust is an address the *user* typed: either
+ * because the provider released none (ORCID releases only an ORCID iD, by design) or because
+ * they edited the one that was released.  Those have to be confirmed by mail.
+ * To tighten this later, add the email_verified test back in the two places that call
+ * oauthProviderEmail() and in resolveIdentity's matching query; the flag is still carried
+ * through the cart in oauth_pending_email_verified, it is just not consulted. */
+
+static char *oauthProviderEmail()
+/* The address the provider released for the pending identity, or NULL if it released none or
+ * released something that is not a usable address.
+ * When this is non-NULL the "choose a username" page must not ask for an address at all.  We
+ * already have one, from a source the person cannot type into, so a text box would only invite
+ * an edit -- and a box we then accept unchanged, without ever writing to it, is the worst of
+ * both worlds: it looks like a question we check the answer to, and it is not.  Either we have
+ * an address and use it, or we do not have one and must confirm what the user types. */
+{
+char *email = cartUsualString(cart, "oauth_pending_email", "");
+if (isEmpty(email) || spc_email_isvalid(email) == 0)
+    return NULL;
+return email;
+}
+
+static char *oauthUnverifiedEmail()
+/* The address the provider released for the pending identity and we would not take, because it
+ * did not say the address is verified and hg.conf does not trust the provider (see
+ * oauthFetchIdentity).  NULL when the provider released nothing at all.
+ * This is the difference between "we were told nothing" and "we were told something we cannot
+ * act on", which the user needs to hear and which the form can start from.  Never match on it:
+ * whatever the user does with it, it still has to be confirmed by mail. */
+{
+char *email = cartUsualString(cart, "oauth_pending_email_unverified", "");
+if (isEmpty(email))
+    return NULL;
+return email;
+}
+
+void completeAccountPage(struct sqlConnection *conn)
+/* Ask a first-time social-login user to confirm a username (and email) for a new account. */
+{
+char *provider = cartUsualString(cart, "oauth_pending_provider", "");
+char *email = cartUsualString(cart, "oauth_pending_email", "");
+char *name = cartUsualString(cart, "oauth_pending_name", "");
+if (isEmpty(provider) || !pendingIdentityValid())
+    {
+    clearPendingIdentity();
+    displayLoginPage(conn);
+    return;
+    }
+char *providerEmail = oauthProviderEmail();
+char *suggested = cartUsualString(cart, "hgLogin_userName", "");
+if (isEmpty(suggested))
+    suggested = suggestUsername(conn, email, name);
+char *encSuggested = htmlEncode(suggested);   // both go into value="" attributes; escape (XSS)
+char *label = oauthProviderLabel(provider);
+
+hPrintf("<div id=\"completeAccountBox\" class=\"centeredContainer formBox\">"
+    "<h2>%s</h2>", brwName);
+hPrintf("<h3>Choose a username</h3>");
+hPrintf("<p>You signed in with %s. Pick a username for your new %s account. "
+    "You can change the suggested name below.</p>", label, brwName);
+/* Explain why this is always a new account when the provider released no address (ORCID does
+ * this by design: its OpenID Connect offers only the "openid" scope, so the ORCID iD is all we
+ * ever get).  Without an address we cannot tell a returning user from a new one, so every first
+ * sign-in lands here, which surprised real users (#38341).  Keyed on whether an address arrived,
+ * not on the provider's name: a mirror can call a provider anything it likes in hg.conf, so a
+ * name test would silently miss it (#38213).
+ * Test whether anything arrived, not whether oauthProviderEmail() accepted it.  A provider that
+ * sends an address we cannot use -- spc_email_isvalid rejects every byte >= 127, so any
+ * non-ASCII address -- also leaves us asking for one, but telling that user the provider shares
+ * no address would be simply untrue.
+ * Same for a provider that did release an address which we then dropped because it would not
+ * say the address is verified: CILogon does exactly this, and "does not share your email
+ * address with us" was plainly wrong for it (#38339). */
+char *unverified = oauthUnverifiedEmail();
+if (isEmpty(email) && unverified != NULL)
+    {
+    char *encUnverified = htmlEncode(unverified);
+    hPrintf("<p>%s gave us the email address <b>%s</b>, but does not tell us whether that "
+        "address belongs to you. So we cannot use it to sign you in, even if an account "
+        "already has this address. Enter your email address below. Once it is confirmed, %s "
+        "will sign you in directly. If you already have an account, use another sign-in "
+        "option instead.</p>", label, encUnverified, label);
+    freeMem(encUnverified);
+    }
+else if (isEmpty(email))
+    hPrintf("<p>A new %s account is created for any %s sign-in we have not seen before, because "
+        "%s does not share your email address with us. So you cannot sign in to an existing "
+        "account this way. Use another sign-in option if you do not want to create a new "
+        "account.</p>", brwName, label, label);
+else if (providerEmail == NULL)
+    hPrintf("<p>We cannot use the email address %s gave us, so please enter one below.</p>",
+        label);
+printUsernameNote();
+hPrintf("<span style='color:red;'>%s</span>", errMsg ? errMsg : "");
+hPrintf("<form method=\"post\" action=\"%s\" name=\"completeAccountForm\">", hgLoginUrl);
+hPrintf("<div class=\"inputGroup\">"
+    "<label for=\"userName\">Username</label>"
+    "<input type=\"text\" name=\"hgLogin_userName\" value=\"%s\" size=\"30\" id=\"userName\">"
+    "</div>", encSuggested);
+if (providerEmail == NULL)
+    {
+    /* No address from the provider, so we have to ask -- and because anyone can type anything
+     * here, the account is not usable until the mailed link is opened.  Say that next to the box
+     * rather than springing the confirmation page on the user after they submit.  Show back what
+     * they typed so an error does not wipe the address they are being asked to correct.
+     * Nothing typed yet and the provider did release an address we could not take?  Start from
+     * that one.  It is almost always the address the person wants, and it still has to survive
+     * the duplicate check and the confirmation mail, so offering it grants nothing. */
+    char *typed = cartUsualString(cart, "hgLogin_email", "");
+    if (isEmpty(typed) && (unverified != NULL) && (spc_email_isvalid(unverified) != 0))
+        typed = unverified;
+    char *encTyped = htmlEncode(typed);
+    hPrintf("<div class=\"inputGroup\">"
+        "<label for=\"emailAddr\">Email address</label>"
+        "<input type=\"text\" name=\"hgLogin_email\" value=\"%s\" size=\"30\" id=\"emailAddr\">"
+        "</div>", encTyped);
+    freeMem(encTyped);
+    if (!sameWord(returnAddr, "NOEMAIL"))
+        hPrintf("<p style=\"font-size:0.9em\">We will email a confirmation link to this address. "
+            "Open the link to finish creating your account.</p>");
+    }
+else
+    {
+    /* We already have an address from the provider, so do not ask for one.  A box here would be
+     * a question we do not check the answer to. */
+    char *encProviderEmail = htmlEncode(providerEmail);
+    /* Only promise the change-email page where it exists: it, and the confirmation link that
+     * finishes the change, are all behind login.emailLink, which is off by default. */
+    hPrintf("<p>Your email address, as %s gave it to us, is <b>%s</b>.%s</p>",
+        label, encProviderEmail,
+        emailLinkEnabled() ? " You can change it later on the account page." : "");
+    freeMem(encProviderEmail);
+    }
+hPrintf("<div class=\"formControls\">"
+    "<input type=\"submit\" name=\"hgLogin.do.completeAccount\" value=\"Create account\" class=\"largeButton\">"
+    " &nbsp;<a href=\"%s\" class=\"cancelButton\">Cancel</a>"
+    "</div></form></div><!-- END - completeAccountBox -->", getReturnToUrlForAttr());
+cartSaveSession(cart);
+freeMem(encSuggested);
+}
+
+void completeAccount(struct sqlConnection *conn)
+/* Create the account for a first-time social-login user, link the identity, and log in. */
+{
+char *provider = cartUsualString(cart, "oauth_pending_provider", "");
+char *subject = cartUsualString(cart, "oauth_pending_subject", "");
+if (isEmpty(provider) || isEmpty(subject) || !pendingIdentityValid())
+    {
+    clearPendingIdentity();
+    freez(&errMsg);
+    errMsg = cloneString("Your login session expired. Please sign in again.");
+    displayLoginPage(conn);
+    return;
+    }
+char *user = cartUsualString(cart, "hgLogin_userName", "");
+char *encUserName = cgiEncodeFull(user);
+if (isEmpty(user))
+    {
+    freez(&errMsg);
+    errMsg = cloneString("Please enter a username.");
+    completeAccountPage(conn);
+    return;
+    }
+if (strlen(user) < 2)
+    {
+    freez(&errMsg);
+    errMsg = cloneString("User name must be at least two characters long.");
+    completeAccountPage(conn);
+    return;
+    }
+if (strlen(encUserName) > 32)
+    {
+    freez(&errMsg);
+    errMsg = cloneString("Please use a shorter user name: less than 32 characters after URL encoding.");
+    completeAccountPage(conn);
+    return;
+    }
+if (userNameTaken(conn, user))
+    {
+    freez(&errMsg);
+    errMsg = cloneString("A user with this name already exists. Please choose another.");
+    completeAccountPage(conn);
+    return;
+    }
+/* Where the provider gave us an address, that is the account's address, full stop.  The form did
+ * not offer a box for it, so anything sitting in hgLogin_email is left over from an earlier page
+ * in this cart and must not be allowed to stand in for it. */
+char *providerEmail = oauthProviderEmail();
+char *email = (providerEmail != NULL) ? providerEmail : cartUsualString(cart, "hgLogin_email", "");
+if (isEmpty(email))
+    {
+    freez(&errMsg);
+    errMsg = cloneString("Please enter an email address.");
+    completeAccountPage(conn);
+    return;
+    }
+if (spc_email_isvalid(email) == 0)
+    {
+    freez(&errMsg);
+    errMsg = cloneString("Invalid email address format.");
+    completeAccountPage(conn);
+    return;
+    }
+
+/* An address the user typed here must not be used to reach an account that already holds it.
+ * Typing an address someone else registered used to create a silent second account sharing it
+ * (#38341), which then makes both owners pick from a chooser on every later sign-in.  Send the
+ * user to a sign-in method that can actually show the address is theirs instead.  An address the
+ * provider released is not affected: resolveIdentity has already matched it against existing
+ * accounts and would not have sent us here.
+ * Only activated accounts count, the same rule resolveIdentity and chooseAccount apply: an
+ * unactivated row holds an address nobody ever proved they own, so letting one block a signup
+ * would let anyone reserve a stranger's address. */
+if (providerEmail == NULL)
+    {
+    char query[1024];
+    char *addrMatch = sqlAddressMatch(email);
+    sqlSafef(query, sizeof(query),
+        "SELECT count(*) FROM gbMembers WHERE %-s AND accountActivated='Y'", addrMatch);
+    freeMem(addrMatch);
+    if (sqlQuickNum(conn, query) > 0)
+        {
+        char buf[1024];
+        /* The provider may well have handed us this very address and we dropped it for want of
+         * a verified flag (CILogon, #38339).  Saying it never gave us the address would be
+         * wrong there, and the way out is a different one: what is missing is the provider's
+         * word that the address is the user's, not the address itself. */
+        char *unverified = oauthUnverifiedEmail();
+        if ((unverified != NULL) && sameWord(unverified, email))
+            safef(buf, sizeof(buf),
+                "An account with this email address already exists. To sign in to that account, "
+                "use a sign-in option that verifies your email address, or use your username and "
+                "password. To create a new account instead, enter a different email address.");
+        else
+            safef(buf, sizeof(buf),
+                "An account with this email address already exists. %s did not give us that "
+                "address, so we cannot tell that it belongs to you. To sign in to that account, "
+                "use a sign-in option that verifies your email address, or use your username and "
+                "password. To create a new account instead, enter a different email address.",
+                oauthProviderLabel(provider));
+        freez(&errMsg);
+        errMsg = cloneString(buf);
+        completeAccountPage(conn);
+        return;
+        }
+    }
+
+char *name = cartUsualString(cart, "oauth_pending_name", "");
+char *realName = isNotEmpty(name) ? name : user;
+
+/* The new account is created "activated" -- its address trusted for future auto-linking (see
+ * resolveIdentity) -- when the address came from the provider.  An address the user typed gets
+ * an inactive account and the usual confirmation mail, so a typed address can never be planted
+ * as a trusted one.  An install that sends no mail has no way to confirm anything, so there it
+ * is activated on the spot, the same compromise signup() makes. */
+boolean canMail = !sameWord(returnAddr, "NOEMAIL");
+boolean activateNow = (providerEmail != NULL) || !canMail;
+
+struct dyString *q = sqlDyStringCreate(
+    "INSERT INTO gbMembers SET userName='%s', realName='%s', password='', email='%s', "
+    "lastUse=NOW(), dateActivated=NOW(), accountActivated='%s'",
+    user, realName, emptyForNull(email), activateNow ? "Y" : "N");
+sqlUpdate(conn, dyStringContents(q));
+dyStringFree(&q);
+uint idx = sqlLastAutoId(conn);
+
+struct oauthIdentity pending;
+ZeroVar(&pending);
+pending.provider = provider;
+pending.subject = subject;
+pending.email = email;
+linkIdentity(conn, idx, &pending);
+
+/* clearPendingIdentity frees the cart's copy of oauth_pending_provider, and provider points
+ * straight at it (cartUsualString hands back the cart's own string, not a duplicate), so take
+ * the label while it is still there. */
+char *providerLabel = cloneString(oauthProviderLabel(provider));
+/* Same reason: the confirmation page has to know whether the provider released an address we
+ * would not take, and clearPendingIdentity is about to drop that too. */
+char *unverifiedLabel = cloneString(emptyForNull(oauthUnverifiedEmail()));
+clearPendingIdentity();
+if (activateNow)
+    {
+    freeMem(providerLabel);
+    freeMem(unverifiedLabel);
+    loginAndReturn(conn, user, idx);
+    return;
+    }
+/* Unconfirmed address: send the confirmation mail and say so, rather than signing the user in
+ * and leaving a mail nobody has any reason to open.  Activating is what makes the address usable
+ * for signing in by email link and for linking a later social login, so it is worth a click. */
+setupNewAccount(conn, email, user);
+/* Tell the confirmation page what to explain.  No user name here: this is a brand new account,
+ * which is the one thing that page cannot work out for itself. */
+cartSetString(cart, "hgLogin_actMailProvider", providerLabel);
+cartSetString(cart, "hgLogin_actMailTo", email);
+cartSetString(cart, "hgLogin_actMailUnverified", unverifiedLabel);
+cartRemove(cart, "hgLogin_actMailUser");
+freeMem(providerLabel);
+freeMem(unverifiedLabel);
+cartRemove(cart, "hgLogin_email");
+cartRemove(cart, "hgLogin_userName");
+redirectToLoginPage("hgLogin.do.displayActMailSuccess=1");
+}
+
+void chooseAccountPage(struct sqlConnection *conn)
+/* Ask the user which of several accounts sharing an email address to sign in to.  Used by
+ * two flows: OAuth (oauth_pending_* in the cart -> the chosen account is linked to the social
+ * identity) and the passwordless email link (emailLogin_* in the cart -> just sign in). */
+{
+char *provider = cartUsualString(cart, "oauth_pending_provider", "");
+boolean emailMode = isEmpty(provider);
+if (emailMode && !emailLinkEnabled())
+    {
+    // The email-link chooser must not run where passwordless login is switched off.
+    displayLoginPage(conn);
+    return;
+    }
+char *email = emailMode ? cartUsualString(cart, "emailLogin_email", "")
+                        : cartUsualString(cart, "oauth_pending_email", "");
+if (isEmpty(email) || (!emailMode && !pendingIdentityValid()))
+    {
+    if (!emailMode)
+        clearPendingIdentity();
+    displayLoginPage(conn);
+    return;
+    }
+char *encEmail = htmlEncode(email);   // the address is displayed; never trust it raw (XSS)
+char query[1024];
+char *addrMatch = sqlAddressMatch(email);   // email is non-empty here (checked above)
+if (emailMode)
+    // Only the accounts that hold the just-validated login token, matching what emailLogin saw.
+    sqlSafef(query, sizeof(query),
+        "SELECT * FROM gbMembers WHERE %-s AND loginToken='%s' "
+        "AND loginToken<>'' AND loginTokenExpires > NOW() AND accountActivated='Y' ORDER BY idx",
+        addrMatch, cartUsualString(cart, "emailLogin_tokenMd5", ""));
+else
+    // Only activated accounts, matching what chooseAccount() and resolveIdentity() accept;
+    // otherwise the page offers a row the action refuses, and shows the username of an
+    // unactivated row anyone could have created with this address.
+    sqlSafef(query, sizeof(query),
+        "SELECT * FROM gbMembers WHERE %-s AND accountActivated='Y' ORDER BY idx", addrMatch);
+freeMem(addrMatch);
+struct gbMembers *list = gbMembersLoadByQuery(conn, query), *m;
+
+hPrintf("<div id=\"chooseAccountBox\" class=\"centeredContainer formBox\">"
+    "<h2>%s</h2>", brwName);
+hPrintf("<h3>Choose an account</h3>");
+if (emailMode)
+    hPrintf("<p>The email address <b>%s</b> is associated with more than one %s account. "
+        "Select the account you would like to sign in to.</p>", encEmail, brwName);
+else
+    hPrintf("<p>The email address <b>%s</b> is associated with more than one %s account. "
+        "Select the account you would like to sign in to; your %s login will be linked to it.</p>",
+        encEmail, brwName, oauthProviderLabel(provider));
+hPrintf("<span style='color:red;'>%s</span>", errMsg ? errMsg : "");
+hPrintf("<form method=\"post\" action=\"%s\" name=\"chooseAccountForm\">", hgLoginUrl);
+hPrintf("<div class=\"inputGroup\">");
+boolean first = TRUE;
+for (m = list;  m != NULL;  m = m->next)
+    {
+    char *encUserName = htmlEncode(m->userName);
+    hPrintf("<div class=\"acctHelpSection\">"
+        "<input name=\"hgLogin_chosenIdx\" type=\"radio\" value=\"%u\" id=\"acct_%u\"%s>"
+        "<label for=\"acct_%u\" class=\"radioLabel\">%s</label></div>",
+        m->idx, m->idx, first ? " checked" : "", m->idx, encUserName);
+    freeMem(encUserName);
+    first = FALSE;
+    }
+hPrintf("</div>");
+hPrintf("<div class=\"formControls\">"
+    "<input type=\"submit\" name=\"hgLogin.do.chooseAccount\" value=\"Sign in\" class=\"largeButton\">"
+    " &nbsp;<a href=\"%s\" class=\"cancelButton\">Cancel</a>"
+    "</div></form></div><!-- END - chooseAccountBox -->", getReturnToUrlForAttr());
+cartSaveSession(cart);
+freeMem(encEmail);
+gbMembersFreeList(&list);
+}
+
+void chooseAccount(struct sqlConnection *conn)
+/* Finish the "which account?" chooser: for OAuth, link the pending identity to the chosen
+ * account; for the email link, just sign in.  Either way, only accept an account that really
+ * matches the verified email (and, for the email link, still holds the valid token), never an
+ * arbitrary username the client might submit. */
+{
+int chosenIdx = cartUsualInt(cart, "hgLogin_chosenIdx", 0);
+char *provider = cartUsualString(cart, "oauth_pending_provider", "");
+char query[1024];   // room for an address-matching clause holding a long address twice
+
+if (isEmpty(provider))
+    {
+    /* Passwordless email-link mode. */
+    if (!emailLinkEnabled())
+        {
+        displayLoginPage(conn);
+        return;
+        }
+    char *email = cartUsualString(cart, "emailLogin_email", "");
+    char *tokenMd5 = cartUsualString(cart, "emailLogin_tokenMd5", "");
+    if (isEmpty(email) || isEmpty(tokenMd5))
+        {
+        freez(&errMsg);
+        errMsg = cloneString("Your login link expired. Please request a new one.");
+        displayLoginPage(conn);
+        return;
+        }
+    char *addrMatch = sqlAddressMatch(email);
+    sqlSafef(query, sizeof(query),
+        "SELECT * FROM gbMembers WHERE idx=%d AND %-s "
+        "AND loginToken='%s' AND loginToken<>'' AND loginTokenExpires > NOW() "
+        "AND accountActivated='Y'",
+        chosenIdx, addrMatch, tokenMd5);
+    struct gbMembers *m = gbMembersLoadByQuery(conn, query);
+    if (m == NULL)
+        {
+        freez(&errMsg);
+        errMsg = cloneString("Please choose one of the listed accounts.");
+        chooseAccountPage(conn);
+        return;
+        }
+    /* Consume the token on every account that shared it (single use), then sign in.
+     * loginAndReturn records the sign-in on the chosen account in gbMembers.lastUse. */
+    sqlSafef(query, sizeof(query),
+        "UPDATE gbMembers SET loginToken='' WHERE %-s AND loginToken='%s'",
+        addrMatch, tokenMd5);
+    freeMem(addrMatch);
+    sqlUpdate(conn, query);
+    cartRemove(cart, "emailLogin_email");
+    cartRemove(cart, "emailLogin_tokenMd5");
+    cartRemove(cart, "hgLogin_chosenIdx");
+    loginAndReturn(conn, m->userName, m->idx);
+    gbMembersFree(&m);
+    return;
+    }
+
+/* OAuth mode. */
+char *subject = cartUsualString(cart, "oauth_pending_subject", "");
+char *email = cartUsualString(cart, "oauth_pending_email", "");
+if (isEmpty(subject) || isEmpty(email) || !pendingIdentityValid())
+    {
+    clearPendingIdentity();
+    freez(&errMsg);
+    errMsg = cloneString("Your login session expired. Please sign in again.");
+    displayLoginPage(conn);
+    return;
+    }
+/* Only an activated account counts: an unactivated row can hold any address someone typed
+ * without ever proving they own it (see resolveIdentity), so it must not receive a social link.
+ * Match what chooseAccountPage() offers; email is non-empty here (checked above). */
+char *oauthAddrMatch = sqlAddressMatch(email);
+sqlSafef(query, sizeof(query),
+    "SELECT * FROM gbMembers WHERE idx=%d AND %-s AND accountActivated='Y'",
+    chosenIdx, oauthAddrMatch);
+freeMem(oauthAddrMatch);
+struct gbMembers *m = gbMembersLoadByQuery(conn, query);
+if (m == NULL)
+    {
+    freez(&errMsg);
+    errMsg = cloneString("Please choose one of the listed accounts.");
+    chooseAccountPage(conn);
+    return;
+    }
+struct oauthIdentity pending;
+ZeroVar(&pending);
+pending.provider = provider;
+pending.subject = subject;
+pending.email = email;
+linkIdentity(conn, m->idx, &pending);
+clearPendingIdentity();
+cartRemove(cart, "hgLogin_chosenIdx");
+loginAndReturn(conn, m->userName, m->idx);
+gbMembersFree(&m);
+}
+
+static void resolveIdentity(struct sqlConnection *conn, struct oauthIdentity *id)
+/* Log in the user behind an authenticated provider identity:
+ *  1. If the provider released an email matching MORE THAN ONE account, always let the
+ *     user pick which one -- even if this identity was linked before. Because login cookies
+ *     never expire, a user goes through OAuth very rarely, so an occasional pick is cheap
+ *     and it lets a person with several same-email accounts choose freely each time.
+ *  2. Else if the (provider,subject) is already linked, log into that account -- unless that
+ *     account is still waiting for its address to be confirmed, in which case send the user
+ *     back to their inbox rather than let them skip the confirmation forever.
+ *  3. Else if the email matches exactly one account, auto-link and log in.
+ *  4. Else send the user to the "choose a username" page to finish a new account.
+ * (Providers that don't release an email, e.g. ORCID, never reach step 1 or 3 and rely on
+ *  the stored link from step 2.) */
+{
+struct gbMembers *matches = NULL;
+int n = 0;
+/* Any address the provider released counts here, whether or not it set email_verified -- see
+ * the note above oauthProviderEmail().  Requiring the flag would send every CILogon user
+ * to the "choose a username" page even when they already have an account with that address,
+ * which is how the duplicate accounts in #38341 got made. */
+if (isNotEmpty(id->email))
+    {
+    char query[1024];
+    /* Match the provider email against the primary address and any confirmed recovery address,
+     * the same as password and email-link login do (see sqlAddressMatch).  The isNotEmpty()
+     * guard above keeps an empty id->email out of the query, so a blank recovEmail='' row can
+     * never match.
+     * Match only activated accounts.  gbMembers has no unique key on email, and the plain
+     * signup form will create an unactivated row for any address a person types -- the
+     * activation mail goes to the address's real owner, who ignores it.  Without this filter
+     * someone could pre-register a victim's address, and the victim's first social login would
+     * then auto-link to (and sign in as) the attacker's account. */
+    char *addrMatch = sqlAddressMatch(id->email);
+    sqlSafef(query, sizeof(query),
+        "SELECT * FROM gbMembers WHERE %-s AND accountActivated='Y' ORDER BY idx", addrMatch);
+    freeMem(addrMatch);
+    matches = gbMembersLoadByQuery(conn, query);
+    n = slCount(matches);
+    }
+
+if (n > 1)
+    {
+    setPendingIdentity(id);
+    gbMembersFreeList(&matches);
+    chooseAccountPage(conn);
+    return;
+    }
+
+struct gbMembers *linked = memberForIdentity(conn, id);
+if (linked != NULL)
+    {
+    linkIdentity(conn, linked->idx, id);
+    /* The provider identity is proven, but the address on the account may not be: when the
+     * provider released none (ORCID) the user typed it themselves, and completeAccount left the
+     * account unactivated until the mailed link is opened. */
+    if (!sameString(linked->accountActivated, "Y"))
+        {
+        if (isNotEmpty(id->email) && sameWord(id->email, linked->email))
+            {
+            /* ...but this time the provider handed us that very address, which is the same
+             * assurance a new signup through this provider gets (see oauthProviderEmail).  So
+             * confirm it here and let the user in, rather than sending them to fetch a link
+             * proving something we have just been told.  This also settles accounts left
+             * unactivated by an earlier release that asked for an address and took it on
+             * trust. */
+            char query[512];
+            sqlSafef(query, sizeof(query),
+                "UPDATE gbMembers SET accountActivated='Y', dateActivated=NOW(), "
+                "emailToken='', emailTokenExpires='' WHERE idx=%u", linked->idx);
+            sqlUpdate(conn, query);
+            }
+        else if (!sameWord(returnAddr, "NOEMAIL") && isNotEmpty(linked->email))
+            {
+            /* The address on the account is still nobody's word but the user's, so signing in
+             * would make the confirmation mail pointless: they would click the provider button
+             * again and never confirm.  Send them to their inbox, with a fresh link each time,
+             * because the first expires after seven days and for an account with no password
+             * this is the only way to activate it.  An install that cannot send mail no longer
+             * creates such an account, but guard rather than leave the user nothing to click. */
+            resendActivateMail(conn, linked->email, linked->userName);
+            cartSetString(cart, "hgLogin_actMailProvider", oauthProviderLabel(id->provider));
+            cartSetString(cart, "hgLogin_actMailTo", linked->email);
+            cartSetString(cart, "hgLogin_actMailUser", linked->userName);
+            /* Same hand-off, same stale-note risk as the plain signup above: nothing was
+             * changed here and no address was dropped, so say neither. */
+            cartRemove(cart, "hgLogin_actMailUnverified");
+            cartRemove(cart, "hgLogin_actMailChanged");
+            /* Keep the identity signed in the cart so the page can offer to correct the
+             * address.  Without that there is no way back at all for someone who mistyped it
+             * when the account was made: they cannot sign in (this branch), cannot use the
+             * email link or the change-email page (both want an activated account or a login
+             * cookie), and cannot start again, because the user name and this provider identity
+             * are both taken.  The signature is what lets changePendingEmail trust the request
+             * that comes back: only a real provider round trip in this browser can mint it. */
+            setPendingIdentity(id);
+            gbMembersFree(&linked);
+            gbMembersFreeList(&matches);
+            displayActMailSuccess();
+            return;
+            }
+        }
+    loginAndReturn(conn, linked->userName, linked->idx);
+    gbMembersFree(&linked);
+    gbMembersFreeList(&matches);
+    return;
+    }
+
+if (n == 1)
+    {
+    linkIdentity(conn, matches->idx, id);
+    loginAndReturn(conn, matches->userName, matches->idx);
+    gbMembersFreeList(&matches);
+    return;
+    }
+
+gbMembersFreeList(&matches);
+setPendingIdentity(id);
+completeAccountPage(conn);
+}
+
+void changePendingEmail(struct sqlConnection *conn)
+/* Put a different address on the unactivated account behind a still-valid pending identity, and
+ * send the confirmation there.  Reached only from the confirmation page that resolveIdentity
+ * shows such an account (see displayActMailSuccess), and the only way out for someone who
+ * mistyped their address when the account was made: with no password and an address they cannot
+ * read, every other route back in wants an activated account or a login cookie.
+ * The pending signature is the authorization.  Only resolveIdentity mints one, only after a real
+ * provider round trip, and only for this browser, so a request arriving here without one is
+ * refused rather than trusted. */
+{
+char *provider = cartUsualString(cart, "oauth_pending_provider", "");
+char *subject = cartUsualString(cart, "oauth_pending_subject", "");
+if (isEmpty(provider) || isEmpty(subject) || !pendingIdentityValid())
+    {
+    clearPendingIdentity();
+    freez(&errMsg);
+    errMsg = cloneString("Your sign-in expired. Please sign in again.");
+    displayLoginPage(conn);
+    return;
+    }
+struct oauthIdentity id;
+ZeroVar(&id);
+id.provider = provider;
+id.subject = subject;
+struct gbMembers *m = memberForIdentity(conn, &id);
+/* Only an account that is still waiting to be confirmed.  Once it is activated this page is
+ * not reachable any more, and changing the address of a working account belongs in the
+ * change-email flow, which confirms the new address before it takes effect. */
+if ((m == NULL) || sameString(m->accountActivated, "Y"))
+    {
+    clearPendingIdentity();
+    gbMembersFree(&m);
+    displayLoginPage(conn);
+    return;
+    }
+char *email = cartUsualString(cart, "hgLogin_email", "");
+boolean bad = isEmpty(email) || (spc_email_isvalid(email) == 0);
+if (!bad)
+    {
+    /* Same rule as a new signup: an address the user typed must not be pointed at an account
+     * somebody else already confirmed it for. */
+    char query[1024];
+    char *addrMatch = sqlAddressMatch(email);
+    sqlSafef(query, sizeof(query),
+        "SELECT count(*) FROM gbMembers WHERE %-s AND accountActivated='Y'", addrMatch);
+    freeMem(addrMatch);
+    bad = (sqlQuickNum(conn, query) > 0);
+    }
+if (!bad)
+    {
+    char query[512];
+    sqlSafef(query, sizeof(query),
+        "UPDATE gbMembers SET email='%s', emailToken='', emailTokenExpires='' WHERE idx=%u",
+        email, m->idx);
+    sqlUpdate(conn, query);
+    setupNewAccount(conn, email, m->userName);   // new address, so a new token is right
+    cartSetString(cart, "hgLogin_actMailTo", email);
+    /* The page we are about to show is the same one the user just came from, so say that the
+     * change went through.  Otherwise the swapped-in address is the only sign of it. */
+    cartSetString(cart, "hgLogin_actMailChanged", "1");
+    }
+else
+    {
+    freez(&errMsg);
+    errMsg = cloneString("Please enter an email address that is not already in use.");
+    cartSetString(cart, "hgLogin_actMailTo", m->email);
+    cartRemove(cart, "hgLogin_actMailChanged");
+    }
+cartSetString(cart, "hgLogin_actMailProvider", oauthProviderLabel(provider));
+cartSetString(cart, "hgLogin_actMailUser", m->userName);
+cartRemove(cart, "hgLogin_email");
+gbMembersFree(&m);
+displayActMailSuccess();
+}
+
+void oauthStart(struct sqlConnection *conn)
+/* Begin a social login: save an anti-CSRF state nonce (in the cart) and redirect the
+ * browser to the provider's authorization page. */
+{
+char *provider = cgiUsualString("provider", "");
+if (!oauthProviderEnabled(provider))
+    {
+    freez(&errMsg);
+    errMsg = cloneString("That login method is not available on this server.");
+    displayLoginPage(conn);
+    return;
+    }
+char *state = makeRandomKey(128+33);
+cartSetString(cart, "oauth_state", state);
+cartSetString(cart, "oauth_provider", provider);
+/* returnto is already in the cart from the incoming link; leave it in place so the
+ * provider round-trip returns the user to where they started. */
+char *url = oauthLoginUrl(provider, hgLoginUrl, state);
+if (isEmpty(url))
+    {
+    freez(&errMsg);
+    errMsg = cloneString("Could not start social login. Please try again.");
+    displayLoginPage(conn);
+    return;
+    }
+jsInlineF("window.location = '%s';\n", url);
+}
+
+void oauthReturn(struct sqlConnection *conn)
+/* Handle the provider's redirect back to us: verify state, exchange the code for the
+ * user's identity, and resolve/auto-link the account. */
+{
+char *state = cgiUsualString("state", "");
+char *savedState = cartUsualString(cart, "oauth_state", "");
+// clone this: cartRemove below frees the cart's copy, but we still use provider afterward
+char *provider = cloneString(cartUsualString(cart, "oauth_provider", ""));
+
+// Validate the anti-CSRF state before consuming any cart state or acting on an error param.  A
+// stray code/error link (a re-opened redirect, or a crafted hgLogin?error=...) must not be able to
+// consume the state nonce of a login in flight, so check first and only then clear the flow.  A
+// compliant provider echoes state on an error return too (RFC 6749 4.1.2.1), and we always send it.
+if (isEmpty(state) || isEmpty(savedState) || differentString(state, savedState))
+    {
+    freez(&errMsg);
+    errMsg = cloneString("Your login session expired or was invalid. Please try again.");
+    displayLoginPage(conn);
+    return;
+    }
+cartRemove(cart, "oauth_state");      // one-time use
+cartRemove(cart, "oauth_provider");   // end the flow so a later code/error param can't re-enter
+
+char *errParam = cgiUsualString("error", "");
+if (isNotEmpty(errParam))
+    {
+    // The provider redirected back with an OAuth error instead of a code (e.g. the user
+    // declined, or the client is misconfigured/unapproved).  Show its message rather than
+    // silently falling through to another page.
+    char *desc = cgiUsualString("error_description", "");
+    struct dyString *dy = dyStringNew(256);
+    dyStringAppend(dy, "Social login failed. ");
+    if (isNotEmpty(desc))
+        dyStringPrintf(dy, "%s ", htmlEncode(desc));
+    dyStringPrintf(dy, "(%s)", htmlEncode(errParam));
+    freez(&errMsg);
+    errMsg = dyStringCannibalize(&dy);
+    displayLoginPage(conn);
+    return;
+    }
+char *code = cgiUsualString("code", "");
+struct oauthIdentity *id = oauthFetchIdentity(provider, code, hgLoginUrl);
+if (id == NULL)
+    {
+    freez(&errMsg);
+    errMsg = cloneString("We could not complete the social login. Please try again.");
+    displayLoginPage(conn);
+    return;
+    }
+resolveIdentity(conn, id);
+oauthIdentityFree(&id);
+}
+
+void emailLinkPage(struct sqlConnection *conn)
+/* Standalone page that asks for an email address and sends a one-time login link. */
+{
+if (!emailLinkEnabled())
+    {
+    displayLoginPage(conn);
+    return;
+    }
+hPrintf("<div id=\"emailLinkBox\" class=\"centeredContainer formBox\">"
+    "<h2>%s</h2>", brwName);
+hPrintf("<h3>Email me a sign-in link</h3>");
+hPrintf("<p>Enter your email address and we'll send you a link that signs you in without a "
+    "password. This is handy on a computer where you don't have your password saved.</p>");
+hPrintf("<span style='color:red;'>%s</span>", errMsg ? errMsg : "");
+hPrintf("<form method=\"post\" action=\"%s\" name=\"emailLinkForm\">", hgLoginUrl);
+char *encEmail = htmlEncode(cartUsualString(cart, "hgLogin_email", ""));
+hPrintf("<div class=\"inputGroup\">"
+    "<label for=\"emailLink\">Email address</label>"
+    "<input type=\"text\" name=\"hgLogin_email\" value=\"%s\" size=\"30\" id=\"emailLink\">"
+    "</div>", encEmail);
+freeMem(encEmail);
+hPrintf("<div class=\"formControls\">"
+    "<input type=\"submit\" name=\"hgLogin.do.sendEmailLink\" value=\"Send login link\" class=\"largeButton\">"
+    " &nbsp;<a href=\"%s\" class=\"cancelButton\">Cancel</a>"
+    "</div></form></div><!-- END - emailLinkBox -->", getReturnToUrlForAttr());
+cartSaveSession(cart);
+}
+
+void displayLoginLinkSuccess()
+/* Confirmation shown after a passwordless login link is (possibly) emailed.  Phrased so it
+ * does not reveal whether an account exists for the address. */
+{
+char *email = htmlEncode(cartUsualString(cart, "hgLogin_sendMailTo", ""));
+hPrintf("<div id=\"confirmationBox\" class=\"centeredContainer formBox\">"
+    "<h2>%s</h2>", brwName);
+hPrintf("<p id=\"confirmationMsg\" class=\"confirmationTxt\">If an account exists for "
+    "<B>%s</B>, a login link has been sent to that address.<BR><BR>"
+    "Click the link in that email to sign in. No password needed. "
+    "The link works once and expires in one hour.</p>", email);
+hPrintf("<p>If you don't see the email, please check your spam folder.</p>");
+hPrintf("<p><a href=\"%s?hgLogin.do.displayLoginPage=1\">Return to Login</a></p>\n", hgLoginUrl);
+cartRemove(cart, "hgLogin_email");
+cartRemove(cart, "hgLogin_sendMailTo");
+cartRemove(cart, "hgLogin_helpWith");
+}
+
+void sendLoginLinkMail(char *email, char *token)
+/* Email a one-time passwordless login link to an address.  The link identifies the address,
+ * not a single account: if the address has several accounts, the user picks one after
+ * clicking (see emailLogin), so one email covers them all. */
+{
+char subject[256];
+char msg[4096];
+char url[512];
+char *remoteAddr = getenv("REMOTE_ADDR");
+safef(url, sizeof(url), "%s?hgLogin.do.emailLogin=1&email=%s&token=%s",
+    hgLoginUrl, cgiEncode(email), cgiEncode(token));
+safef(subject, sizeof(subject), "Your login link for the %s", brwName);
+safef(msg, sizeof(msg),
+    "Someone (probably you, from IP address %s) requested a login link for the %s account "
+    "registered to this email address.\nClick the link below to sign in without a password. "
+    "It works once and expires in one hour:\n\n%s\n\n%s\n%s",
+    remoteAddr, brwName, url, signature, returnAddr);
+sendActMailOut(email, subject, msg);
+}
+
+void sendEmailLink(struct sqlConnection *conn)
+/* Generate and email a one-time passwordless login link to the address on file. */
+{
+if (!emailLinkEnabled())
+    {
+    displayLoginPage(conn);
+    return;
+    }
+char *email = cartUsualString(cart, "hgLogin_email", "");
+if (isEmpty(email) || spc_email_isvalid(email) == 0)
+    {
+    freez(&errMsg);
+    errMsg = cloneString("Please enter a valid email address.");
+    emailLinkPage(conn);
+    return;
+    }
+char query[1024];
+char *addrMatch = sqlAddressMatch(email);
+sqlSafef(query, sizeof(query),
+    "SELECT * FROM gbMembers WHERE %-s AND accountActivated='Y'", addrMatch);
+freeMem(addrMatch);
+struct gbMembers *list = gbMembersLoadByQuery(conn, query), *m;
+if (list != NULL)
+    {
+    /* One token for the address, stored on every account that uses it, and one email.
+     * The user proves they own the address by clicking; only then (in emailLogin) do we
+     * reveal the accounts and let them choose, so we never disclose accounts to someone
+     * who merely typed the address here. */
+    char *token = makeRandomKey(128+33);
+    char *tokenMD5 = generateTokenMD5(token);
+    for (m = list; m != NULL; m = m->next)
+        {
+        sqlSafef(query, sizeof(query),
+            "UPDATE gbMembers SET loginToken='%s', "
+            "loginTokenExpires=DATE_ADD(NOW(), INTERVAL 1 HOUR) WHERE idx=%u",
+            tokenMD5, m->idx);
+        sqlUpdate(conn, query);
+        }
+    sendLoginLinkMail(email, token);
+    }
+gbMembersFreeList(&list);
+/* Always show the same confirmation, even when no account matched, so we don't reveal
+ * whether an address is registered. */
+cartSetString(cart, "hgLogin_sendMailTo", email);
+displayLoginLinkSuccess();
+}
+
+void emailLogin(struct sqlConnection *conn)
+/* Validate a one-time email login token.  The token proves the user owns the address; if it
+ * matches one account, log straight in; if it matches several accounts that share the
+ * address, show the account chooser (the same one the OAuth flow uses). */
+{
+if (!emailLinkEnabled())
+    {
+    displayLoginPage(conn);
+    return;
+    }
+char *email = cgiUsualString("email", "");
+char *token = cgiUsualString("token", "");
+char *tokenMD5 = generateTokenMD5(token);
+char query[1024];
+char *addrMatch = sqlAddressMatch(email);
+sqlSafef(query, sizeof(query),
+    "SELECT * FROM gbMembers WHERE %-s AND loginToken='%s' "
+    "AND loginToken<>'' AND loginTokenExpires > NOW() AND accountActivated='Y' ORDER BY idx",
+    addrMatch, tokenMD5);
+freeMem(addrMatch);
+struct gbMembers *list = gbMembersLoadByQuery(conn, query);
+int n = slCount(list);
+if (n == 0)
+    {
+    freez(&errMsg);
+    errMsg = cloneString("This login link is invalid or has expired. Please request a new one.");
+    displayLoginPage(conn);
+    }
+else if (n == 1)
+    {
+    sqlSafef(query, sizeof(query),
+        "UPDATE gbMembers SET loginToken='' WHERE idx=%u", list->idx);
+    sqlUpdate(conn, query);
+    loginAndReturn(conn, list->userName, list->idx);
+    }
+else
+    {
+    /* Several accounts share this now-verified address: stash the proof and let the user
+     * pick one.  chooseAccount re-checks the token before logging in. */
+    cartSetString(cart, "emailLogin_email", email);
+    cartSetString(cart, "emailLogin_tokenMd5", tokenMD5);
+    chooseAccountPage(conn);
+    }
+gbMembersFreeList(&list);
+}
+
+static void dropRequestSuppliedFlowVars()
+/* The cart variables holding the state of a login in flight are written by hgLogin and by
+ * nothing else: the nonce and provider of an OAuth round trip, the pending identity behind
+ * the account chooser, and the verified address behind the email-link chooser.  The cart
+ * takes CGI variables verbatim (loadCgiOverHash in hg/lib/cart.c), so a copy arriving with
+ * the request would stand in for the copy we stored.  Drop those before anything reads them;
+ * a flow whose state is dropped fails closed and the user starts it again.  Note that
+ * excludeVars would not do this job: it governs what is saved at the end of a request, not
+ * what is read during it. */
+{
+static char *serverOwned[] = {
+    "oauth_state", "oauth_provider",
+    "oauth_pending_provider", "oauth_pending_subject", "oauth_pending_email",
+    "oauth_pending_email_unverified",
+    "oauth_pending_email_verified", "oauth_pending_name", "oauth_pending_time",
+    "oauth_pending_sig",
+    "emailLogin_email", "emailLogin_tokenMd5",
+    "hgLogin_actMailProvider", "hgLogin_actMailTo", "hgLogin_actMailUser",
+    "hgLogin_actMailUnverified", "hgLogin_actMailChanged",
+    };
+int i;
+for (i = 0;  i < ArraySize(serverOwned);  i++)
+    if (cgiVarExists(serverOwned[i]))
+        cartRemove(cart, serverOwned[i]);
+}
+
 void doMiddle(struct cart *theCart)
 /* Write the middle parts of the HTML page.
  * This routine sets up some globals and then
@@ -1338,16 +3405,69 @@ if (sqlFieldIndex(conn, "gbMembers", "recovEmail") == -1) {
     autoUpgradeTableAddColumn(conn, "gbMembers", "recovEmail", "varchar(255)", FALSE, "''");
 }
 
+/* Tells a confirmed recovery address from one that was only typed into the signup form.
+ * Existing rows default to 'Y': every recovery address that predates this column keeps working
+ * exactly as before, so no one has to re-confirm an address they set up long ago.  Only
+ * addresses entered from now on have to be confirmed (see sendRecovEmailConfirmMail). */
+if (sqlFieldIndex(conn, "gbMembers", "recovEmailVerified") == -1)
+    autoUpgradeTableAddColumn(conn, "gbMembers", "recovEmailVerified", "varchar(1)", FALSE, "'Y'");
+recovEmailVerifyOk = (sqlFieldIndex(conn, "gbMembers", "recovEmailVerified") != -1);
+
+// columns for the passwordless email-link login feature
+if (sqlFieldIndex(conn, "gbMembers", "loginToken") == -1)
+    autoUpgradeTableAddColumn(conn, "gbMembers", "loginToken", "varchar(255)", FALSE, "NULL");
+if (sqlFieldIndex(conn, "gbMembers", "loginTokenExpires") == -1)
+    autoUpgradeTableAddColumn(conn, "gbMembers", "loginTokenExpires", "DATETIME", FALSE, "NULL");
+
+// table linking accounts to social (Google/ORCID) identities; only needed where OAuth is set up
+if (oauthAnyProviderEnabled())
+    createIdentityTable(conn);
+
 cart = theCart;
+dropRequestSuppliedFlowVars();
 safecpy(brwName,sizeof(brwName), browserName());
 safecpy(brwAddr,sizeof(brwAddr), browserAddr());
 safecpy(signature,sizeof(signature), mailSignature());
 safecpy(returnAddr,sizeof(returnAddr), mailReturnAddr());
+pwdEyeIconEnabled = cfgOptionBooleanDefault(CFG_LOGIN_PWD_EYE_ICON, TRUE);
 
-if (cartVarExists(cart, "hgLogin.do.changePasswordPage"))
+// A provider's OAuth redirect back to us carries 'code' (success) or 'error' (failure) but
+// none of our own hgLogin.do.* variables, so detect it up front.  We gate on an OAuth flow
+// being in progress (oauth_provider set by oauthStart) so a stray code/error param can't
+// trigger this.  Error returns may omit 'code' and even 'state', so we must not require them.
+if ((cgiOptionalString("code") != NULL || cgiOptionalString("error") != NULL)
+    && isNotEmpty(cartUsualString(cart, "oauth_provider", "")))
+    oauthReturn(conn);
+else if (cartVarExists(cart, "hgLogin.do.oauthStart"))
+    oauthStart(conn);
+else if (cartVarExists(cart, "hgLogin.do.completeAccount"))
+    completeAccount(conn);
+else if (cartVarExists(cart, "hgLogin.do.chooseAccount"))
+    chooseAccount(conn);
+else if (cartVarExists(cart, "hgLogin.do.changePendingEmail"))
+    changePendingEmail(conn);
+else if (cartVarExists(cart, "hgLogin.do.emailLinkPage"))
+    emailLinkPage(conn);
+else if (cartVarExists(cart, "hgLogin.do.sendEmailLink"))
+    sendEmailLink(conn);
+else if (cartVarExists(cart, "hgLogin.do.emailLogin"))
+    emailLogin(conn);
+else if (cartVarExists(cart, "hgLogin.do.changePasswordPage"))
     changePasswordPage(conn);
 else if (cartVarExists(cart, "hgLogin.do.changePassword"))
     changePassword(conn);
+else if (cartVarExists(cart, "hgLogin.do.changeEmailPage"))
+    changeEmailPage(conn);
+else if (cartVarExists(cart, "hgLogin.do.changeEmail"))
+    changeEmail(conn);
+else if (cartVarExists(cart, "hgLogin.do.confirmChangeEmail"))
+    confirmChangeEmail(conn);
+else if (cartVarExists(cart, "hgLogin.do.confirmRecovEmail"))
+    confirmRecovEmail(conn);
+else if (cartVarExists(cart, "hgLogin.do.changeRecovEmailPage"))
+    changeRecovEmailPage(conn);
+else if (cartVarExists(cart, "hgLogin.do.changeRecovEmail"))
+    changeRecovEmail(conn);
 else if (cartVarExists(cart, "hgLogin.do.displayAccHelpPage"))
     displayAccHelpPage(conn);
 else if (cartVarExists(cart, "hgLogin.do.accountHelp"))
@@ -1393,7 +3513,9 @@ long enteredMainTime = clock1000();
 earlyBotCheck(enteredMainTime, "hgLogin", delayFraction, 0, 0, "html");
 pushCarefulMemHandler(100000000);
 cgiSpoof(&argc, argv);
-htmlSetStyleSheet("../style/userAccounts.css");
+/* Use the site's standard time-stamped resource link (appends ?v=<mtime>) so browsers pick
+ * up CSS changes after a release instead of serving a stale cached copy. */
+htmlSetStyleSheet(webTimeStampedLinkToResource("userAccounts.css", FALSE));
 htmlSetStyle(htmlStyleUndecoratedLink);
 htmlSetBgColor(HG_CL_OUTSIDE);
 htmlSetFormClass("accountScreen");

@@ -1826,10 +1826,11 @@ var posting = {
                     location.assign(href);
                 }
             } else if (cgi === "hgc") {
-                if (id.startsWith("multiz")) {
+                if (id.startsWith("multiz") || id.startsWith("tabulaSapiens") || id.startsWith("crossTissue")) {
                     // multiz tracks have a form that lets you change highlighted bases
                     // that does not play well in a pop up
-                    // toga tracks require bootstrap which does not work with something
+                    // the faceted bar charts have a custom hgc page that resubmits on most clicks
+                    // so we need to overhaul the page before allowing them in popups
                     location.assign(href);
                     return false;
                 }
@@ -2060,8 +2061,10 @@ var vis = {
                     rec.visibility = 0;
                 // else Would be nice to hide subtracks as well but that may be overkill
                 $(document.getElementById('tr_' + track)).remove();
+                // also remove this from the Visible Tracks group
+                removeTrackFromVisibleGroup(track);
                 cart.updateSessionPanel();
-                imageV2.drawHighlights();
+                imageV2.afterImgChange(true);
                 $(this).attr('class', 'hiddenText');
             } else
                 $(this).attr('class', 'normalText');
@@ -2256,7 +2259,14 @@ var dragSelect = {
                              "<li>Clear specific highlights with right click &gt; Remove highlight" +
                              "<li>To merely save the color for the next keyboard or right-click &gt; Highlight operations, click 'Save Color' below" +
                              "</ul></p>");
-            makeHighlightPicker("hlColor", document.getElementById("dragSelectDialog"), null);
+            // Start the picker on the color the user last saved.  This dialog is removed from
+            // the DOM on close when "don't show this again" is checked, so this runs again on
+            // the next drag.  makeHighlightPicker's own loadHlColor() reads a different
+            // prevHlColor than the one dragSelect.saveHlColor writes, so without the color
+            // passed in here the rebuilt picker falls back to the default and the saved color
+            // is lost.  Fourth argument stays undefined so the label keeps its default.
+            makeHighlightPicker("hlColor", document.getElementById("dragSelectDialog"), null,
+                                undefined, dragSelect.loadHlColor());
             $("#dragSelectDialog").append("<div style='padding-top: 4px'><input style='float:left' type='checkbox' id='disableDragHighlight'>" + 
                              "<span style='border:solid 1px #DDDDDD; padding:3px;display:inline-block' id='hlNotShowAgainMsg'>Don't show this again and always zoom with shift.<br>" + 
                              "Re-enable via 'View - Configure Browser' (<tt>c then f</tt>)</span></div>"+ 
@@ -2351,8 +2361,16 @@ var dragSelect = {
                 $(this).dialog("close");
             },
             "Save Color": function() {
+                // Honor "don't show this again", the same as every other button here.
+                // The close handler already removes the dialog when the box is checked, but
+                // saveHlColor only writes prevHlColor, so without this the setting is never
+                // stored and the dialog comes back on the next drag.
+                if ($("#disableDragHighlight").prop('checked'))
+                    hgTracks.enableHighlightingDialog = false;
                 var hlColor = $("#hlColorInput").val();
                 dragSelect.saveHlColor( hlColor );
+                if (!hgTracks.enableHighlightingDialog)
+                    cart.setVarsObj({'enableHighlightingDialog': 0 },null,false); // async=false
                 $(this).dialog("close");
             }
         };
@@ -2894,7 +2912,19 @@ jQuery.fn.panImages = function(){
     var portalWidth = 0;
     var portalAbsoluteX = 0;
     var savedPosition;
-    var highlightAreas  = null; // Used to ensure dragSelect highlight will scroll. 
+    var highlightAreas  = null; // Used to ensure dragSelect highlight will scroll.
+    // quickLift draws its difference lines up into the center labels, but center labels do
+    // not scroll with the data.  Rather than leave the lines standing still over an image
+    // that is moving underneath them, these slices are swapped for a text stand-in of the
+    // center label (written by hgTracks) while the image is being dragged.
+    var cntrLabLines    = null;
+
+    function cntrLabDragSwap(dragging) {
+        if (cntrLabLines === null || cntrLabLines.length === 0)
+            return;
+        cntrLabLines.css( {'display': (dragging ? 'none' : '')} );
+        cntrLabLines.siblings('.cntrLabStandIn').css( {'display': (dragging ? 'block':'none')});
+    }
 
     this.each(function(){
 
@@ -2947,6 +2977,9 @@ jQuery.fn.panImages = function(){
                 mouseIsDown = true;
                 mouseDownX = e.clientX;
                 highlightAreas = $('.highlightItem');
+                // quickLift lines in center labels.  ':visible' so that turning center
+                // labels off leaves drag scrolling exactly as it was.
+                cntrLabLines = $('img.cntrLabLines:visible');
                 atEdge = (!beyondImage && (prevX >= leftLimit || prevX <= rightLimit));
                 $(document).on('mousemove',panner);
                 $(document).on('mouseup', panMouseUp);  // Will exec only once
@@ -2998,6 +3031,7 @@ jQuery.fn.panImages = function(){
                 if (!posStatus.isOutsideChrom)
                     scrollHighlight(relativeX);
 
+                cntrLabDragSwap(true);  // center label lines can't scroll: use the text
                 var nowPos = newX.toString() + "px";
                 $(".panImg").css( {'left': nowPos });
                 $('.tdData').css( {'backgroundPosition': nowPos } );
@@ -3030,6 +3064,7 @@ jQuery.fn.panImages = function(){
                 var oldPos = prevX.toString() + "px";
                 $(".panImg").css( {'left': oldPos });
                 $('.tdData').css( {'backgroundPosition': oldPos } );
+                cntrLabDragSwap(false);  // image is back where it started, lines line up
                 if (highlightAreas)
                     imageV2.drawHighlights();
                 return true;
@@ -3057,7 +3092,20 @@ jQuery.fn.panImages = function(){
                     hgTracks.imgBoxPortalOffsetX = (prevX * -1) - hgTracks.imgBoxLeftLabel;
                     hgTracks.imgBoxPortalLeft = newX.toString() + "px";
                 }
-            }
+                // No new image is coming, but the center label slices didn't move with the
+                // data, so the quickLift lines hidden above can only come back in the right
+                // place with a redraw.  Ask for one.
+                if (cntrLabLines && cntrLabLines.length > 0) {
+                    if (imageV2.inPlaceUpdate) {
+                        var newPos = parsePosition(genomePos.get());
+                        imageV2.navigateInPlace("db=" + getDb() + "&position=" +
+                                encodeURIComponent(newPos.chrom + ":" + newPos.start + "-" +
+                                                   newPos.end), null, true);
+                    } else
+                        cntrLabDragSwap(false);
+                }
+            } else
+                cntrLabDragSwap(false);  // drag ended where it started, nothing moved
         }
     }
     });  // end of this.each(function(){
@@ -3246,6 +3294,14 @@ jQuery.fn.panImages = function(){
 
 };
 
+function removeTrackFromVisibleGroup(track) {
+/* When a track has been hidden by the user, remove its select and label from
+ * the visible tracks group */
+    let rec = document.querySelector("[id^='visible-'] [data-track=\"" + track + "\"]");
+    if (rec)
+        rec.parentElement.remove();
+}
+
   ///////////////////////////////////////
  //// rightClick (aka context menu) ////
 ///////////////////////////////////////
@@ -3329,6 +3385,7 @@ var rightClick = {
             // update the track list below the image
             vis.update(loneParent, 'hide');
             rightClick.hideLegends();
+            removeTrackFromVisibleGroup(loneParent);
             delete hgTracks.trackDb[loneParent]; // for the next right-click
         }
 
@@ -3338,6 +3395,7 @@ var rightClick = {
             var id = delIds[i];
             cartHideAnyTrack(id, cartVars, cartVals);
             $(document.getElementById('tr_' + id)).remove();
+            removeTrackFromVisibleGroup(id);
             delete hgTracks.trackDb[id]; // for the next right-click
         }
         imageV2.afterImgChange(true);
@@ -3612,20 +3670,45 @@ var rightClick = {
 
             rightClick.showColorPicker(id);
 
+        } else if (cmd === 'colorThisItem') {
+
+            rightClick.colorThisItem();
+
+        } else if (cmd === 'removeItemColor') {
+
+            var itemToRemove = rightClick.itemFromHref(rightClick.selectedMenuItem.href);
+            if (itemToRemove)
+                rightClick.removeItemColor(itemToRemove.track, itemToRemove.name);
+
+        } else if (cmd === 'clearItemColors') {
+
+            rightClick.clearItemColors();
+
         } else if (cmd === 'hgTrackUi_follow') {
 
             url = "hgTrackUi?hgsid=" + getHgsid() + "&g=";
             rec = hgTracks.trackDb[id];
             if (tdbHasParent(rec) && tdbIsLeaf(rec))
                 url += rec.parentTrack;
+            else if (tdbHasParent(rec) && tdbIsContainer(rec))
+                // A container (e.g. multiWig) nested in a composite configures itself,
+                // not its parent (whose link is on the shared row button).
+                url += id;
             else {
                 // The button already has the ref
-                var link = normed($( 'td#td_btn_'+ rightClick.selectedMenuItem.id ).children('a')); 
+                var link = normed($( 'td#td_btn_'+ rightClick.selectedMenuItem.id ).children('a'));
                 if (link)
                     url = $(link).attr('href');
                 else
                     url += rightClick.selectedMenuItem.id;
             }
+            location.assign(url);
+
+        } else if (cmd === 'hgTrackUi_followParent') {
+
+            // Configure the parent container (e.g. the composite) of a nested container track.
+            rec = hgTracks.trackDb[id];
+            url = "hgTrackUi?hgsid=" + getHgsid() + "&g=" + rec.parentTrack;
             location.assign(url);
 
         } else if (cmd === 'newCollection') {
@@ -3664,6 +3747,11 @@ var rightClick = {
             imageV2.fullReload();
         } else if (cmd === "hideOthers") {
             rightClick.hideOthers(id);
+        } else if (cmd === "deleteCustomTrack") {
+            deleteCustomTrack(id);
+            // remove the track from the image in place (no page reload); hideTracks()
+            // drops its row, updates hgTracks.trackDb and redraws via afterImgChange().
+            rightClick.hideTracks([id]);
         } else if (cmd === "moveTop") {
             rightClick.moveTo(id, "top");
         } else if (cmd === "moveBottom") {
@@ -3957,6 +4045,248 @@ var rightClick = {
         });
     },
 
+    // ---- Per-item color (right-click "Color this item") ----
+    // The itemColors cart variable holds db#track#mode#itemName#hexColor records joined by '|',
+    // where mode is "item" (recolor the glyph) or "bg" (background highlight). db, track and mode
+    // are the leading fields and the color is the last '#' field, so item names containing '#'
+    // are tolerated.
+
+    getItemColors: function ()
+    {   // Current itemColors cart string, cached and seeded from the page's hgTracks json.
+        if (rightClick.itemColorsCache === undefined) {
+            rightClick.itemColorsCache =
+                (typeof hgTracks !== "undefined" && typeof hgTracks.itemColors === "string") ?
+                hgTracks.itemColors : "";
+        }
+        return rightClick.itemColorsCache;
+    },
+
+    parseItemColors: function (str)
+    {   // Parse the itemColors string into an array of {db, track, mode, name, hex} records.
+        var records = [];
+        if (!str)
+            return records;
+        str.split("|").forEach(function (rec) {
+            if (!rec)
+                return;
+            var firstHash = rec.indexOf("#");
+            var secondHash = rec.indexOf("#", firstHash + 1);
+            var thirdHash = rec.indexOf("#", secondHash + 1);
+            var lastHash = rec.lastIndexOf("#");
+            if (firstHash < 0 || secondHash < 0 || thirdHash < 0 || lastHash <= thirdHash)
+                return;
+            records.push({
+                db:    rec.substring(0, firstHash),
+                track: rec.substring(firstHash + 1, secondHash),
+                mode:  rec.substring(secondHash + 1, thirdHash),
+                name:  rec.substring(thirdHash + 1, lastHash),
+                hex:   rec.substring(lastHash + 1)   // bare hex, no leading '#'
+            });
+        });
+        return records;
+    },
+
+    serializeItemColors: function (records)
+    {
+        return records.map(function (r) {
+            return r.db + "#" + r.track + "#" + r.mode + "#" + r.name + "#" + r.hex;
+        }).join("|");
+    },
+
+    itemFromHref: function (href)
+    {   // Identify the clicked item from its hgc/hgGene link. Use the real name when it has a usable
+        // one (name field of the returned object), otherwise fall back to genomic position
+        // ("pos:chrom:start-end"). Nameless items (e.g. bed3) all share a placeholder name, so
+        // position - which both the link (c=/o=/t=) and the draw code can produce - identifies them.
+        if (!href)
+            return null;
+        var track, name, m;
+        m = /[&?]g=([^&]+)/.exec(href);
+        if (m && m[1])
+            track = decodeURIComponent(m[1]);
+        m = /[&?]i=([^&]+)/.exec(href);
+        if (m && m[1])
+            name = decodeURIComponent(m[1].replace(/\+/g, " "));
+        if (!name) {   // knownGene-style links
+            m = /[&?]hgg_gene=([^&]+)/.exec(href);
+            if (m && m[1])
+                name = decodeURIComponent(m[1]);
+            if (!track) {
+                m = /[&?]hgg_type=([^&]+)/.exec(href);
+                if (m && m[1])
+                    track = decodeURIComponent(m[1]);
+            }
+        }
+        if (!track)
+            return null;
+        // Custom tracks prefix the bed file path before the item name ("<path> <name>") and use the
+        // literal "NoItemName" when the row has no name; treat empty or "NoItemName" as nameless.
+        var nameless = !name || /(^|\s)NoItemName$/.test(name);
+        if (!nameless)
+            return {track: track, name: name};
+        // o=/t= are 0-based start/end, matching tg->itemStart/itemEnd in the draw code
+        var chrom, start, end;
+        m = /[&?]c=([^&]+)/.exec(href);
+        if (m && m[1]) chrom = decodeURIComponent(m[1]);
+        m = /[&?]o=([^&]+)/.exec(href);
+        if (m && m[1]) start = m[1];
+        m = /[&?]t=([^&]+)/.exec(href);
+        if (m && m[1]) end = m[1];
+        if (chrom && start && end)
+            return {track: track, name: "pos:" + chrom + ":" + start + "-" + end};
+        return null;
+    },
+
+    findItemColor: function (track, name)
+    {   // Return {hex (with leading '#'), mode} stored for this item, or null.
+        var db = getDb();
+        var records = rightClick.parseItemColors(rightClick.getItemColors());
+        for (var i = 0; i < records.length; i++) {
+            if (records[i].db === db && records[i].track === track && records[i].name === name)
+                return {hex: "#" + records[i].hex, mode: records[i].mode};
+        }
+        return null;
+    },
+
+    updateItemColorsVar: function (newStr)
+    {   // Persist the itemColors cart variable and keep the local cache in sync.
+        rightClick.itemColorsCache = newStr;
+        if (typeof hgTracks !== "undefined" && hgTracks)
+            hgTracks.itemColors = newStr;
+        cart.setVars(["itemColors"], [newStr], null, false);
+    },
+
+    setItemColor: function (track, name, hexWithHash, mode)
+    {
+        var db = getDb();
+        var hex = hexWithHash.replace(/^#/, "");
+        var records = rightClick.parseItemColors(rightClick.getItemColors());
+        var found = false;
+        for (var i = 0; i < records.length; i++) {
+            if (records[i].db === db && records[i].track === track && records[i].name === name) {
+                records[i].hex = hex;
+                records[i].mode = mode;
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+            records.push({db: db, track: track, mode: mode, name: name, hex: hex});
+        rightClick.updateItemColorsVar(rightClick.serializeItemColors(records));
+        imageV2.requestImgUpdate(track,
+            "itemColors=" + encodeURIComponent(rightClick.getItemColors()));
+    },
+
+    removeItemColor: function (track, name)
+    {
+        var db = getDb();
+        var records = rightClick.parseItemColors(rightClick.getItemColors()).filter(function (r) {
+            return !(r.db === db && r.track === track && r.name === name);
+        });
+        rightClick.updateItemColorsVar(rightClick.serializeItemColors(records));
+        imageV2.requestImgUpdate(track,
+            "itemColors=" + encodeURIComponent(rightClick.getItemColors()));
+    },
+
+    hasItemColorsForCurrentDb: function ()
+    {   // Are any item colors set for the database currently shown?
+        var db = getDb();
+        return rightClick.parseItemColors(rightClick.getItemColors()).some(function (r) {
+            return r.db === db;
+        });
+    },
+
+    clearItemColors: function ()
+    {   // Clear item colors for the current database only, leaving other assemblies' colors alone.
+        var db = getDb();
+        var records = rightClick.parseItemColors(rightClick.getItemColors()).filter(function (r) {
+            return r.db !== db;
+        });
+        var newStr = rightClick.serializeItemColors(records);
+        rightClick.updateItemColorsVar(newStr);
+        imageV2.fullReload("itemColors=" + encodeURIComponent(newStr));
+    },
+
+    colorThisItem: function ()
+    {   // Open the per-item color dialog for the right-clicked item.
+        var sel = rightClick.selectedMenuItem;
+        var item = sel ? rightClick.itemFromHref(sel.href) : null;
+        if (!item) {
+            warn("Couldn't identify the item to color.");
+            return;
+        }
+        var existing = rightClick.findItemColor(item.track, item.name);
+        var currentColor = existing ? existing.hex : "#ff0000";
+        var currentMode = existing ? existing.mode : "item";
+        rightClick.showItemColorPicker(item.track, item.name, currentColor, currentMode);
+    },
+
+    showItemColorPicker: function (track, itemName, currentColor, currentMode)
+    {   // Spectrum dialog to recolor a single item's glyph or draw a colored background behind it.
+        var dialogId = "itemColorDialog";
+        $("#" + dialogId).remove();
+        var $dlg = $("<div>").attr("id", dialogId).html(
+            "<p>Pick a color for <b></b>:</p>" +
+            "<input type='text' id='itemColorText' size='8' />" +
+            "&nbsp;<input id='itemColorPicker' />" +
+            "<br><br><label><input type='radio' name='itemColorMode' value='item'> " +
+            "Color whole item</label>" +
+            "<br><label><input type='radio' name='itemColorMode' value='bg'> " +
+            "Background highlight</label>");
+        $dlg.find("p b").text(itemName);
+        $dlg.find("#itemColorText").val(currentColor);
+        $dlg.find("input[name='itemColorMode'][value='" +
+                  (currentMode === "bg" ? "bg" : "item") + "']").prop("checked", true);
+        $("body").append($dlg);
+        var hexColorRe = /^#[0-9a-fA-F]{6}$/;
+        $("#itemColorPicker").spectrum({
+            color: currentColor,
+            showPalette: true,
+            showSelectionPalette: true,
+            showInitial: true,
+            showInput: true,
+            preferredFormat: "hex",
+            localStorageKey: "genomebrowser",
+            hideAfterPaletteSelect: true,
+            change: function(color) {
+                $("#itemColorText").val(color.toHexString());
+            }
+        });
+        $("#itemColorText").on("change", function() {
+            var val = $(this).val();
+            if (hexColorRe.test(val))
+                $("#itemColorPicker").spectrum("set", val);
+        });
+        var applyColor = function() {
+            var color = $("#itemColorText").val();
+            if (!hexColorRe.test(color)) {
+                warn("Invalid color '" + color + "'. Expected hex format like #1a2b3c.");
+                return false;
+            }
+            var mode = $("input[name='itemColorMode']:checked").val() || "item";
+            rightClick.setItemColor(track, itemName, color, mode);
+            return true;
+        };
+        $("#" + dialogId).dialog({
+            modal: true,
+            title: "Color this item",
+            closeOnEscape: true,
+            resizable: false,
+            minWidth: 400,
+            buttons: {
+                "Apply": function() { applyColor(); },
+                "Ok": function() {
+                    if (applyColor())
+                        $(this).dialog("close");
+                }
+            },
+            close: function() {
+                $("#itemColorPicker").spectrum("destroy");
+                $(this).remove();
+            }
+        });
+    },
+
     // CGIs now use HTML tags, e.g. "<b>Transcript:</b> ENST00000297261.7<br><b>Strand:</b>"
     mouseOverToLabel: function(title)
     {
@@ -4179,13 +4509,34 @@ var rightClick = {
                                                     "selectWholeGene"); return true;
                                           }
                                 };
-                            o[rightClick.makeImgTag("highlight.png") + " Highlight " + title] = 
+                            o[rightClick.makeImgTag("highlight.png") + " Highlight " + title] =
                                 {   onclick: function(menuItemClicked, menuObject) {
                                         rightClick.hit(menuItemClicked, menuObject,
-                                                       "highlightItem"); 
+                                                       "highlightItem");
                                         return true;
                                     }
                                 };
+                            var itemForColor = rightClick.itemFromHref(href);
+                            if (hgTracks.canColorItems && itemForColor) {
+                                o[rightClick.makeImgTag("palette.png") + " Color " + title + "..."] =
+                                    {   onclick: function(menuItemClicked, menuObject) {
+                                            rightClick.hit(menuItemClicked, menuObject,
+                                                           "colorThisItem");
+                                            return true;
+                                        }
+                                    };
+                                if (rightClick.findItemColor(itemForColor.track,
+                                                             itemForColor.name)) {
+                                    o[rightClick.makeImgTag("palette.png") +
+                                            " Remove color from " + title] =
+                                        {   onclick: function(menuItemClicked, menuObject) {
+                                                rightClick.hit(menuItemClicked, menuObject,
+                                                               "removeItemColor");
+                                                return true;
+                                            }
+                                        };
+                                }
+                            }
                             //o[rightClick.makeImgTag("highlight.png") + " Highlight THIS item"] = 
                             //    {   onclick: function(menuItemClicked, menuObject) {
                             //            rightClick.hit(menuItemClicked, menuObject,
@@ -4308,6 +4659,29 @@ var rightClick = {
             };  
             menu.push(o);
 
+            // custom tracks (id starts with "ct_", matching isCustomTrack() in the C code)
+            // can be deleted here, the same as clicking their trash icon in the track list.
+            var ctId = rightClick.selectedMenuItem.id;
+            if (ctId && ctId.startsWith("ct_")) {
+                o = {};
+                // trash-can icon, inlined from printTrashIcon() in hgTracks.c so we
+                // don't pay an extra http round trip for a tiny PNG icon
+                var trashSvg = "<svg xmlns='http://www.w3.org/2000/svg' " +
+                    "style='height:16px;vertical-align:middle;' viewBox='0 0 448 512'>" +
+                    "<path d='M135.2 17.7C140.6 6.8 151.7 0 163.8 0H284.2c12.1 0 23.2 6.8 28.6 " +
+                    "17.7L320 32h96c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 96 0 81.7 0 64S14.3 " +
+                    "32 32 32h96l7.2-14.3zM32 128H416V448c0 35.3-28.7 64-64 64H96c-35.3 0-64-28.7-64-64V128zm96 " +
+                    "64c-8.8 0-16 7.2-16 16V432c0 8.8 7.2 16 16 16s16-7.2 16-16V208c0-8.8-7.2-16-16-16zm96 " +
+                    "0c-8.8 0-16 7.2-16 16V432c0 8.8 7.2 16 16 16s16-7.2 16-16V208c0-8.8-7.2-16-16-16zm96 " +
+                    "0c-8.8 0-16 7.2-16 16V432c0 8.8 7.2 16 16 16s16-7.2 16-16V208c0-8.8-7.2-16-16-16z'/></svg>";
+                o[trashSvg + " Delete Custom Track"] = {
+                    onclick: function(menuItemClicked, menuObject) {
+                        rightClick.hit(menuItemClicked, menuObject, "deleteCustomTrack");
+                        return true; }
+                };
+                menu.push(o);
+            }
+
             //o = {};
             //o[" Float "] = {
                 //onclick: function(menuItemClicked, menuObject) {
@@ -4364,6 +4738,16 @@ var rightClick = {
                             rightClick.hit(menuItemClicked, menuObject, "hgTrackUi_follow");
                             return true; }
                       };
+                    if (rec.parentTrack) {
+                        // A container (e.g. multiWig) nested in a composite: also offer
+                        // the parent composite's configuration.
+                        o[rightClick.makeImgTag("folderWrench.png")+" Configure "+
+                          rec.parentLabel + " track set..."] = {
+                            onclick: function(menuItemClicked, menuObject) {
+                                rightClick.hit(menuItemClicked,menuObject,"hgTrackUi_followParent");
+                                return true; }
+                          };
+                    }
                 }
                 if (jQuery.floatMgr) {
                     o[(rightClick.selectedMenuItem.id === rightClick.floatingMenuItem ?
@@ -4399,6 +4783,13 @@ var rightClick = {
                     o[rightClick.makeImgTag("palette.png")+" Change Track Color"] = {
                         onclick: function(menuItemClicked, menuObject) {
                             rightClick.hit(menuItemClicked, menuObject, "changeTrackColor");
+                            return true; }
+                    };
+                }
+                if (hgTracks.canColorItems && rightClick.hasItemColorsForCurrentDb()) {
+                    o[rightClick.makeImgTag("palette.png")+" Clear all item colors"] = {
+                        onclick: function(menuItemClicked, menuObject) {
+                            rightClick.hit(menuItemClicked, menuObject, "clearItemColors");
                             return true; }
                     };
                 }
@@ -4897,8 +5288,14 @@ var popUpHgcOrHgGene = {
             e.preventDefault();
             // Share the details-page URL with hgsid stripped; keep (or add) db so it opens
             // standalone, and note that the link shows the page, not the user's active tracks.
-            if (window.topLinks && window.topLinks.shareUrl)
-                window.topLinks.shareUrl(popUpHgcOrHgGene.href, {ensureDb: getDb(), pageNote: true});
+            // If this track lives inside a superTrack, force that superTrack to "show" in the
+            // link too -- superTracks default to hide, so without this the linked-to track
+            // would come up invisible on a fresh page load.
+            if (window.topLinks && window.topLinks.shareUrl) {
+                var rec = hgTracks.trackDb[popUpHgcOrHgGene.table];
+                window.topLinks.shareUrl(popUpHgcOrHgGene.href,
+                    {ensureDb: getDb(), pageNote: true, superTrack: rec && rec.superTrack});
+            }
         });
         appendNonceJsToPage(nonceJs);
         let subtrack = tdbIsSubtrack(hgTracks.trackDb[popUpHgcOrHgGene.table]) ? popUpHgcOrHgGene.table : "";
@@ -5165,19 +5562,55 @@ function highlightCurrentPosition(mode) {
     }
 }
 
-function onTrackDelIconClick (ev) {
-    /* delete custom track if user clicks its trash icon */
+function deleteCustomTrack (trackName) {
+    /* Tell hgCustom to delete the given custom track. Shared by the trash icon
+     * and the right-click context menu so there is only one deletion code path. */
     // https://genome.ucsc.edu/cgi-bin/hgCustom?hgsid=1645697744_i0Yp2Di71NytSDdb6r0vUbupIvKO&hgct_do_delete=delete&hgct_del_ct_UserTrack_3545=on
-    var divEl = ev.target.closest("div"); // must use .closest(), as user can click on either the SVG or the DIV space.
-    var trackName = divEl.getAttribute("data-track");
     var hgsid = getHgsid();
     var url = 'hgCustom?hgsid='+hgsid+'&hgct_do_delete=delete&hgct_del_'+trackName+'=on';
-    xhttp = new XMLHttpRequest();
+    var xhttp = new XMLHttpRequest();
     // this cannot be asyncronous, as users can click quickly here and the hgCustom calls above cannot run in parallel
     // since we store custom tracks as a text file, not mysql tables
     xhttp.open("GET", url, false);
     xhttp.send();
-    divEl.closest("td").remove();
+    removeCustomTrackCells(trackName);
+}
+
+function removeCustomTrackCells (trackName) {
+    /* Remove this custom track from the track list under the image. A visible track is
+     * listed twice, once in its own group and once in the Visible Tracks group, so drop
+     * every cell that carries its delete icon, not just the one that was clicked. */
+    var selector = 'div.trackDeleteIcon[data-track="' + trackName + '"]';
+    document.querySelectorAll(selector).forEach(function(d) {
+        var td = d.closest("td");
+        if (td)
+            td.remove();
+    });
+}
+
+function deleteAllBlatTracks () {
+    /* Tell hgCustom to delete every BLAT result custom track at once (those tagged blatResult=on),
+     * then reload so the BLAT Results group updates. Triggered by the group's "Delete all" button. */
+    var hgsid = getHgsid();
+    var url = 'hgCustom?hgsid='+hgsid+'&hgct_do_delete_blat=1';
+    var xhttp = new XMLHttpRequest();
+    // synchronous, for the same reason as deleteCustomTrack: custom tracks live in a text file, not
+    // in parallel-safe mysql rows
+    xhttp.open("GET", url, false);
+    xhttp.send();
+    window.location.reload();
+}
+
+function onTrackDelIconClick (ev) {
+    /* delete custom track if user clicks its trash icon */
+    var divEl = ev.target.closest("div"); // must use .closest(), as user can click on either the SVG or the DIV space.
+    var trackName = divEl.getAttribute("data-track");
+    deleteCustomTrack(trackName);
+    // if the track is currently drawn, also remove it from the image and update
+    // hgTracks.trackDb/cart, the same cleanup the right-click delete does. hideTracks()
+    // assumes the track is in hgTracks.trackDb, so only call it when it is.
+    if (hgTracks.trackDb && hgTracks.trackDb[trackName])
+        rightClick.hideTracks([trackName]);
 }
 
 function onQuickLiftDelIconClick (ev) {
@@ -5332,6 +5765,13 @@ var popUp = {
 
 	//alert(cleanHtml);  // DEBUG REMOVE
         $('#hgTrackUiDialog').html("<div id='pop' style='font-size:.9em;'>"+ cleanHtml +"</div>");
+
+        // the description page inside carries no session id of its own, so add it to the
+        // links in it that stay on this server, and put a rel on the ones that do not --
+        // the replace above has already given every link in it a target
+        var popDiv = document.getElementById('pop');
+        addHgsidToLinks(popDiv);
+        offsiteLinksToNewTab(popDiv);
 
 	appendNonceJsToPage(nonceJs);
 
@@ -7488,7 +7928,67 @@ $(document).ready(function()
         convertTitleTagsToMouseovers();
     }
 
+    if (typeof pngTimingSampleRate !== 'undefined' && pngTimingSampleRate > 0) {
+        reportPngTiming(pngTimingSampleRate);
+    }
+
 });
+
+// hold the beacon image in a variable that outlives reportPngTiming.  An
+// Image with no reference to it can be collected before the request goes out.
+var pngTimingBeacon;
+
+function reportPngTiming(sampleRate) {
+    /* Report how long the track image took to reach this reader, on one page
+     * load in sampleRate.  The browser keeps a timing record for every image it
+     * loads, holding the bytes it took off the wire and the time it waited.  We
+     * cannot get that from our own logs: apache stops timing once the kernel has
+     * the bytes.  Bytes divided by time gives the reader's throughput, which is
+     * what decides whether a lower png compression level helps them or hurts
+     * them.  The two numbers ride on the query string of a 43 byte image, so the
+     * apache log line is the whole record and no process has to start. */
+    if (Math.random() * sampleRate >= 1)
+        return;
+    if (!window.performance || !window.performance.getEntriesByType)
+        return;
+
+    var sendTiming = function () {
+        var entries = window.performance.getEntriesByType("resource");
+        for (var i = 0; i < entries.length; i++) {
+            var entry = entries[i];
+            // the track image is ../trash/hgt/hgt_<host>_<user>_<hex>.png.  The
+            // guidelines and the side label images are named differently.
+            if (entry.name.indexOf("/hgt/hgt_") < 0)
+                continue;
+            if (entry.name.indexOf(".png") < 0)
+                continue;
+            var bytes = entry.transferSize;
+            var download = entry.responseEnd - entry.responseStart;
+            // no bytes means the browser never took the image off the wire, or
+            // it does not report the size.  Either way there is nothing to time.
+            if (!bytes)
+                return;
+            // a download of zero is a real delivery that finished inside one
+            // clock tick, not a missing measurement.  Firefox rounds resource
+            // timing to a millisecond, so a small image on a fast link lands
+            // there.  Report it and let the reader of the log fall back to d.
+            // Dropping it would leave only the slow connections in the sample.
+            // duration covers the whole fetch, download only the bytes arriving
+            pngTimingBeacon = new Image();
+            pngTimingBeacon.src = "../images/DOT.gif?hgtPng=1" +
+                "&ts=" + Math.round(bytes) +
+                "&d=" + Math.round(entry.duration) +
+                "&x=" + Math.round(download);
+            return;
+        }
+    };
+
+    // the timing record only exists once the image has finished loading
+    if (document.readyState === "complete")
+        sendTiming();
+    else
+        window.addEventListener("load", sendTiming);
+}
 
 function hgtWarnTiming(maxSeconds) {
     /* show a dialog box if the page load time was slower than x seconds. Has buttons to hide or never show this again. */

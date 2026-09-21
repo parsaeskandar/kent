@@ -215,7 +215,7 @@ return kindOfChild;
 }
 
 char* tdbTopParent(struct trackDb *tdb)
-/* return the name of the top-most parent, so the parent of a composite or the name of the superTrack for 
+/* return the name of the top-most parent, so the parent of a composite or the name of the superTrack for
  * a composite in a superTrack. Or return NULL if this is already a top-level track. */
 {
     if (!tdb->parent)
@@ -225,6 +225,20 @@ char* tdbTopParent(struct trackDb *tdb)
         tdb = tdb->parent;
     }
     return tdb->track;
+}
+
+char* tdbTopSuperTrack(struct trackDb *tdb)
+/* Like tdbTopParent, but only returns a name if the top-most ancestor is itself a superTrack
+ * (as opposed to a plain top-level composite/folder). Used so the client can restore the
+ * superTrack's visibility (which defaults to hide) when linking directly to one of its
+ * descendants, e.g. the hgc "Share a link" button. Returns NULL otherwise. */
+{
+    struct trackDb *top = tdb;
+    while (top->parent)
+        top = top->parent;
+    if (top != tdb && tdbIsSuperTrack(top))
+        return top->track;
+    return NULL;
 }
 
 /////////////////////////
@@ -262,6 +276,13 @@ jsonObjectAdd(ele, "kindOfChild", newJsonNumber(kindOfChild));
 char* topParent = tdbTopParent(track->tdb);
 if (topParent)
     jsonObjectAdd(ele, "topParent", newJsonString(topParent));
+
+// Name of the enclosing superTrack, if any, so a direct link to this track (e.g. the hgc
+// "Share a link" popup) can also turn the superTrack's own visibility to "show" -- superTracks
+// default to hide, so without this the track would not appear when the link is opened fresh.
+char* superTrack = tdbTopSuperTrack(track->tdb);
+if (superTrack)
+    jsonObjectAdd(ele, "superTrack", newJsonString(superTrack));
 
 // Tell something about the parent and/or children
 if (kindOfChild != kocOrphan)
@@ -1917,9 +1938,14 @@ if (slice->parentImg && slice->parentImg->file != NULL)
         hPrintf(" usemap='#map_%s'",name);
     hPrintf(" class='sliceImg %s",sliceTypeToClass(slice->type));
     if (slice->type==stData && imgBox->showPortal) //  || slice->type==stCenter will make centerLabels scroll too
-        hPrintf(" panImg'");
-    else
-        hPrintf("'");
+        hPrintf(" panImg");
+    // When something is drawn over the center label (quickLift difference lines) that
+    // slice can't be shown while the image is being dragged:  center labels don't scroll,
+    // so the lines would sit still while the image moves underneath them.  Mark it so
+    // dragScroll can swap it for the text stand-in below.
+    if (slice->type==stCenter && imgTrack->cntrLabDrawnOver && imgTrack->cntrLabText != NULL)
+        hPrintf(" cntrLabLines");
+    hPrintf("'");
     if (slice->title != NULL)
         hPrintf(" title='%s'", attributeEncode(slice->title) );           // Adds slice wide title
     else if (slice->parentImg->title != NULL)
@@ -2035,6 +2061,21 @@ if (slice->parentImg)
     if (imgBox->showPortal && (sliceType==stData || sliceType==stCenter))
         hPrintf(" panDiv%s",(scrollHandle ? " scroller" : ""));
     hPrintf("'>\n");
+
+    if (sliceType == stCenter && imgTrack->cntrLabDrawnOver
+    &&  imgTrack->cntrLabText != NULL)
+        {
+        // Text stand-in for a center label that has quickLift difference lines painted
+        // over it.  dragScroll shows this and hides the image slice while the image is
+        // moving (see panImages() in hgTracks.js).  Centered in the same box as the
+        // label in the image, though not in the same font.
+        hPrintf("  <div class='cntrLabStandIn' style='display:none; width:%dpx; "
+                "height:%dpx; line-height:%dpx; font-size:%dpx; overflow:hidden; "
+                "text-align:center; white-space:nowrap; color:%s; "
+                "font-family:Helvetica,Arial,sans-serif;'>%s</div>\n",
+                width, height, height, height - 2, imgTrack->cntrLabTextColor,
+                htmlEncode(imgTrack->cntrLabText));
+        }
     }
 struct mapSet *map = sliceGetMap(slice,FALSE); // Could be the image map or slice specific
 if (map)

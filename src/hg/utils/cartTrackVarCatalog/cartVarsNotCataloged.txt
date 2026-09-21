@@ -1,0 +1,71 @@
+# cartVarsNotCataloged.txt - names that harvestCartVars.py finds at a
+# cart*ClosestToHome() or safef("%s.%s") call site but that cartTrackVarCatalog.py
+# does not describe as a track-scoped cart variable.  Refs #37838.
+#
+# None of them is a cart variable: the scan cannot tell one from a table name
+# or an SQL fragment, so _gold comes out of it too.  See the walk below for
+# the five classes they fall into.
+#
+# Filenames are NOT in here.  A "%s.tmp" built from a filename has the same
+# shape as a "%s.heightPer" built from a track name, and 15 names of that kind
+# used to sit below with a new one arriving every few weeks.  The harvester now
+# reads them from the trailing extension instead: harvestCartVars.py
+# --filenames lists what that rule claims and explains it.
+#
+# cartTrackVarCatalog.py --reconcile complains about any harvested name in
+# neither the catalog nor this file, so this is what keeps a nightly run quiet
+# until something actually changes.  Regenerate with --update-baseline, then read
+# the diff before committing: a name appearing here is a decision that it is not
+# a cart variable worth cataloging, and a name disappearing means its call site
+# went away.
+#
+# The first version of this file was accepted wholesale, as a snapshot of the
+# gap on the day reconcile learned to fail, so for a year a name being in here
+# was not evidence that anybody had looked at it.  That is no longer true: on
+# 2026-09-05 every remaining name was read at its call site, and what was left
+# falls into five classes.  Item labels that only look like variables
+# (gvfItemName appends _unk, _dnovo and six more to an item's name for
+# display).  HTML element ids, built the same way a cart name is and never
+# sent to the server, which is most of them.  Table and db.table names.  One
+# submit-button name that is read with cgiOptionalString and never from the
+# cart (snp125Defaults_coloring).  And one printf artifact, "\n".
+#
+# So a name in here now means somebody decided it is not a cart variable.  A
+# name that arrives later does not: read its call site before believing this
+# file about it.  Twenty-three names left in that walk and are described in
+# cartTrackVarCatalog.py, eighteen of them the My Variants edit form's.
+#
+# Names are stored with the leading separator stripped, which is how reconcile
+# compares them.
+\n                                 # hg/hgc/hgc.c
+add                                # hg/lib/hui.c
+bin                                # hg/cgilib/annoStreamDb.c
+bip                                # hg/hgTracks/gvfTrack.c
+chainSelf                          # hg/hgc/hgc.c
+clr                                # hg/lib/hui.c
+coloring                           # hg/hgTrackUi/hgTrackUi.c
+confSet                            # hg/hgTracks/searchTracks.c
+delAll                             # hg/hgTracks/hgTracks.c
+dispFndTrk                         # hg/hgTracks/searchTracks.c
+dnovo                              # hg/hgTracks/gvfTrack.c
+drag                               # hg/lib/vcfUi.c
+fileSortOrder                      # hg/cgilib/fileUi.c
+first                              # hg/lib/tablesTables.c
+germ                               # hg/hgTracks/gvfTrack.c
+gold                               # hg/lib/hdb.c
+kgAlias                            # hg/lib/findKGAlias.c
+kgProtAlias                        # hg/lib/findKGProtAlias.c
+knownGene                          # hg/lib/hgFind.c
+last                               # hg/lib/tablesTables.c
+mat                                # hg/hgTracks/gvfTrack.c
+next                               # hg/lib/tablesTables.c
+pat                                # hg/hgTracks/gvfTrack.c
+pfamDesc                           # hg/hgc/hgc.c
+prev                               # hg/lib/tablesTables.c
+projectSelect                      # hg/hgc/myVariantsClick.c
+prot                               # hg/hgc/hgc.c
+sel_id                             # hg/hgTracks/searchTracks.c
+som                                # hg/hgTracks/gvfTrack.c
+unip                               # hg/hgTracks/gvfTrack.c
+unk                                # hg/hgTracks/gvfTrack.c
+wikiTrack                          # hg/hgTables/hgTables.c

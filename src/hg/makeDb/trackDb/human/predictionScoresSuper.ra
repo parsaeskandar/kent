@@ -4,13 +4,14 @@ longLabel Variant Deleteriousness / Variant Impact Prediction Scores
 superTrack on hide
 visibility hide
 group phenDis
-pennantIcon Updated red ../goldenPath/newsarch.html#050126 "Two new tracks added May 1, 2026: PrimateAI-3D and PromoterAI"
+pennantIcon Updated red ../goldenPath/newsarch.html#091026 "New AlphaGenome Variant Impact (AVI) score track added Sept. 10, 2026"
 
+include alphaGenome.ra
 include bayesDel.ra
 include mutscore.ra
 include mcap.ra
 include primateAi.ra
 include promoterAi.ra
 include clinPred.ra
-include eve.ra alpha
-include popEve.ra alpha
+include eve.ra
+include popEve.ra

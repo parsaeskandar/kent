@@ -4,10 +4,10 @@ include ../../inc/common.mk
 XINC = -I$(MYSQLINC)
 
 O=adjacency.o affyPairs.o agpFrag.o agpGap.o alignSeqSizes.o altGraphX.o \
-  asmAlias.o asmEquivalent.o asmSummary.o assemblyList.o autoUpgrade.o axtInfo.o \
+  asmAlias.o asmEquivalent.o assemblySummary.o assemblyList.o autoUpgrade.o axtInfo.o \
   barChartBed.o barChartCategory.o barChartUi.o bed.o bed12Source.o \
-  bedDetail.o bedMethyl.o bigBedFind.o bigBedLabel.o bigChain.o bigDbSnp.o bigGenePred.o bigLink.o \
-  bigPsl.o blastTab.o blatServers.o borf.o botDelay.o cart.o cartDb.o cartTrackDb.o cdsEvidence.o cdsOrtho.o cdsPick.o \
+  bedDetail.o bedMethyl.o bigBedFind.o bigBedLabel.o bigChain.o bigDbSnp.o bigGenePred.o bigLink.o bigNet.o \
+  bigPsl.o blastTab.o blatServers.o blatShare.o borf.o botDelay.o cart.o cartDb.o cartTrackDb.o cdsEvidence.o cdsOrtho.o cdsPick.o \
   cgapSage/cgapSage.o cgapSage/cgapSageLib.o cgiApoptosis.o chainCart.o chainDb.o chainLink.o chainNet.o \
   chainNetDbLoad.o chromAlias.o chromBins.o chromGraph.o chromGraphFactory.o chromInfo.o chromInserts.o \
   chromKeeper.o clonePos.o cpgIsland.o ctgPos.o customAdjacency.o customComposite.o customFactory.o \
@@ -33,7 +33,7 @@ O=adjacency.o affyPairs.o agpFrag.o agpGap.o alignSeqSizes.o altGraphX.o \
   liftUp.o longRange.o lrg.o lsSnpPdb.o mafFrames.o mafGene.o mafSummary.o myVariants.o myVariantsShare.o mdb.o \
   microarray.o minChromSize.o namedSessionDb.o netAlign.o netCart.o pepPred.o pgPhenoAssoc.o pgSnp.o pslReader.o qaSeq.o \
   quickLift.o quickLiftChain.o rankProp.o refLink.o refSeqStatus.o rikenCluster.o rmskAlign.o rmskJoined.o rmskOut.o rmskOut2.o rnaGene.o sage.o sageCounts.o samAlignment.o \
-  sample.o sanger22extra.o scoredRef.o sessionData.o seqWindow.o snakeUi.o snp.o snpExceptions.o soTerm.o spDb.o sqlProg.o \
+  sample.o sanger22extra.o scoredRef.o sessionData.o snapshotSession.o seqWindow.o snakeUi.o snp.o snpExceptions.o soTerm.o spDb.o sqlProg.o \
   sqlSanity.o stanMad.o stsAlias.o stsInfo2.o stsMap.o stsMarker.o tableStatus.o tablesTables.o \
   tagRepo.o tfbsCons.o tigrCmrGene.o traceInfo.o trackDb.o trackDbCache.o trackDbCustom.o trackHub.o \
   trackVersion.o trashDir.o txAliDiff.o txCluster.o txCommon.o txEdgeBed.o txGraph.o txInfo.o txRnaAccs.o \
@@ -51,7 +51,7 @@ else
 endif
 
 %.o: %.c
-	${CC} ${COPT} ${CFLAGS} ${GBROWSE_D} ${LOWELAB_DEFS} ${HG_DEFS} ${HG_WARN} ${HG_INC} ${XINC} -o $@ -c $<
+	${CC} ${COPT} ${CFLAGS} ${GBROWSE_D} ${LOWELAB_DEFS} ${HG_DEFS} ${HG_WARN} ${HG_INC} ${XINC} ${DEPGEN} -o $@ -c $<
 
 ../../lib/$(MACHTYPE)/jkhgap.a: $(O) libDir
 	ar rcus ../../lib/$(MACHTYPE)/jkhgap.a $(O)
@@ -84,3 +84,9 @@ tags:
 
 test:
 	cd tests && ${MAKE} test
+
+# The objects in the subdirectories need their generated header dependencies
+# too, and common.mk only looks in the current directory.  This sits at the foot
+# of the file so the rules it brings in cannot become the default goal.
+# refs #36621
+-include $(wildcard cgapSage/*.d encode/*.d encode3/*.d)

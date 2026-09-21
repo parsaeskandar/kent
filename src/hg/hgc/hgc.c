@@ -30,6 +30,7 @@
 #include "hdb.h"
 #include "spDb.h"
 #include "hui.h"
+#include "hVarSubst.h"
 #include "hgRelate.h"
 #include "htmlPage.h"
 #include "psl.h"
@@ -144,9 +145,11 @@
 #include "chain.h"
 #include "chainDb.h"
 #include "chainNetDbLoad.h"
+#include "bigChain.h"
 #include "chainToPsl.h"
 #include "chainToAxt.h"
 #include "netAlign.h"
+#include "bigNet.h"
 #include "stsMapRat.h"
 #include "stsInfoRat.h"
 #include "stsMapMouseNew.h"
@@ -249,6 +252,7 @@
 #include "geneReviewsClick.h"
 #include "bigBed.h"
 #include "bigPsl.h"
+#include "blatShare.h"
 #include "bedTabix.h"
 #include "longRange.h"
 #include "hmmstats.h"
@@ -763,6 +767,7 @@ if (featDna && end > start)
 	   database, start, (item != NULL ? cgiEncode(item) : ""),
 	   cgiEncode(chrom), start, end, strand, tbl, trackHubSkipHubName(database), trackHubSkipHubName(hGenome(database)));
     }
+printPendingIframe();
 }
 
 void printPosOnScaffold(char *chrom, int start, int end, char *strand)
@@ -784,6 +789,7 @@ void printPosOnScaffold(char *chrom, int start, int end, char *strand)
 	printf("<B>Strand:</B> %s<BR>\n", strand);
     else
 	strand = "?";
+    printPendingIframe();
 }
 
 void printPos(char *chrom, int start, int end, char *strand, boolean featDna,
@@ -830,14 +836,15 @@ if (bedSize >= 4 && bed->name[0] != 0)
     char *label = "Item", *tdbLabel = NULL;
     if (tdb && ((tdbLabel = trackDbSetting(tdb, "bedNameLabel")) != NULL))
 	label = tdbLabel;
-    printf("<B>%s:</B> %s<BR>\n", label, bed->name);
+    // bedNameLabel is a trackDb setting and the name comes from the data file
+    printf("<B>%s:</B> %s<BR>\n", hubEncode(tdb, label), hubEncode(tdb, bed->name));
     }
 if (bedSize >= 5)
     {
     if (!tdb || !trackDbSetting(tdb, "noScoreFilter"))
         {
         char *scoreLabel = trackDbSettingOrDefault(tdb, "scoreLabel", "Score");
-	printf("<B>%s:</B> %d<BR>\n", scoreLabel, bed->score);
+	printf("<B>%s:</B> %d<BR>\n", hubEncode(tdb, scoreLabel), bed->score);
         }
     }
 if (bedSize >= 6)
@@ -932,9 +939,14 @@ else
 return url;
 }
 
+static struct dyString *pendingIframe = NULL;  // see printIframe() below
+
 void printIframe(struct trackDb *tdb, char *itemName)
-/* print an iframe with the URL specified in trackDb (iframeUrl), can have 
+/* Prepare an iframe with the URL specified in trackDb (iframeUrl), can have 
  * the standard codes in it (like $$ for itemName, etc)
+ * The iframe is not written out here: it is held back and printed by
+ * printPendingIframe(), just after the position / "View DNA" block, so it shows
+ * up with the rest of the item details instead of above them. refs #37595
  */
 {
 char *url = getUrlSetting(tdb, "iframeUrl");
@@ -945,7 +957,9 @@ char *eUrl = replaceInUrl(url, itemName, cart, database, seqName, winStart, winE
 if (eUrl==NULL)
     return;
 
-char *iframeOptions = trackDbSettingOrDefault(tdb, "iframeOptions", "width='100%%' height='1024'");
+/* One percent sign, not two: this is an argument to the dyStringCreate below, not part of its
+ * format string, so a doubled one would reach the browser as a doubled one. */
+char *iframeOptions = trackDbSettingOrDefault(tdb, "iframeOptions", "width='100%' height='1024'");
 // Resizing requires the hgcDetails pages to include a bit of javascript.
 //
 // Explanation how this works and why the javascript is needed:
@@ -960,8 +974,16 @@ char *iframeOptions = trackDbSettingOrDefault(tdb, "iframeOptions", "width='100%
 //   call each others' functions)
 //   width='%s' height='%s' src='%s' seamless scrolling='%s' frameborder='%s'
 
-printf(" \
-<script> \
+// The nonce is required: our CSP puts a nonce in script-src, which makes
+// browsers ignore 'unsafe-inline', so an un-nonced inline script never runs.
+// The script stays here, ahead of the iframe, so resizeIframe is defined
+// before the iframed page loads and calls it.
+/* Only one iframe is queued at a time.  Every caller pairs with a printPos/bedPrintPos that
+ * flushes it, and printTrackHtml is a backstop on the paths that do not, so a second call while
+ * one is still queued would mean a new caller has skipped both. */
+dyStringFree(&pendingIframe);
+pendingIframe = dyStringCreate("<br> \
+<script nonce='%s'> \
 function resizeIframe(height) \
 { \
      document.getElementById('hgcIframe').height = parseInt(height)+10; \
@@ -969,7 +991,18 @@ function resizeIframe(height) \
 </script> \
  \
 <iframe id='hgcIframe' src='%s' %s></iframe> \
-<p>", eUrl, iframeOptions);
+<p>", getNonce(), eUrl, iframeOptions);
+}
+
+void printPendingIframe()
+/* Write out the iframe queued up by printIframe(), if there is one. Called from
+ * the position-printing routines so that the iframe lands under the "View DNA"
+ * line, with the other details, and not at the top of the page. */
+{
+if (pendingIframe == NULL)
+    return;
+fputs(pendingIframe->string, stdout);
+dyStringFree(&pendingIframe);
 }
 
 void printCustomUrlWithLabel(struct trackDb *tdb, char *itemName, char *itemLabel, 
@@ -998,15 +1031,18 @@ char *eLinkLabel = replaceInUrl(linkLabel, itemName, cart, database, seqName, wi
 
 // if we got no item name from hgTracks or the item name does not appear in the URL
 // there is no need to show the item name at all
+// the url and its label come from trackDb and the item name from the data file, both of
+// which a track hub supplies, so escape them
 if (isEmpty(itemName) || !stringIn("$$", url))
     {
-    printf("<A TARGET=_blank HREF='%s'>%s</A><BR>",eUrl, eLinkLabel);
+    printf("<A TARGET=_blank HREF='%s'>%s</A><BR>",hubEncode(tdb, eUrl),
+           hubEncode(tdb, eLinkLabel));
     return;
     }
 
-printf("<B>%s </B>",eLinkLabel);
+printf("<B>%s </B>",hubEncode(tdb, eLinkLabel));
 
-printf("<A HREF=\"%s\" target=_blank>", eUrl);
+printf("<A HREF=\"%s\" target=_blank>", hubEncode(tdb, eUrl));
 
 if (sameWord(tdb->table, "npredGene"))
     {
@@ -1017,7 +1053,7 @@ else
     char *label = itemName;
     if (isNotEmpty(itemLabel) && differentString(itemName, itemLabel))
         label = itemLabel;
-    printf("%s</A><BR>\n", label);
+    printf("%s</A><BR>\n", hubEncode(tdb, label));
     }
 //freeMem(&eUrl); small memory leak
 }
@@ -1471,7 +1507,7 @@ if (fieldToUrl != NULL)
     url = (char*)hashFindVal(fieldToUrl, col->name);
 if (url == NULL)
     {
-    printf("<td class='bedExtraTblVal'>%s</td></tr>\n", idList);
+    printf("<td class='bedExtraTblVal'>%s</td></tr>\n", hubEncode(tdb, idList));
     return;
     }
 
@@ -1513,7 +1549,8 @@ for (itemId = slIds; itemId!=NULL; itemId = itemId->next)
 
     char *idUrl = replaceInUrl(url, idForUrl, cart, database, seqName, winStart, 
                     winEnd, tdb->track, encode, NULL);
-    printf("<a href=\"%s\" target=\"_blank\">%s</a>", idUrl, itemName);
+    printf("<a href=\"%s\" target=\"_blank\">%s</a>", hubEncode(tdb, idUrl),
+           hubEncode(tdb, itemName));
     } 
 printf("</td></tr>\n");
 freeMem(slIds);
@@ -1981,7 +2018,9 @@ for (;col != NULL && count < fieldCount;col=col->next)
     else
         entry = col->comment;
 
-    printFieldLabelWithId(entry, fieldName);
+    // the field name and its comment come from the autoSql schema, which for a hub bigBed
+    // is written by the hub author
+    printFieldLabelWithId(hubEncode(tdb, entry), hubEncode(tdb, fieldName));
 
     // detailsScript fields: print empty cell, JavaScript will fill it
     if (dsScriptFields && slNameInList(dsScriptFields, fieldName))
@@ -1994,10 +2033,10 @@ for (;col != NULL && count < fieldCount;col=col->next)
         if (errno == 0 && valDouble != 0)
             printf("<td>%g</td></tr>\n", valDouble);
         else
-            printf("<td>%s</td></tr>\n", fields[ix]); // decided not to print error
+            printf("<td>%s</td></tr>\n", hubEncode(tdb, fields[ix])); // decided not to print error
         }
     else
-        printf("<td class='bedExtraTblVal'>%s</td></tr>\n", fields[ix]);
+        printf("<td class='bedExtraTblVal'>%s</td></tr>\n", hubEncode(tdb, fields[ix]));
     printCount++;
     }
 if (skipIds)
@@ -3212,7 +3251,7 @@ if (startsWith("ENCODE Gencode",tdb->longLabel))
 printf("<H3>Links to sequence:</H3>\n");
 printf("<UL>\n");
 
-if ((pepTable != NULL) && hGenBankHaveSeq(srcDb, pepName, pepTable))
+if ((pepTable != NULL) && (pepName != NULL) && hGenBankHaveSeq(srcDb, pepName, pepTable))
     {
     puts("<LI>\n");
     hgcAnchorSomewhere(pepClick, pepName, pepTable, seqName);
@@ -3456,10 +3495,20 @@ boolean showEvery = sameString(item, "PrintAllSequences");
 boolean showAll = trackDbSettingOn(tdb, "showAll");
 unsigned seqTypeField =  bbExtraFieldIndex(bbi, "seqType");
 struct bigBedInterval *bb, *bbList = NULL;
+struct hash *chainHash = NULL;
+struct hash *mapPsls = NULL;     // mapping alignments quickLift reuses across items
+char *quickLiftFile = trackDbSetting(tdb, "quickLiftUrl");
 
+// A quickLifted track can only show what the chains around this window reach, so it takes
+// the windowed query even when the track asks for every alignment of the item.  The file
+// holds the other assembly's alignments, so the window has to be turned into that
+// assembly's coordinates before the query.  quickLiftGetIntervals also hands back the
+// chains needed to bring the alignments the other way.
 // If showAll is on, show all alignments with this qName, not just the
 // selected one.
-if (showEvery)
+if (quickLiftFile != NULL)
+    bbList = quickLiftGetIntervals(quickLiftFile, bbi, seqName, ivStart, ivEnd, &chainHash);
+else if (showEvery)
     {
     struct bbiChromInfo *chrom, *chromList = bbiChromList(bbi);
     for (chrom = chromList; chrom != NULL; chrom = chrom->next)
@@ -3529,6 +3578,14 @@ for (bb = bbList; bb != NULL; bb = bb->next)
 	{
         char *cdsStr, *seq;
         struct psl *psl= getPslAndSeq(tdb, chromName, bb, seqTypeField, &seq, &cdsStr);
+        if (chainHash != NULL)
+            {
+            struct psl *lifted = quickLiftPsl(chainHash, &mapPsls, psl);
+            pslFree(&psl);
+            if (lifted == NULL)
+                continue;       // nothing in the chains places this alignment
+            psl = lifted;
+            }
         slAddHead(&pslList, psl);
 
         // we're assuming that if there are multiple psl's with the same id that
@@ -3584,11 +3641,19 @@ if (showEvery)
     printf("<H3>Genomic Alignments</H3>");
 else
     printf("<H3>%s/Genomic Alignments</H3>", item);
-if (showEvery || pslIsProtein(pslList))
-    printAlignmentsSimple(pslList, start, "htcBigPslAli", tdb->table, item);
+/* Hub track names have special characters replaced with underbar, but tdb->table does not. */
+char *aliTable = cloneString(tdb->table);
+if (isHubTrack(aliTable))
+    trackHubFixName(aliTable);
+// pslIsProtein reads through its argument, and the list is empty whenever nothing in the
+// window matched the item, or, on a quickLifted track, nothing in the window could be
+// lifted.
+if (showEvery || ((pslList != NULL) && pslIsProtein(pslList)))
+    printAlignmentsSimple(pslList, start, "htcBigPslAli", aliTable, item);
 else
     printAlignmentsExtra(pslList, start, "htcBigPslAli", "htcBigPslAliInWindow",
-        tdb->table, item);
+        aliTable, item);
+freeMem(aliTable);
 pslFreeList(&pslList);
 
 
@@ -3611,10 +3676,22 @@ void genericPslClick(struct sqlConnection *conn, struct trackDb *tdb,
 {
 struct psl* pslList = getAlignments(conn, tdb->table, item);
 
+// For a quickLifted track the alignments came out of the other assembly, and so did the
+// sequence the check below looks for, so both have to name that assembly.  Move the
+// alignments onto the reference before anything prints a position.  Only the ones the
+// chains around this window can place survive, which leaves out alignments of the same
+// accession elsewhere in the genome.
+char *liftDb = trackDbSetting(tdb, "quickLiftDb");
+char *srcDb = (liftDb != NULL) ? liftDb : database;
+char *quickLiftFile = trackDbSetting(tdb, "quickLiftUrl");
+if ((quickLiftFile != NULL) && (pslList != NULL))
+    pslList = quickLiftPsls(quickLiftChainHash(quickLiftFile, seqName, winStart, winEnd),
+                            pslList);
+
 /* check if there is an alignment available for this sequence.  This checks
  * both genbank sequences and other sequences in the seq table.  If so,
  * set it up so they can click through to the alignment. */
-if (hGenBankHaveSeq(database, item, NULL))
+if (hGenBankHaveSeq(srcDb, item, NULL))
     {
     printf("<H3>%s/Genomic Alignments</H3>", item);
     if (sameString("protein", subType))
@@ -3669,9 +3746,11 @@ char *trackName = getParentTrackName(tdb);
 struct trackDb *parentTdb = tdb;
 if (!sameString(trackName, tdb->track))
     parentTdb = hTrackDbForTrack(database, trackName);
+// shortLabel comes from trackDb, which a track hub controls, escape it
 printf("<P><A HREF=\"%s?db=%s&g=%s&%s\">"
        "Go to %s track controls</A></P>\n",
-       hTrackUiForTrack(tdb->track), database, trackName, cartSidUrlString(cart), parentTdb->shortLabel);
+       hTrackUiForTrack(tdb->track), database, trackName, cartSidUrlString(cart),
+       htmlEncode(parentTdb->shortLabel));
 }
 
 void printDataRestrictionDate(struct trackDb *tdb)
@@ -3700,10 +3779,15 @@ for (;tdb != NULL; tdb = tdb->parent)
     {
     if (sameString(trackHubSkipHubName(tdb->track), "quickLiftChain"))
         tdb->html = hFileContentsOrWarning(hHelpFile(trackHubSkipHubName(tdb->track)));
-    if (liftDb && (tdb->html == NULL))
+    if (liftDb && isEmpty(tdb->html))
         tdb->html = getTrackHtml(liftDb, tdb->table);
     if (tdb->html != NULL && tdb->html[0] != 0)
+        {
+        // a hub's description page never went through hgTrackDb, so resolve its variables
+        // here.  tdb is the track the html belongs to, so $parentTrack means its container.
+        hVarSubstTrackDbHtml(tdb, database);
         return tdb->html;
+        }
     }
 return NULL;
 }
@@ -3713,6 +3797,8 @@ void printTrackHtml(struct trackDb *tdb)
  * last update time for data table and make a link
  * to the TB table schema page for this table. */
 {
+// safety net: a few detail pages never print a position, so flush the iframe here
+printPendingIframe();
 if (!isCustomTrack(tdb->track) && !isMyVariantsType(tdb->type))
     {
     printRelatedTracks(database, trackHash, tdb, cart);
@@ -3739,6 +3825,54 @@ if (html != NULL && html[0] != 0)
     puts("</div>");
     }
 hPrintf("<BR>\n");
+jsFixUpPageLinks();
+}
+
+static struct chain *quickLiftChainInRange(struct trackDb *tdb, int id)
+/* Load one chain out of the assembly the track came from and map it onto the reference.
+ * Every chain in the window is loaded and then matched on id, rather than asking for the
+ * one id:  the chain's sequence name in the other assembly is not known here, and the
+ * by-id loaders abort when the id is not in the range they were given. */
+{
+char *liftDb = trackDbSetting(tdb, "quickLiftDb");
+char *table = NULL;
+quickLiftResolveTable(tdb, trackHubSkipHubName(tdb->table), &table, &liftDb);
+char *quickLiftFile = trackDbSetting(tdb, "quickLiftUrl");
+
+char *chainFile = NULL, *linkFile = NULL;
+if (startsWith("big", tdb->type))
+    {
+    chainFile = trackDbSetting(tdb, "bigDataUrl");
+    linkFile = trackDbSetting(tdb, "linkDataUrl");
+    if (linkFile == NULL)
+        linkFile = bigChainGetLinkFile(chainFile);
+    }
+
+struct hash *chainHash = newHash(8);
+struct hash *mapPsls = NULL;
+struct quickLiftRange *range, *rangeList = quickLiftSourceRanges(quickLiftFile, seqName,
+    winStart, winEnd, chainHash);
+
+for (range = rangeList; range != NULL; range = range->next)
+    {
+    struct chain *chain, *chainList;
+    if (chainFile != NULL)
+        chainList = chainLoadIdRangeHub(NULL, chainFile, linkFile, range->chrom,
+            range->start, range->end, -1);
+    else
+        chainList = chainLoadRange(liftDb, table, range->chrom, range->start, range->end);
+
+    for (chain = chainList; chain != NULL; chain = chain->next)
+        {
+        if (chain->id != id)
+            continue;
+
+        struct chain *lifted = quickLiftChain(chainHash, &mapPsls, chain);
+        if (lifted != NULL)
+            return lifted;
+        }
+    }
+return NULL;
 }
 
 struct chain *chainLoadItemInRange(struct trackDb *tdb, char *item)
@@ -3746,6 +3880,15 @@ struct chain *chainLoadItemInRange(struct trackDb *tdb, char *item)
 {
 struct chain *chain = NULL;
 int id = sqlUnsigned(item);
+
+if (quickLiftIsLifted(tdb) && !quickLiftIsOwnChainTrack(tdb))
+    {
+    chain = quickLiftChainInRange(tdb, id);
+    if (chain == NULL)
+        errAbort("Couldn't lift chain %d into %s:%d-%d", id, seqName, winStart, winEnd);
+    return chain;
+    }
+
 if (startsWith("big", tdb->type))
     {
     char *fileName = trackDbSetting(tdb, "bigDataUrl");
@@ -3818,36 +3961,38 @@ return chain;
 void linkToOtherBrowserHub(char *otherDb, char *chrom, int start, int end,  char *hubUrl)
 /* Make anchor tag to open another browser window. */
 {
-printf("<A TARGET=\"_blank\" HREF=\"%s?genome=%s&position=%s%%3A%d-%d&hubUrl=%s\">",
-       hgTracksName(), otherDb, chrom, start+1, end, hubUrl);
+printf("<A TARGET=\"_blank\" HREF=\"%s?genome=", hgTracksName());
+htmlPrintf("%s&position=%s%%3A%d-%d", otherDb, chrom, start+1, end);
+printf("&hubUrl=%s\">", hubUrl);
 }
 
 void linkToOtherBrowserExtra(char *otherDb, char *chrom, int start, int end, char *extra)
 /* Make anchor tag to open another browser window. */
 {
-printf("<A TARGET=\"_blank\" HREF=\"%s?db=%s&%s&position=%s%%3A%d-%d\">",
-       hgTracksName(), otherDb, extra, chrom, start+1, end);
+printf("<A TARGET=\"_blank\" HREF=\"%s?db=", hgTracksName());
+htmlPrintf("%s&%s&position=%s%%3A%d-%d\">", otherDb, extra, chrom, start+1, end);
 }
 
 void linkToOtherBrowserSearch(char *otherDb, char *tag)
 /* Make anchor tag to open another browser window. */
 {
-printf("<A TARGET=\"_blank\" HREF=\"%s?db=%s&ct=&position=%s\">",
-       hgTracksName(), otherDb, tag);
+printf("<A TARGET=\"_blank\" HREF=\"%s?db=", hgTracksName());
+htmlPrintf("%s&ct=&position=%s\">", otherDb, tag);
 }
 
 void linkToOtherBrowser(char *otherDb, char *chrom, int start, int end)
 /* Make anchor tag to open another browser window. */
 {
-printf("<A TARGET=\"_blank\" HREF=\"%s?db=%s&ct=&position=%s%%3A%d-%d\">",
-       hgTracksName(), otherDb, chrom, start+1, end);
+printf("<A TARGET=\"_blank\" HREF=\"%s?db=", hgTracksName());
+htmlPrintf("%s&ct=&position=%s%%3A%d-%d\">", otherDb, chrom, start+1, end);
 }
 
 void linkToOtherBrowserTitle(char *otherDb, char *chrom, int start, int end, char *title)
 /* Make anchor tag to open another browser window. */
 {
-printf("<A TARGET=\"_blank\" TITLE=\"%s\" HREF=\"%s?db=%s&ct=&position=%s%%3A%d-%d\">",
-       title, hgTracksName(), otherDb, chrom, start+1, end);
+htmlPrintf("<A TARGET=\"_blank\" TITLE=\"%s\" HREF=\"", title);
+printf("%s?db=", hgTracksName());
+htmlPrintf("%s&ct=&position=%s%%3A%d-%d\">", otherDb, chrom, start+1, end);
 }
 
 void chainToOtherBrowser(struct chain *chain, char *otherDb, char *otherOrg, char *hubUrl)
@@ -3864,7 +4009,7 @@ if (subChain != NULL && otherOrg != NULL)
         linkToOtherBrowserHub(otherDb, subChain->qName, qs-1, qe, hubUrl);
     else
         linkToOtherBrowser(otherDb, subChain->qName, qs-1, qe);
-    printf("Open %s browser</A> at position corresponding to the part of chain that is in this window.<BR>\n", trackHubSkipHubName(otherOrg));
+    htmlPrintf("Open %s browser</A> at position corresponding to the part of chain that is in this window.<BR>\n", trackHubSkipHubName(otherOrg));
     }
 chainFree(&toFree);
 }
@@ -3907,17 +4052,23 @@ safef(headerText, sizeof headerText, "reference: %s, query: %s\n", trackHubSkipH
 genericHeader(parentTdb, headerText);
 
 if (hubUrl != NULL)
-    printf("<A HREF=\"hgTracks?hubUrl=%s&genome=%s&position=%s:%d-%d\" TARGET=_BLANK>%s:%d-%d</A> link to block in query assembly: <B>%s</B></A><BR>\n", hubUrl, otherDb, aliasQName,  qs, qe,   aliasQName, qs, qe, trackHubSkipHubName(otherDb));
+    {
+    printf("<A HREF=\"hgTracks?hubUrl=%s&genome=", hubUrl);
+    htmlPrintf("%s&position=%s:%d-%d\" TARGET=_BLANK>%s:%d-%d</A> link to block in query assembly: <B>%s</B></A><BR>\n", otherDb, aliasQName,  qs, qe,   aliasQName, qs, qe, trackHubSkipHubName(otherDb));
+    }
 else if (otherIsActive)
-    printf("<A HREF=\"hgTracks?db=%s&position=%s:%d-%d\" TARGET=_BLANK>%s:%d-%d</A> link to block in query assembly: <B>%s</B></A><BR>\n", otherDb, aliasQName, qs, qe, aliasQName, qs, qe, trackHubSkipHubName(otherDb));
+    htmlPrintf("<A HREF=\"hgTracks?db=%s&position=%s:%d-%d\" TARGET=_BLANK>%s:%d-%d</A> link to block in query assembly: <B>%s</B></A><BR>\n", otherDb, aliasQName, qs, qe, aliasQName, qs, qe, trackHubSkipHubName(otherDb));
 
 int qCenter = (qs + qe) / 2;
 int newQs = qCenter - qWidth/2;
 int newQe = qCenter + qWidth/2;
 if (hubUrl != NULL)
-   printf("<A HREF=\"hgTracks?hubUrl=%s&genome=%s&position=%s:%d-%d\" TARGET=\"_blank\">%s:%d-%d</A> link to same window size in query assembly: <B>%s</B></A><BR>\n", hubUrl,otherDb, aliasQName, newQs, newQe,aliasQName, newQs, newQe, trackHubSkipHubName(otherDb) );
+   {
+   printf("<A HREF=\"hgTracks?hubUrl=%s&genome=", hubUrl);
+   htmlPrintf("%s&position=%s:%d-%d\" TARGET=\"_blank\">%s:%d-%d</A> link to same window size in query assembly: <B>%s</B></A><BR>\n", otherDb, aliasQName, newQs, newQe,aliasQName, newQs, newQe, trackHubSkipHubName(otherDb) );
+   }
 else if (otherIsActive)
-    printf("<A HREF=\"hgTracks?db=%s&position=%s:%d-%d\" TARGET=\"_blank\">%s:%d-%d</A> link to same window size in query assembly: <B>%s</B></A><BR>\n", otherDb, aliasQName, newQs, newQe,aliasQName, newQs, newQe, trackHubSkipHubName(otherDb) );
+    htmlPrintf("<A HREF=\"hgTracks?db=%s&position=%s:%d-%d\" TARGET=\"_blank\">%s:%d-%d</A> link to same window size in query assembly: <B>%s</B></A><BR>\n", otherDb, aliasQName, newQs, newQe,aliasQName, newQs, newQe, trackHubSkipHubName(otherDb) );
 printTrackHtml(tdb);
 } 
 
@@ -4014,35 +4165,41 @@ else if (otherIsActive && subChain != chain)
     }
 chainFree(&toFree);
 
-printf("<B>%s position:</B> <A HREF=\"%s?%s&db=%s&position=%s:%d-%d\">%s:%d-%d</A>"
-       "  size: %d <BR>\n",
-       trackHubSkipHubName(thisOrg), hgTracksName(), cartSidUrlString(cart), database,
-       chain->tName, chain->tStart+1, chain->tEnd, chain->tName, chain->tStart+1, chain->tEnd,
-       chain->tEnd-chain->tStart);
+htmlPrintf("<B>%s position:</B> ", trackHubSkipHubName(thisOrg));
+printf("<A HREF=\"%s?%s&db=", hgTracksName(), cartSidUrlString(cart));
+htmlPrintf("%s&position=%s:%d-%d\">%s:%d-%d</A>  size: %d <BR>\n",
+           database, chain->tName, chain->tStart+1, chain->tEnd,
+           chain->tName, chain->tStart+1, chain->tEnd, chain->tEnd-chain->tStart);
 printf("<B>Strand:</B> %c<BR>\n", chain->qStrand);
 qChainRangePlusStrand(chain, &qs, &qe);
 if (sameWord(otherDb, "seq"))
     {
-    printf("<B>%s position:</B> %s:%d-%d  size: %d<BR>\n",
+    htmlPrintf("<B>%s position:</B> %s:%d-%d  size: %d<BR>\n",
 	otherOrg, chain->qName, qs, qe, chain->qEnd - chain->qStart);
     }
 else
     {
     /* prints link to other db browser only if db exists and is active */
     /* else just print position with no link for the other db */
-    printf("<B>%s position: </B>", otherOrg);
+    htmlPrintf("<B>%s position: </B>", otherOrg);
     if (otherIsActive)
-        printf(" <A target=\"_blank\" href=\"%s?db=%s&position=%s%%3A%d-%d\">",
-               hgTracksName(), otherDb, chain->qName, qs, qe);
+        {
+        printf(" <A target=\"_blank\" href=\"%s?db=", hgTracksName());
+        htmlPrintf("%s&position=%s%%3A%d-%d\">", otherDb, chain->qName, qs, qe);
+        }
     else if (hubUrl != NULL)
-        printf(" <A target=\"_blank\" href=\"%s?genome=%s&hubUrl=%s&position=%s%%3A%d-%d\">",
-               hgTracksName(), otherDb, hubUrl, chain->qName, qs, qe);
-    printf("%s:%d-%d", chain->qName, qs, qe);
+        {
+        printf(" <A target=\"_blank\" href=\"%s?genome=", hgTracksName());
+        htmlPrintf("%s", otherDb);
+        printf("&hubUrl=%s&position=", hubUrl);
+        htmlPrintf("%s%%3A%d-%d\">", chain->qName, qs, qe);
+        }
+    htmlPrintf("%s:%d-%d", chain->qName, qs, qe);
     if (otherIsActive || hubUrl)
         printf("</A>");
     printf(" size: %d<BR>\n", chain->qEnd - chain->qStart);
     }
-printf("<B>Chain ID:</B> %s<BR>\n", item);
+htmlPrintf("<B>Chain ID:</B> %s<BR>\n", item);
 printf("<B>Score:</B> %1.0f\n", chain->score);
 
 if (nullSubset)
@@ -4055,17 +4212,32 @@ else
 
 boolean normScoreAvailable = chainDbNormScoreAvailable(tdb);
 
+// The normalized score lives in the chain table, so for a quickLifted track it has to be
+// read from the assembly the chain came from.  Against the assembly on screen the table
+// name either does not resolve, or resolves to a same-named table there and returns
+// somebody else's chain, which is worse.
+char *normDb = database;
+struct sqlConnection *normConn = conn;
+char *normTable = tdb->table;
+boolean lifted = quickLiftIsLifted(tdb) && !quickLiftIsOwnChainTrack(tdb);
+if (lifted)
+    {
+    normDb = trackDbSetting(tdb, "quickLiftDb");
+    normTable = trackHubSkipHubName(tdb->table);
+    normConn = hAllocConn(normDb);
+    }
+
 if (normScoreAvailable)
     {
     char tableName[HDB_MAX_TABLE_STRING];
-    if (!hFindSplitTable(database, chain->tName, tdb->table, tableName, sizeof tableName, NULL))
-	errAbort("genericChainClick track %s not found", tdb->table);
+    if (!hFindSplitTable(normDb, chain->tName, normTable, tableName, sizeof tableName, NULL))
+	errAbort("genericChainClick track %s not found", normTable);
     char query[256];
     struct sqlResult *sr;
     char **row;
     sqlSafef(query, ArraySize(query),
 	 "select normScore from %s where id = '%s'", tableName, item);
-    sr = sqlGetResult(conn, query);
+    sr = sqlGetResult(normConn, query);
     if ((row = sqlNextRow(sr)) != NULL)
         {
         double normScore = atof(row[0]);
@@ -4075,8 +4247,18 @@ if (normScoreAvailable)
     sqlFreeResult(&sr);
     printf("<BR>\n");
     }
+if (lifted)
+    hFreeConn(&normConn);
 
-printf("<BR>Fields above refer to entire chain or gap, not just the part inside the window.<BR>\n");
+if (quickLiftIsLifted(tdb) && !quickLiftIsOwnChainTrack(tdb))
+    // A lifted chain is only worked out over the window being viewed, so the whole chain's
+    // extent is not knowable here and the usual sentence would be wrong.
+    htmlPrintf("<BR>This chain comes from %s and is mapped onto %s as the browser draws it, so "
+               "the fields above describe the part of it around the window rather than the "
+               "whole chain.<BR>\n",
+               trackDbSetting(tdb, "quickLiftDb"), trackHubSkipHubName(database));
+else
+    printf("<BR>Fields above refer to entire chain or gap, not just the part inside the window.<BR>\n");
 printf("<BR>\n");
 
 chainWinSize = min(winEnd-winStart, chain->tEnd - chain->tStart);
@@ -4169,7 +4351,7 @@ void printLabeledNumber(char *org, char *label, long long number)
 char *space = " ";
 if (org == NULL)
     org = space = "";
-printf("<B>%s%s%s:</B> ", org, space, label);
+htmlPrintf("<B>%s%s%s:</B> ", org, space, label);
 printLongWithCommas(stdout, number);
 printf("<BR>\n");
 }
@@ -4180,11 +4362,124 @@ void printLabeledPercent(char *org, char *label, long p, long q)
 char *space = " ";
 if (org == NULL)
     org = space = "";
-printf("<B>%s%s%s:</B> ", org, space, label);
+htmlPrintf("<B>%s%s%s:</B> ", org, space, label);
 printLongWithCommas(stdout, p);
 if (q != 0)
     printf(" (%3.1f%%)", 100.0 * p / q);
 printf("<BR>\n");
+}
+
+static struct netAlign *bigNetLoadOne(struct trackDb *tdb, char *chrom, int start,
+                                      unsigned level, boolean *retClipped)
+/* Load the record from a bigNet file at the given level that covers start.
+ * Returns NULL if there isn't one.  Sets *retClipped when a quickLifted row would
+ * only lift with its ends pulled in, so the extent reported is the visible part
+ * rather than the whole item. */
+{
+char *fileName = hReplaceGbdb(trackDbSetting(tdb, "bigDataUrl"));
+char *quickLiftFile = trackDbSetting(tdb, "quickLiftUrl");
+if (fileName == NULL)
+    errAbort("No bigDataUrl in track %s", tdb->track);
+struct lm *lm = lmInit(0);
+struct bbiFile *bbi = bigBedFileOpenAlias(fileName, chromAliasFindAliases);
+struct hash *chainHash = NULL;
+struct bigBedInterval *bb, *bbList;
+struct netAlign *na = NULL;
+
+/* A quickLifted net is read over the whole window, because that is the lift the image
+ * was drawn from, and each row is then tested against the clicked base once it has
+ * landed. */
+if (quickLiftFile != NULL)
+    bbList = quickLiftGetIntervals(quickLiftFile, bbi, chrom, winStart, winEnd, &chainHash);
+else
+    bbList = bigBedIntervalQuery(bbi, chrom, start, start+1, 0, lm);
+
+for (bb = bbList; bb != NULL; bb = bb->next)
+    {
+    struct bigNet bn;
+    unsigned tStart = bb->start, tEnd = bb->end;
+    boolean thisClipped = FALSE;
+
+    if (quickLiftFile != NULL)
+        {
+        /* The unclipped lift first, so the page can report the item's whole extent.
+         * An item too big for the chains loaded here lifts only with its ends pulled
+         * in, and that is how the image drew it, so fall back to the clipped lift
+         * rather than reporting an item the reader can plainly see as missing. */
+        struct bed *bed = quickLiftIntervalsToBed(bbi, chainHash, bb);
+        if (bed == NULL)
+            {
+            bed = quickLiftIntervalsToBedClip(bbi, chainHash, bb);
+            thisClipped = TRUE;
+            }
+        if (bed == NULL)
+            continue;
+        if (!sameString(bed->chrom, chrom))
+            {
+            bedFree(&bed);
+            continue;
+            }
+        tStart = bed->chromStart;
+        tEnd = bed->chromEnd;
+        bedFree(&bed);
+        }
+    if ((tStart > start) || (tEnd <= start))
+        continue;
+    bigNetFromInterval(bbi, bb, fileName, &bn);
+    if (bn.level != level)
+        continue;
+    if (retClipped != NULL)
+        *retClipped = thisClipped;
+    AllocVar(na);
+    na->level = bn.level;
+    na->tName = cloneString(chrom);
+    na->tStart = tStart;
+    na->tEnd = tEnd;
+    safecpy(na->strand, sizeof na->strand, bn.strand);
+    na->qName = cloneString(bn.name);
+    na->qStart = bn.qStart;
+    na->qEnd = bn.qEnd;
+    na->chainId = bn.chainId;
+    na->ali = bn.ali;
+    na->score = bn.chainScore;
+    na->qOver = bn.qOver;
+    na->qFar = bn.qFar;
+    na->qDup = bn.qDup;
+    na->type = cloneString(bn.type);
+    na->tN = bn.tN;
+    na->qN = bn.qN;
+    na->tR = bn.tR;
+    na->qR = bn.qR;
+    na->tNewR = bn.tNewR;
+    na->qNewR = bn.qNewR;
+    na->tOldR = bn.tOldR;
+    na->qOldR = bn.qOldR;
+    na->tTrf = bn.tTrf;
+    na->qTrf = bn.qTrf;
+    break;
+    }
+bbiFileClose(&bbi);
+lmCleanup(&lm);
+return na;
+}
+
+static char *netChainTrackName(struct trackDb *tdb, char *chainTrack)
+/* The type line of a net track names its chain track without any hub prefix.
+ * If the net track came from a hub, so did the chain track it names. */
+{
+if (!isHubTrack(tdb->track))
+    return chainTrack;
+char buf[256];
+safef(buf, sizeof buf, "hub_%d_%s", hubIdFromTrackName(tdb->track), chainTrack);
+return cloneString(buf);
+}
+
+static struct trackDb *netChainTdb(char *chainTrack)
+/* The tdb of the chain track a net track's type line names, or NULL if this assembly
+ * has no such track.  A quickLifted net is the case with none: the net comes across on
+ * its own and its chain track stays behind on the source assembly. */
+{
+return (trackHash == NULL) ? NULL : hashFindVal(trackHash, chainTrack);
 }
 
 void genericNetClick(struct sqlConnection *conn, struct trackDb *tdb,
@@ -4203,28 +4498,53 @@ char *otherOrgBrowser = otherOrg;
 int tSize, qSize;
 int netWinSize;
 struct chain *chain;
+boolean isBig = startsWith("big", tdb->type);
+/* A quickLifted net has moved to this assembly on its own.  The chain track its type
+ * line names is still on the source assembly, so there is no alignment to show and no
+ * chain to follow -- only the net itself lifted. */
+boolean isLifted = isBig && (trackDbSetting(tdb, "quickLiftUrl") != NULL);
+struct trackDb *chainTdb = NULL;
+/* Set when a lifted row would only lift with its ends pulled in to the chains we
+ * loaded, so the numbers below describe the visible part and not the whole item. */
+boolean clipped = FALSE;
+
+char *namedChainTrack = chainTrack;    /* as the type line spells it, for the message below */
+if (isBig && !isLifted)
+    {
+    chainTrack = netChainTrackName(tdb, chainTrack);
+    chainTdb = netChainTdb(chainTrack);
+    }
 
 if (otherOrg == NULL)
     {
     /* use first word in short track label */
     otherOrg = firstWordInLine(cloneString(tdb->shortLabel));
     }
-if (!hFindSplitTable(database, seqName, tdb->table, table, sizeof table, &hasBin))
-    errAbort("genericNetClick track %s not found", tdb->table);
-sqlSafef(query, sizeof(query),
-	 "select * from %s where tName = '%s' and tStart <= %d and tEnd > %d "
-	 "and level = %s",
-	 table, seqName, start, start, item);
-sr = sqlGetResult(conn, query);
-if ((row = sqlNextRow(sr)) == NULL)
-    errAbort("Couldn't find %s:%d in %s", seqName, start, table);
+if (isBig)
+    {
+    net = bigNetLoadOne(tdb, seqName, start, sqlUnsigned(item), &clipped);
+    if (net == NULL)
+        errAbort("Couldn't find %s:%d at level %s in %s", seqName, start, item, tdb->track);
+    }
+else
+    {
+    if (!hFindSplitTable(database, seqName, tdb->table, table, sizeof table, &hasBin))
+        errAbort("genericNetClick track %s not found", tdb->table);
+    sqlSafef(query, sizeof(query),
+             "select * from %s where tName = '%s' and tStart <= %d and tEnd > %d "
+             "and level = %s",
+             table, seqName, start, start, item);
+    sr = sqlGetResult(conn, query);
+    if ((row = sqlNextRow(sr)) == NULL)
+        errAbort("Couldn't find %s:%d in %s", seqName, start, table);
 
-net = netAlignLoad(row+hasBin);
-sqlFreeResult(&sr);
+    net = netAlignLoad(row+hasBin);
+    sqlFreeResult(&sr);
+    }
 tSize = net->tEnd - net->tStart;
 qSize = net->qEnd - net->qStart;
 
-if (net->chainId != 0)
+if ((net->chainId != 0) && (!isBig || (chainTdb != NULL)))
     {
     netWinSize = min(winEnd-winStart, net->tEnd - net->tStart);
     printf("<BR>\n");
@@ -4257,7 +4577,14 @@ if (net->chainId != 0)
 	    printf("To see alignment details zoom so that the browser window covers 1,000,000 bases or less.<BR>\n");
 	    }
         }
-    chain = chainDbLoad(conn, database, chainTrack, seqName, net->chainId);
+    if (isBig)
+        {
+        char idBuf[32];
+        safef(idBuf, sizeof idBuf, "%u", net->chainId);
+        chain = chainLoadItemInRange(chainTdb, idBuf);
+        }
+    else
+        chain = chainDbLoad(conn, database, chainTrack, seqName, net->chainId);
     if (chain != NULL)
         {
          /* print link to browser for otherDb only if otherDb is active */
@@ -4267,12 +4594,32 @@ if (net->chainId != 0)
 	}
     htmlHorizontalLine();
     }
-printf("<B>Type:</B> %s<BR>\n", net->type);
+else if (net->chainId != 0)
+    {
+    /* Only an isBig track with no chain track to follow gets here. */
+    if (isLifted)
+        {
+        char *sourceDb = trackDbSetting(tdb, "quickLiftDb");
+        htmlPrintf("<BR>This net was lifted from %s, so its chains are not on this assembly "
+                   "and the alignment cannot be shown here.<BR>\n",
+                   isEmpty(sourceDb) ? "another assembly" : sourceDb);
+        }
+    else
+        {
+        /* A hub whose type line names a chain track this assembly does not have.  Say so
+         * rather than dropping the whole section without a word. */
+        htmlPrintf("<BR>This track's type line names the chain track %s, which is not on "
+                   "this assembly, so the alignment cannot be shown here.<BR>\n",
+                   emptyForNull(namedChainTrack));
+        }
+    htmlHorizontalLine();
+    }
+htmlPrintf("<B>Type:</B> %s<BR>\n", net->type);
 printf("<B>Level:</B> %d<BR>\n", (net->level+1)/2);
-printf("<B>%s position:</B> %s:%d-%d<BR>\n",
-       org, net->tName, net->tStart+1, net->tEnd);
-printf("<B>%s position:</B> %s:%d-%d<BR>\n",
-       otherOrg, net->qName, net->qStart+1, net->qEnd);
+htmlPrintf("<B>%s position:</B> %s:%d-%d<BR>\n",
+           org, net->tName, net->tStart+1, net->tEnd);
+htmlPrintf("<B>%s position:</B> %s:%d-%d<BR>\n",
+           otherOrg, net->qName, net->qStart+1, net->qEnd);
 printf("<B>Strand:</B> %c<BR>\n", net->strand[0]);
 printLabeledNumber(NULL, "Score", net->score);
 if (net->chainId)
@@ -4310,7 +4657,11 @@ if (net->tEnd >= net->tStart)
     printLabeledNumber(org, "size", net->tEnd - net->tStart);
 if (net->qEnd >= net->qStart)
     printLabeledNumber(otherOrg, "size", net->qEnd - net->qStart);
-printf("<BR>Fields above refer to entire chain or gap, not just the part inside the window.<BR>\n");
+if (clipped)
+    printf("<BR>Fields above refer to the part of this chain or gap that could be "
+           "placed on this assembly, not to the whole of it.<BR>\n");
+else
+    printf("<BR>Fields above refer to entire chain or gap, not just the part inside the window.<BR>\n");
 netAlignFree(&net);
 }
 
@@ -4813,6 +5164,26 @@ struct chain *chain = NULL, *subChain = NULL, *toFree = NULL;
 int chainWinSize;
 boolean otherIsActive = FALSE;
 
+// The item name is either a bare chain id (from the "identical" regions) or
+// "chainId.type.chromStart.chromEnd" identifying the specific difference that
+// was clicked.  Pull the chain id off the front and remember the clicked
+// region (if any) so we can bold it in the tables below.
+char *chainItem = cloneString(item);
+long clickStart = -1, clickEnd = -1;
+char *dot = strchr(chainItem, '.');
+if (dot != NULL)
+    {
+    *dot = 0;
+    char *rest = dot + 1;
+    char *words[4];
+    if (chopByChar(rest, '.', words, ArraySize(words)) == 3)
+        {
+        clickStart = atol(words[1]);
+        clickEnd = atol(words[2]);
+        }
+    }
+item = chainItem;
+
 if (hDbIsActive(otherDb))
     otherIsActive = TRUE;
 
@@ -4849,15 +5220,15 @@ int seqEnd =   cartInt(cart, "r");
 char *chromName = cartString(cart, "c");
 safef(position, 128, "%s:%d-%d", chromName, seqStart, seqEnd);
 ourPos = cloneString(addCommasToPos(database, position));
-printf("<B>%s position:</B> %s<BR>", trackHubSkipHubName(database), ourPos);
+htmlPrintf("<B>%s position:</B> %s<BR>", trackHubSkipHubName(database), ourPos);
 
 int qs,qe;
 qChainRangePlusStrand(subChain, &qs, &qe);
 safef(position, 128, "%s:%d-%d", subChain->qName, qs-1, qe);
 otherPos = cloneString(addCommasToPos(otherDb, position));
-printf("<B>%s position: </B>", trackHubSkipHubName(otherDb));
+htmlPrintf("<B>%s position: </B>", trackHubSkipHubName(otherDb));
 linkToOtherBrowser(otherDb, subChain->qName, qs-1, qe);
-printf("%s</A><BR><BR>",  otherPos);
+htmlPrintf("%s</A><BR><BR>",  otherPos);
 chainWinSize = min(winEnd-winStart, chain->tEnd - chain->tStart);
 
 if (otherTbf != NULL || 
@@ -4905,11 +5276,16 @@ for(hr = regions; hr; hr = hr->next)
         }
     }
 
+// If the click came from a specific difference (not one of the "identical"
+// regions), the matching row is shown in bold in the tables below.
+if (clickStart >= 0)
+    printf("<BR>The item you clicked on is shown in <B>bold</B> in the tables below.<BR>\n");
+
 if (deletions)
     {
     printf("<BR><B>Deletions in Window:</B><BR>");
     printf("<TABLE border=\"1\"> <TR>\n");
-    printf("<TR><TD>%s Position</TD><TD>%s Position</TD><TD>Bases</TD><TD>Alignment</TD><TR>", trackHubSkipHubName(database), trackHubSkipHubName(otherDb));
+    htmlPrintf("<TR><TD>%s Position</TD><TD>%s Position</TD><TD>Bases</TD><TD>Alignment</TD><TR>", trackHubSkipHubName(database), trackHubSkipHubName(otherDb));
     for(hr = regions; hr; hr = hr->next)
         {
         if (hr->type != QUICKTYPE_DEL)
@@ -4920,7 +5296,10 @@ if (deletions)
         ourPos = cloneString(addCommasToPos(database, position));
         snprintf(position, 128, "%s:%ld-%ld", hr->oChrom, hr->oChromStart, hr->oChromEnd);
         otherPos = cloneString(addCommasToPos(database, position));
-        printf("<TR><TD>%s</TD><TD>%s</TD><TD>%.*s</TD><TD>",   ourPos, otherPos, hr->otherBaseCount, hr->otherBases);
+        char *hilite = (clickStart >= 0 && hr->chromStart == clickStart && hr->chromEnd == clickEnd) ? " style='font-weight:bold'" : "";
+        printf("<TR%s>", hilite);
+        htmlPrintf("<TD>%s</TD><TD>%s</TD>", ourPos, otherPos);
+        printf("<TD>%.*s</TD><TD>", hr->otherBaseCount, hr->otherBases);
         hgcAnchorSomewhereExt("htcChainAli", item, tdb->track, chain->tName, hr->chromStart - 10, hr->chromEnd + 10, tdb->track);
             printf("alignment</A></TD></TR>");
 
@@ -4932,7 +5311,7 @@ if (insertions)
     {
     printf("<BR><B>Insertions in Window:</B><BR>");
     printf("<TABLE border=\"1\"> <TR>\n");
-    printf("<TR><TD>%s Position</TD><TD>%s Position</TD><TD>Bases</TD><TD>Alignment</TD><TR>", trackHubSkipHubName(database), trackHubSkipHubName(otherDb));
+    htmlPrintf("<TR><TD>%s Position</TD><TD>%s Position</TD><TD>Bases</TD><TD>Alignment</TD><TR>", trackHubSkipHubName(database), trackHubSkipHubName(otherDb));
     for(hr = regions; hr; hr = hr->next)
         {
         if (hr->type != QUICKTYPE_INSERT)
@@ -4943,7 +5322,10 @@ if (insertions)
         ourPos = cloneString(addCommasToPos(database, position));
         snprintf(position, 128, "%s:%ld-%ld", hr->oChrom, hr->oChromStart, hr->oChromEnd);
         otherPos = cloneString(addCommasToPos(database, position));
-        printf("<TR><TD>%s</TD><TD>%s</TD><TD>%.*s</TD><TD>",   ourPos, otherPos, hr->baseCount, hr->bases);
+        char *hilite = (clickStart >= 0 && hr->chromStart == clickStart && hr->chromEnd == clickEnd) ? " style='font-weight:bold'" : "";
+        printf("<TR%s>", hilite);
+        htmlPrintf("<TD>%s</TD><TD>%s</TD>", ourPos, otherPos);
+        printf("<TD>%.*s</TD><TD>", hr->baseCount, hr->bases);
         hgcAnchorSomewhereExt("htcChainAli", item, tdb->track, chain->tName, hr->chromStart - 10, hr->chromEnd + 10, tdb->track);
             printf("alignment</A></TD></TR>");
 
@@ -4955,7 +5337,7 @@ if (doubles)
     {
     printf("<BR><B>Double Gaps in Window:</B><BR>");
     printf("<TABLE border=\"1\"> <TR>\n");
-    printf("<TR><TD>%s Position</TD><TD>%s Position</TD><TD># Bases in %s</TD><TD>#Bases in %s</TD><TD>Alignment</TD><TR>", trackHubSkipHubName(database), trackHubSkipHubName(otherDb), trackHubSkipHubName(database), trackHubSkipHubName(otherDb));
+    htmlPrintf("<TR><TD>%s Position</TD><TD>%s Position</TD><TD># Bases in %s</TD><TD>#Bases in %s</TD><TD>Alignment</TD><TR>", trackHubSkipHubName(database), trackHubSkipHubName(otherDb), trackHubSkipHubName(database), trackHubSkipHubName(otherDb));
     for(hr = regions; hr; hr = hr->next)
         {
         if (hr->type != QUICKTYPE_DOUBLE)
@@ -4966,7 +5348,10 @@ if (doubles)
         ourPos = cloneString(addCommasToPos(database, position));
         snprintf(position, 128, "%s:%ld-%ld", hr->oChrom, hr->oChromStart, hr->oChromEnd);
         otherPos = cloneString(addCommasToPos(database, position));
-        printf("<TR><TD>%s</TD><TD>%s</TD><TD>%d</TD><TD>%d</TD><TD>",   ourPos, otherPos, hr->baseCount, hr->otherBaseCount);
+        char *hilite = (clickStart >= 0 && hr->chromStart == clickStart && hr->chromEnd == clickEnd) ? " style='font-weight:bold'" : "";
+        printf("<TR%s>", hilite);
+        htmlPrintf("<TD>%s</TD><TD>%s</TD>", ourPos, otherPos);
+        printf("<TD>%d</TD><TD>%d</TD><TD>", hr->baseCount, hr->otherBaseCount);
         hgcAnchorSomewhereExt("htcChainAli", item, tdb->track, chain->tName, hr->chromStart - 10, hr->chromEnd + 10, tdb->track);
             printf("alignment</A></TD></TR>");
 
@@ -4978,7 +5363,7 @@ if (mismatches)
     {
     printf("<BR><B>Mismatches in Window:</B><BR>");
     printf("<TABLE border=\"1\"> <TR>\n");
-    printf("<TR><TD>%s Position</TD><TD>%s Position</TD><TD>Change</TD><TD>Alignment</TD><TR>", trackHubSkipHubName(database), trackHubSkipHubName(otherDb));
+    htmlPrintf("<TR><TD>%s Position</TD><TD>%s Position</TD><TD>Change</TD><TD>Alignment</TD><TR>", trackHubSkipHubName(database), trackHubSkipHubName(otherDb));
     for(hr = regions; hr; hr = hr->next)
         {
         if (hr->type != QUICKTYPE_MISMATCH)
@@ -4989,7 +5374,10 @@ if (mismatches)
         ourPos = cloneString(addCommasToPos(database, position));
         snprintf(position, 128, "%s:%ld-%ld", hr->oChrom, hr->oChromStart, hr->oChromEnd);
         otherPos = cloneString(addCommasToPos(database, position));
-        printf("<TR><TD>%s</TD><TD>%s</TD><TD>%.*s -> %.*s</TD><TD>",   ourPos, otherPos, hr->otherBaseCount, hr->otherBases, hr->baseCount, hr->bases);
+        char *hilite = (clickStart >= 0 && hr->chromStart == clickStart && hr->chromEnd == clickEnd) ? " style='font-weight:bold'" : "";
+        printf("<TR%s>", hilite);
+        htmlPrintf("<TD>%s</TD><TD>%s</TD>", ourPos, otherPos);
+        printf("<TD>%.*s -> %.*s</TD><TD>", hr->otherBaseCount, hr->otherBases, hr->baseCount, hr->bases);
         hgcAnchorSomewhereExt("htcChainAli", item, tdb->track, chain->tName, hr->chromStart - 10, hr->chromEnd + 10, tdb->track);
             printf("alignment</A></TD></TR>");
 
@@ -5035,6 +5423,8 @@ type = words[0];
 if (container == NULL && wordCount > 0)
     {
     if (sameString(type, "maf") || sameString(type, "wigMaf") || sameString(type, "bigMaf") || sameString(type, "netAlign")
+        || sameString(type, "bigNet")
+        || sameString(type, "bigQuickLiftChain")
         || sameString(type, "encodePeak"))
         headerItem = NULL;
     else if ((  sameString(type, "narrowPeak")
@@ -5051,10 +5441,13 @@ if (differentString(type, "bigInteract") && differentString(type, "interact"))
     {
     // skip generic URL code as these may have multiple items returned for a click
     itemForUrl = getIdInUrl(tdb, item);
-    if (itemForUrl != NULL && trackDbSetting(tdb, "url") && differentString(type, "bigBed")
+    // the big* types print their own url and iframe, over in bigBedClick.c
+    if (itemForUrl != NULL && differentString(type, "bigBed")
             && differentString(type, "bigPsl") && differentString(type, "bigGenePred"))
         {
-        printCustomUrl(tdb, itemForUrl, item == itemForUrl);
+        if (trackDbSetting(tdb, "url"))
+            printCustomUrl(tdb, itemForUrl, item == itemForUrl);
+        // a track can have an iframeUrl without a url, so this is not under the test above
         printIframe(tdb, itemForUrl);
         }
     }
@@ -5088,23 +5481,10 @@ else if (wordCount > 0)
 	}
     else if (sameString(type, "bigBed"))
         {
-        boolean bigBedOnePath = cfgOptionBooleanDefault("bigBedOnePath", TRUE);
-
-        if (bigBedOnePath)
-            {
-            int num = 0;
-            if (wordCount > 1)
-                num = atoi(words[1]);
-            genericBigBedClick(conn, tdb, item, start, end, num);
-            }
-        else
-            {
-            int num = 0;
-            if (wordCount > 1)
-                num = atoi(words[1]);
-            if (num < 3) num = 3;
-            genericBigBedClick(conn, tdb, item, start, end, num);
-            }
+        int num = 0;
+        if (wordCount > 1)
+            num = atoi(words[1]);
+        genericBigBedClick(conn, tdb, item, start, end, num);
 	}
     else if (sameString(type, "sample"))
 	{
@@ -5130,10 +5510,10 @@ else if (wordCount > 0)
 	    subType = words[1];
 	genericPslClick(conn, tdb, item, start, subType);
 	}
-    else if (sameString(type, "netAlign"))
+    else if (sameString(type, "netAlign") || sameString(type, "bigNet"))
         {
 	if (wordCount < 3)
-	    errAbort("Missing field in netAlign track type field");
+	    errAbort("Missing field in %s track type field", type);
 	genericNetClick(conn, tdb, item, start, words[1], words[2]);
 	}
     else if (sameString(type, "bigQuickLiftChain")) 
@@ -5498,7 +5878,12 @@ void parseSs(char *ss, char **retPslName, char **retFaName, char **retQName)
 static char buf[512*2];
 int wordCount;
 char *words[4];
-strcpy(buf, ss);
+/* SECURITY (refs #38054): ss comes from the cart variable of the same name, or from
+ * the item name, and a visitor controls both.  A legitimate value is a short triple
+ * of trash file paths, so anything that does not fit is a bug or an attack.  safecpy
+ * aborts instead of writing past the end of the buffer, which matches the errAborts
+ * below on the other malformed cases. */
+safecpy(buf, sizeof buf, ss);
 wordCount = chopLine(buf, words);
 
 if (wordCount < 1)
@@ -6662,8 +7047,7 @@ void printGeneCards(char *db, char *geneName)
 if (startsWith("hg", db) && isNotEmpty(geneName))
     {
     printf("<B>GeneCards:</B> "
-	   "<A HREF = \"http://www.genecards.org/cgi-bin/cardsearch.pl?"
-	   "search=%s\" TARGET=_blank>%s</A><BR>\n",
+	   "<A HREF = \"https://www.genecards.org/card/%s\" TARGET=_blank>%s</A><BR>\n",
 	   geneName, geneName);
     }
 }
@@ -6932,6 +7316,18 @@ hFreeConn(&conn);
 hFreeConn(&conn2);
 }
 
+static char *aliTrackParam()
+/* "&aliTrack=<track>" for the track hgc was called on, so an alignment handler can find
+ * its trackDb.  The aliTable name alone will not do:  a quickLifted track's table name is
+ * the one from the assembly the alignments came from, and that name usually also belongs
+ * to a real table on the assembly being viewed. */
+{
+static char buf[1024];
+
+safef(buf, sizeof buf, "&aliTrack=%s", cgiUsualString("table", cgiUsualString("g", "")));
+return buf;
+}
+
 static boolean isPslToPrintByClick(struct psl *psl, int startFirst, boolean isClicked)
 /* Determine if a psl should be printed based on if it was or was not the one that was clicked
  * on.
@@ -6971,7 +7367,8 @@ for (isClicked = 1; isClicked >= 0; isClicked -= 1)
             char *qName = itemIn;
 	    if (showEvery)
 		qName = replaceChars(itemIn, "PrintAllSequences", psl->qName);
-	    safef(otherString, sizeof(otherString), "%d&aliTable=%s", psl->tStart, tableName);
+	    safef(otherString, sizeof(otherString), "%d&aliTable=%s%s", psl->tStart, tableName,
+                  aliTrackParam());
             printf("<A HREF=\"%s&db=%s&position=%s%%3A%d-%d\">browser</A> | ",
                    hgTracksPathAndSettings(), database, psl->tName, psl->tStart+1, psl->tEnd);
 	    if (psl->qSize <= MAX_DISPLAY_QUERY_SEQ_SIZE) // Only anchor if small enough 
@@ -7019,8 +7416,8 @@ for (psl = pslList; psl != NULL; psl = psl->next)
 	    qName = replaceChars(itemIn, "PrintAllSequences", psl->qName);
 
         char otherString[512];
-	safef(otherString, sizeof(otherString), "%d&aliTable=%s",
-	      psl->tStart, tableName);
+	safef(otherString, sizeof(otherString), "%d&aliTable=%s%s",
+	      psl->tStart, tableName, aliTrackParam());
 	hgcAnchorSomewhere(hgcCommandInWindow, qName, otherString, psl->tName);
 	printf("<BR>View details of parts of alignment within browser window</A>.<BR>\n");
 	}
@@ -7646,7 +8043,7 @@ else if (stringIn("_", item))
     // the item name contains the forward and reverse primers
     int maxSplits = 2;
     char *splitQName[maxSplits];
-    int numSplits = chopString(cloneString(item), "_", splitQName, sizeof(splitQName));
+    int numSplits = chopString(cloneString(item), "_", splitQName, ArraySize(splitQName));
     if (numSplits == maxSplits)
         {
         fPrimer = splitQName[0];
@@ -8201,7 +8598,8 @@ else
     fprintf(f, "<H2>Alignment of %s and %s:%d-%d</H2>\n",
 	    qName, psl->tName, psl->tStart+1, psl->tEnd);
 
-fputs("Click on links in the frame to the left to navigate through "
+if (!cartUsualBoolean(cart, "blatNewPage", FALSE))  /* no "frame" in the new single-page view */
+    fputs("Click on links in the frame to the left to navigate through "
       "the alignment.\n", f);
 blockCount = pslShowAlignment(psl, qType == gftProt,
                               qName, qSeq, qStart, qEnd,
@@ -8316,7 +8714,8 @@ if (restrictToWindow)
 char *displayChromName = chromAliasGetDisplayChrom(database, cart, psl->tName);
 fprintf(body, "<H2>Alignment of %s and %s:%d-%d</H2>\n",
 	psl->qName, displayChromName, partTStart+1, partTEnd);
-fprintf(body, "Click on links in the frame to the left to navigate through "
+if (!cartUsualBoolean(cart, "blatNewPage", FALSE))  /* no "frame" in the new single-page view */
+    fprintf(body, "Click on links in the frame to the left to navigate through "
 	"the alignment.\n");
 
 blockCount = ffShAliPart(body, ffAli, wholePsl->qName,
@@ -8328,11 +8727,26 @@ blockCount = ffShAliPart(body, ffAli, wholePsl->qName,
 return blockCount;
 }
 
+/* The modern single-page alignment (webStartGbNoBanner chrome, no <frameset>) can now stand in for
+ * the classic frameset on any alignment page, not just hgBlat's - gated by the modernAlignPage
+ * hg.conf flag.  alnModernStart() starts the right page chrome and sets gAlnModern; showSomeAlignment()
+ * then renders the modern or classic body to match.  These are forward-declared here because
+ * showSomeAlignment() sits above their definitions. */
+static boolean gAlnModern = FALSE;
+static void showSomeAlignmentModern(struct psl *psl, bioSeq *oSeq, enum gfType qType,
+                       int qStart, int qEnd, char *qName, int cdsS, int cdsE, boolean blatContext);
+
 void showSomeAlignment(struct psl *psl, bioSeq *oSeq,
                        enum gfType qType, int qStart, int qEnd,
                        char *qName, int cdsS, int cdsE)
-/* Display protein or DNA alignment in a frame. */
+/* Display protein or DNA alignment in a frame (or the modern single page when gAlnModern). */
 {
+if (gAlnModern)
+    {   /* modern single-page view; blatContext=FALSE -> neutral chrome (no BLAT title/buttons) */
+    showSomeAlignmentModern(psl, oSeq, qType, qStart, qEnd, qName, cdsS, cdsE, FALSE);
+    webEndGb();
+    exit(0);   // we drew the whole page; skip the frameset close
+    }
 int blockCount, i;
 struct tempName indexTn, bodyTn;
 FILE *index, *body;
@@ -8421,23 +8835,102 @@ fclose(index);
 chmod(indexTn.forCgi, 0666);
 
 /* Write (to stdout) the main html page containing just the frame info. */
-if (partPsl != wholePsl)
-    printf("<FRAMESET COLS = \"13%%,87%% \" "
-	   "ONLOAD=\"body.location.href = '%s#cDNAStart';\">\n",
-	   bodyTn.forCgi);
-else
-    puts("<FRAMESET COLS = \"13%,87% \" >");
+puts("<FRAMESET COLS = \"13%,87% \" >");
 printf("  <FRAME SRC=\"%s\" NAME=\"index\">\n", indexTn.forCgi);
-printf("  <FRAME SRC=\"%s\" NAME=\"body\">\n", bodyTn.forCgi);
+// Start the body frame at the #cDNAStart anchor.  This used to be an ONLOAD
+// attribute on the FRAMESET, but our CSP puts a nonce in script-src, so
+// browsers ignore 'unsafe-inline' and never run an inline event handler.
+if (partPsl != wholePsl)
+    printf("  <FRAME SRC=\"%s#cDNAStart\" NAME=\"body\">\n", bodyTn.forCgi);
+else
+    printf("  <FRAME SRC=\"%s\" NAME=\"body\">\n", bodyTn.forCgi);
 puts("<NOFRAMES><BODY></BODY></NOFRAMES>");
 puts("</FRAMESET>");
 puts("</HTML>\n");
 exit(0);	/* Avoid cartHtmlEnd. */
 }
 
-static void getCdsStartAndStop(struct sqlConnection *conn, char *acc, char *trackTable,
-			       uint *retCdsStart, uint *retCdsEnd)
-/* Get cds start and stop, if available */
+struct quickLiftAli
+/* Where the alignments behind an "aliTable" cart value actually live.  For a quickLifted
+ * track that is another assembly, under the track's unprefixed table name.  For anything
+ * else it is the current database and the table as given. */
+    {
+    struct trackDb *tdb;
+    char *db;              /* assembly holding the alignments and their sequence */
+    char *table;           /* the alignment table within that assembly */
+    char *quickLiftFile;   /* the chain file, NULL when the track is not quickLifted */
+    };
+
+static void quickLiftAliInfo(char *aliTable, struct quickLiftAli *ali)
+/* Fill in where the alignments behind aliTable live. */
+{
+ZeroVar(ali);
+ali->db = database;
+ali->table = aliTable;
+
+char *bareTable = trackHubSkipHubName(aliTable);
+// aliTrack is the track hgc was called on, which is the only unambiguous handle on the
+// trackDb; aliTable can be a table name that both assemblies have.
+char *aliTrack = cartUsualString(cart, "aliTrack", NULL);
+if (isNotEmpty(aliTrack))
+    ali->tdb = hashFindVal(trackHash, aliTrack);
+if ((ali->tdb == NULL) && isCustomTrack(bareTable))
+    {
+    struct customTrack *ct = lookupCt(bareTable);
+    if (ct != NULL)
+        ali->tdb = ct->tdb;
+    }
+if (ali->tdb == NULL)
+    ali->tdb = hashFindVal(trackHash, aliTable);
+if (ali->tdb == NULL)
+    return;
+
+// Both halves of the pair or neither.  Nothing filters a hub's trackDb, so a stanza can
+// carry quickLiftDb on its own, and taking the assembly without the chain file would leave
+// the table resolved against one assembly and the query run on the other.
+if (!quickLiftIsLifted(ali->tdb))
+    return;
+
+ali->quickLiftFile = trackDbSetting(ali->tdb, "quickLiftUrl");
+ali->db = trackDbSetting(ali->tdb, "quickLiftDb");
+quickLiftResolveTable(ali->tdb, bareTable, &ali->table, &ali->db);
+}
+
+static struct psl *quickLiftFindPsl(struct quickLiftAli *ali, struct sqlConnection *conn,
+                                    char *acc, char *chrom, int tStart)
+/* The alignment of acc that the lift places at chrom:tStart on the reference.  Only that
+ * destination position is known here and the lift does not run backwards, so read every
+ * alignment of acc out of the other assembly, lift them, and keep the one that lands
+ * where we were sent.  Returns NULL if none does. */
+{
+char splitTable[HDB_MAX_TABLE_STRING];
+boolean hasBin;
+if (!hFindSplitTable(ali->db, chrom, ali->table, splitTable, sizeof splitTable, &hasBin))
+    errAbort("Failed to find aliTable=%s in %s", ali->table, ali->db);
+
+char query[1024];
+sqlSafef(query, sizeof query, "select * from %s where qName like '%s%%'", splitTable, acc);
+struct sqlResult *sr = sqlGetResult(conn, query);
+struct psl *pslList = NULL;
+char **row;
+while ((row = sqlNextRow(sr)) != NULL)
+    slAddHead(&pslList, pslLoad(row+hasBin));
+sqlFreeResult(&sr);
+
+pslList = quickLiftPsls(quickLiftChainHash(ali->quickLiftFile, chrom, winStart, winEnd),
+                        pslList);
+
+struct psl *psl;
+for (psl = pslList; psl != NULL; psl = psl->next)
+    if (sameString(psl->tName, chrom) && (psl->tStart == tStart))
+        return psl;
+return NULL;
+}
+
+static void getCdsStartAndStop(char *db, struct sqlConnection *conn, char *acc,
+                               char *trackTable, uint *retCdsStart, uint *retCdsEnd)
+/* Get cds start and stop, if available.  db is the assembly the alignment came from,
+ * which is not the one on screen when the track is quickLifted. */
 {
 struct trackDb *tdb = hashFindVal(trackHash, trackTable);
 // Note: this variable was previously named cdsTable but unfortunately the
@@ -8445,7 +8938,7 @@ struct trackDb *tdb = hashFindVal(trackHash, trackTable);
 char *tdbCdsTable = tdb ? trackDbSetting(tdb, "cdsTable") : NULL;
 if (isEmpty(tdbCdsTable) && startsWith("ncbiRefSeq", trackTable))
     tdbCdsTable = "ncbiRefSeqCds";
-if (isNotEmpty(tdbCdsTable) && hTableExists(database, tdbCdsTable))
+if (isNotEmpty(tdbCdsTable) && hTableExists(db, tdbCdsTable))
     {
     char query[256];
     sqlSafef(query, sizeof(query), "select cds from %s where id = '%s'", tdbCdsTable, acc);
@@ -8483,50 +8976,74 @@ struct sqlConnection *conn = NULL;
 struct trackDb *tdb = NULL;
 
 aliTable = cartString(cart, "aliTable");
-if (isCustomTrack(aliTable))
-    {
-    struct customTrack *ct = lookupCt(aliTable);
-    tdb = ct->tdb;
-    }
-else
-    tdb = hashFindVal(trackHash, aliTable);
+// A quickLifted track's alignments live in the file of the assembly they came from, and
+// the position we were sent is on the reference.
+struct quickLiftAli ali;
+quickLiftAliInfo(aliTable, &ali);
+tdb = ali.tdb;
 if (tdb == NULL)
     errAbort("BUG: bigPsl alignment table '%s' not found; this maybe causes by `.' in track names", aliTable);
              
-if (!trackHubDatabase(database))
-    conn = hAllocConnTrack(database, tdb);
+if (!trackHubDatabase(ali.db) && !isGenArk(ali.db))
+    conn = hAllocConnTrack(ali.db, tdb);
 
 char title[1024];
 safef(title, sizeof title, "%s vs Genomic [%s]", acc, aliTable);
-htmlFramesetStart(title);
+alnModernStart(title);
 
 /* Get some environment vars. */
 start = cartInt(cart, "l");
 int end = cartInt(cart, "r");
 char *chrom = cartString(cart, "c");
 
-char *seq, *cdsString = NULL;
+char *seq = NULL, *cdsString = NULL;
 struct lm *lm = lmInit(0);
 char *fileName = bbiNameFromSettingOrTable(tdb, conn, tdb->table);
 struct bbiFile *bbi =  bigBedFileOpenAlias(fileName, chromAliasFindAliases);
-struct bigBedInterval *bb, *bbList = bigBedIntervalQuery(bbi, chrom, start, end, 0, lm);
-char *bedRow[32];
-char startBuf[16], endBuf[16];
+unsigned seqTypeField =  bbExtraFieldIndex(bbi, "seqType");
+struct hash *chainHash = NULL, *mapPsls = NULL;
+struct bigBedInterval *bb, *bbList;
+if (ali.quickLiftFile != NULL)
+    bbList = quickLiftGetIntervals(ali.quickLiftFile, bbi, chrom, start, end, &chainHash);
+else
+    bbList = bigBedIntervalQuery(bbi, chrom, start, end, 0, lm);
+
+// Pick the alignment the browser drew at chrom:start-end.  Under quickLift the intervals
+// are in the other assembly's coordinates, so each one has to be lifted before its
+// position can be compared with the one we were sent.
+psl = NULL;
+char otherChrom[bbi->chromBpt->keySize+1];
+int lastChromId = -1;
 for (bb = bbList; bb != NULL; bb = bb->next)
     {
-    bigBedIntervalToRow(bb, seqName, startBuf, endBuf, bedRow, ArraySize(bedRow));
-    struct bed *bed = bedLoadN(bedRow, 12);
-    if (sameString(bed->name, acc) && (bb->start == start) && (bb->end == end))
-	{
-	bb->next = NULL;
-	break;
-	}
+    char *bbChrom = seqName;
+    if (ali.quickLiftFile != NULL)
+        {
+        bbiCachedChromLookup(bbi, bb->chromId, lastChromId, otherChrom, sizeof otherChrom);
+        lastChromId = bb->chromId;
+        bbChrom = otherChrom;
+        }
+    char *bbSeq = NULL, *bbCds = NULL;
+    struct psl *bbPsl = getPslAndSeq(tdb, bbChrom, bb, seqTypeField, &bbSeq, &bbCds);
+    if (ali.quickLiftFile != NULL)
+        {
+        struct psl *lifted = quickLiftPsl(chainHash, &mapPsls, bbPsl);
+        pslFree(&bbPsl);
+        bbPsl = lifted;
+        }
+    if ((bbPsl != NULL) && sameString(bbPsl->qName, acc)
+     && (bbPsl->tStart == start) && (bbPsl->tEnd == end))
+        {
+        psl = bbPsl;
+        seq = bbSeq;
+        cdsString = bbCds;
+        break;
+        }
+    pslFree(&bbPsl);
     }
-if (bb == NULL)
+if (psl == NULL)
     errAbort("item %s not found in range %s:%d-%d in bigBed %s (%s)",
              acc, chrom, start, end, tdb->table, fileName);
-unsigned seqTypeField =  bbExtraFieldIndex(bbi, "seqType");
-psl = getPslAndSeq(tdb, seqName, bb, seqTypeField, &seq, &cdsString);
 if (cdsString)
     genbankParseCds(cdsString,  &cdsStart, &cdsEnd);
 
@@ -8553,13 +9070,11 @@ unsigned int cdsStart = 0, cdsEnd = 0;
 struct trackDb *tdb = NULL;
 
 aliTable = cartString(cart, "aliTable");
-if (isCustomTrack(aliTable))
-    {
-    struct customTrack *ct = lookupCt(aliTable);
-    tdb = ct->tdb;
-    }
-else
-    tdb = hashFindVal(trackHash, aliTable);
+struct quickLiftAli ali;
+quickLiftAliInfo(aliTable, &ali);
+tdb = ali.tdb;
+if (tdb == NULL)
+    errAbort("BUG: bigPsl alignment table '%s' not found; this maybe causes by `.' in track names", aliTable);
 char title[1024];
 safef(title, sizeof title, "%s vs Genomic [%s]", acc, aliTable);
 htmlFramesetStart(title);
@@ -8569,25 +9084,52 @@ start = cartInt(cart, "l");
 int end = cartInt(cart, "r");
 char *chrom = cartString(cart, "c");
 
-char *seq, *cdsString = NULL;
+char *seq = NULL, *cdsString = NULL;
 struct lm *lm = lmInit(0);
 char *fileName = bbiNameFromSettingOrTable(tdb, NULL, tdb->table);
 struct bbiFile *bbi =  bigBedFileOpenAlias(fileName, chromAliasFindAliases);
-struct bigBedInterval *bb, *bbList = bigBedIntervalQuery(bbi, chrom, start, end, 0, lm);
-char *bedRow[32];
-char startBuf[16], endBuf[16];
+unsigned seqTypeField =  bbExtraFieldIndex(bbi, "seqType");
+struct hash *chainHash = NULL, *mapPsls = NULL;
+struct bigBedInterval *bb, *bbList;
+if (ali.quickLiftFile != NULL)
+    // the file holds the other assembly's alignments, so the window has to be turned
+    // into that assembly's coordinates before the query
+    bbList = quickLiftGetIntervals(ali.quickLiftFile, bbi, chrom, start, end, &chainHash);
+else
+    bbList = bigBedIntervalQuery(bbi, chrom, start, end, 0, lm);
+
+wholePsl = NULL;
+char otherChrom[bbi->chromBpt->keySize+1];
+int lastChromId = -1;
 for (bb = bbList; bb != NULL; bb = bb->next)
     {
-    bigBedIntervalToRow(bb, seqName, startBuf, endBuf, bedRow, ArraySize(bedRow));
-    struct bed *bed = bedLoadN(bedRow, 12);
-    if (sameString(bed->name, acc))
-	{
-	bb->next = NULL;
-	break;
-	}
+    char *bbChrom = seqName;
+    if (ali.quickLiftFile != NULL)
+        {
+        bbiCachedChromLookup(bbi, bb->chromId, lastChromId, otherChrom, sizeof otherChrom);
+        lastChromId = bb->chromId;
+        bbChrom = otherChrom;
+        }
+    char *bbSeq = NULL, *bbCds = NULL;
+    struct psl *bbPsl = getPslAndSeq(tdb, bbChrom, bb, seqTypeField, &bbSeq, &bbCds);
+    if (ali.quickLiftFile != NULL)
+        {
+        struct psl *lifted = quickLiftPsl(chainHash, &mapPsls, bbPsl);
+        pslFree(&bbPsl);
+        bbPsl = lifted;
+        }
+    if ((bbPsl != NULL) && sameString(bbPsl->qName, acc))
+        {
+        wholePsl = bbPsl;
+        seq = bbSeq;
+        cdsString = bbCds;
+        break;
+        }
+    pslFree(&bbPsl);
     }
-unsigned seqTypeField =  bbExtraFieldIndex(bbi, "seqType");
-wholePsl = getPslAndSeq(tdb, seqName, bb, seqTypeField, &seq, &cdsString);
+if (wholePsl == NULL)
+    errAbort("item %s not found in range %s:%d-%d in bigBed %s (%s)",
+             acc, chrom, start, end, tdb->table, fileName);
 
 if (seq == NULL)
     {
@@ -8606,8 +9148,10 @@ showSomePartialDnaAlignment(partPsl, wholePsl, rnaSeq,
                             NULL, cdsStart, cdsEnd);
 }
 
-static struct dnaSeq *getBaseColorSequence(char *itemName, char *table)
-/* Grab sequence using the sequence and extFile table names out of BASE_COLOR_USE_SEQUENCE. */
+static struct dnaSeq *getBaseColorSequence(char *db, char *itemName, char *table)
+/* Grab sequence using the sequence and extFile table names out of BASE_COLOR_USE_SEQUENCE.
+ * db is the assembly the sequence lives in, which is not the one on screen when the track
+ * is quickLifted. */
 {
 struct trackDb *tdb = hashMustFindVal(trackHash, table);
 char *spec = trackDbRequiredSetting(tdb, BASE_COLOR_USE_SEQUENCE);
@@ -8618,11 +9162,11 @@ char *specCopy = cloneString(spec);
 char *words[3];
 int nwords = chopByWhite(specCopy, words, ArraySize(words));
 if (sameString(words[0], "extFile") && (nwords == ArraySize(words)))
-    return hDnaSeqGet(database, itemName, words[1], words[2]);
+    return hDnaSeqGet(db, itemName, words[1], words[2]);
 else if (sameString(words[0], "db"))
     {
-    char *db = (nwords == 2) ? words[1] : database;
-    return hChromSeq(db, itemName, 0, 0);
+    char *seqDb = (nwords == 2) ? words[1] : db;
+    return hChromSeq(seqDb, itemName, 0, 0);
     }
 else
     errAbort("invalid %s track setting: %s", BASE_COLOR_USE_SEQUENCE, spec);
@@ -8649,59 +9193,70 @@ safef(accChopped, sizeof(accChopped), "%s",acc);
 chopSuffix(accChopped);
 
 aliTable = cartString(cart, "aliTable");
-char *accForTitle = startsWith("ncbiRefSeq", aliTable) ? acc : accChopped;
+char *accForTitle = startsWith("ncbiRefSeq", trackHubSkipHubName(aliTable)) ? acc : accChopped;
 char title[1024];
 safef(title, sizeof title, "%s vs Genomic [%s]", accForTitle, aliTable);
-htmlFramesetStart(title);
+alnModernStart(title);
 
 /* Get some environment vars. */
 start = cartInt(cart, "o");
 
-conn = hAllocConn(database);
-getCdsStartAndStop(conn, acc, aliTable, &cdsStart, &cdsEnd);
+// A quickLifted track's alignments, and the sequence they are to, live in the assembly
+// they came from, not the one on screen.  The position we were sent is on the reference.
+struct quickLiftAli ali;
+quickLiftAliInfo(aliTable, &ali);
+conn = hAllocConn(ali.db);
+getCdsStartAndStop(ali.db, conn, acc, aliTable, &cdsStart, &cdsEnd);
 
-/* Look up alignments in database */
-if (!hFindSplitTable(database, seqName, aliTable, table, sizeof table, &hasBin))
-    errAbort("Failed to find aliTable=%s", aliTable);
-sqlSafef(query, sizeof query, "select * from %s where qName like '%s%%' and tName=\"%s\" and tStart=%d",
-	table, acc, seqName, start);
-sr = sqlGetResult(conn, query);
-if ((row = sqlNextRow(sr)) == NULL)
-    errAbort("Couldn't find alignment for %s at %d", acc, start);
-psl = pslLoad(row+hasBin);
-sqlFreeResult(&sr);
-
-/* get bz rna snapshot for blastz alignments */
-if (sameString("mrnaBlastz", aliTable) || sameString("pseudoMrna", aliTable))
+if (ali.quickLiftFile != NULL)
     {
-    struct sqlConnection *conn = hAllocConn(database);
-    unsigned retId = 0;
-    safef(accTmp, sizeof accTmp, "bz-%s", acc);
-    if (hRnaSeqAndIdx(accTmp, &rnaSeq, &retId, conn) == -1)
-        rnaSeq = hRnaSeq(database, acc);
-    hFreeConn(&conn);
-    }
-else if (sameString("HInvGeneMrna", aliTable))
-    {
-    /* get RNA accession for the gene id in the alignment */
-    sqlSafef(query, sizeof query, "select mrnaAcc from HInv where geneId='%s'", acc);
-    rnaSeq = hRnaSeq(database, sqlQuickString(conn, query));
-    }
-else if (sameString("ncbiRefSeqPsl", aliTable) || startsWith("altSeqLiftOverPsl", aliTable) ||
-         startsWith("fixSeqLiftOverPsl", aliTable))
-    {
-    rnaSeq = getBaseColorSequence(acc, aliTable);
+    psl = quickLiftFindPsl(&ali, conn, acc, seqName, start);
+    if (psl == NULL)
+        errAbort("Couldn't find a lifted alignment for %s at %s:%d", acc, seqName, start);
     }
 else
     {
-    char *cdnaTable = NULL;
-    struct trackDb *tdb = hashFindVal(trackHash, aliTable);
-    if (tdb != NULL)
-	cdnaTable = trackDbSetting(tdb, "cdnaTable");
-    if (isNotEmpty(cdnaTable) && hTableExists(database, cdnaTable))
-	rnaSeq = hGenBankGetMrna(database, acc, cdnaTable);
+    /* Look up alignments in database */
+    if (!hFindSplitTable(database, seqName, aliTable, table, sizeof table, &hasBin))
+        errAbort("Failed to find aliTable=%s", aliTable);
+    sqlSafef(query, sizeof query, "select * from %s where qName like '%s%%' and tName=\"%s\" and tStart=%d",
+	    table, acc, seqName, start);
+    sr = sqlGetResult(conn, query);
+    if ((row = sqlNextRow(sr)) == NULL)
+        errAbort("Couldn't find alignment for %s at %d", acc, start);
+    psl = pslLoad(row+hasBin);
+    sqlFreeResult(&sr);
+    }
+
+/* get bz rna snapshot for blastz alignments */
+char *bareAliTable = trackHubSkipHubName(aliTable);
+if (sameString("mrnaBlastz", bareAliTable) || sameString("pseudoMrna", bareAliTable))
+    {
+    struct sqlConnection *conn = hAllocConn(ali.db);
+    unsigned retId = 0;
+    safef(accTmp, sizeof accTmp, "bz-%s", acc);
+    if (hRnaSeqAndIdx(accTmp, &rnaSeq, &retId, conn) == -1)
+        rnaSeq = hRnaSeq(ali.db, acc);
+    hFreeConn(&conn);
+    }
+else if (sameString("HInvGeneMrna", bareAliTable))
+    {
+    /* get RNA accession for the gene id in the alignment */
+    sqlSafef(query, sizeof query, "select mrnaAcc from HInv where geneId='%s'", acc);
+    rnaSeq = hRnaSeq(ali.db, sqlQuickString(conn, query));
+    }
+else if (sameString("ncbiRefSeqPsl", bareAliTable) || startsWith("altSeqLiftOverPsl", bareAliTable) ||
+         startsWith("fixSeqLiftOverPsl", bareAliTable))
+    {
+    rnaSeq = getBaseColorSequence(ali.db, acc, aliTable);
+    }
+else
+    {
+    char *cdnaTable = (ali.tdb != NULL) ? trackDbSetting(ali.tdb, "cdnaTable") : NULL;
+    if (isNotEmpty(cdnaTable) && hTableExists(ali.db, cdnaTable))
+	rnaSeq = hGenBankGetMrna(ali.db, acc, cdnaTable);
     else
-	rnaSeq = hRnaSeq(database, acc);
+	rnaSeq = hRnaSeq(ali.db, acc);
     }
 
 if (NULL == rnaSeq)
@@ -8710,7 +9265,7 @@ if (NULL == rnaSeq)
     }
 else
     {
-    if (startsWith("xeno", aliTable))
+    if (startsWith("xeno", bareAliTable))
         showSomeAlignment(psl, rnaSeq, gftDnaX, 0, rnaSeq->size, NULL, cdsStart, cdsEnd);
     else
         showSomeAlignment(psl, rnaSeq, gftDna, 0, rnaSeq->size, NULL, cdsStart, cdsEnd);
@@ -8734,12 +9289,16 @@ chopSuffix(accChopped);
 aliTable = cartString(cart, "aliTable");
 start = cartInt(cart, "o");
 
-char *accForTitle = startsWith("ncbiRefSeq", aliTable) ? acc : accChopped;
+// a quickLifted track carries a hub_NNN_ prefix; the name tests below are all about the
+// kind of alignment, so they want the name without it
+char *bareAliTable = trackHubSkipHubName(aliTable);
+
+char *accForTitle = startsWith("ncbiRefSeq", bareAliTable) ? acc : accChopped;
 char title[1024];
 safef(title, sizeof title, "%s vs Genomic [%s]", accForTitle, aliTable);
 htmlFramesetStart(title);
 
-if (startsWith("user", aliTable))
+if (startsWith("user", bareAliTable))
     {
     char *pslName, *faName, *qName;
     struct lineFile *lf;
@@ -8797,48 +9356,57 @@ if (startsWith("user", aliTable))
     }
 else
     {
-    /* Look up alignments in database */
-    struct sqlConnection *conn = hAllocConn(database);
-    getCdsStartAndStop(conn, acc, aliTable, &cdsStart, &cdsEnd);
+    /* Look up alignments in database.  A quickLifted track's alignments, and the
+     * sequence they are to, live in the assembly they came from. */
+    struct quickLiftAli ali;
+    quickLiftAliInfo(aliTable, &ali);
+    struct sqlConnection *conn = hAllocConn(ali.db);
+    getCdsStartAndStop(ali.db, conn, acc, aliTable, &cdsStart, &cdsEnd);
 
-    char table[64];
-    boolean hasBin;
-    if (!hFindSplitTable(database, seqName, aliTable, table, sizeof table, &hasBin))
-	errAbort("aliTable %s not found", aliTable);
     char query[256];
-    sqlSafef(query, sizeof(query),
-         "select * from %s where qName = '%s' and tName=\"%s\" and tStart=%d", 
-         table, acc, seqName, start);
-    struct sqlResult *sr = sqlGetResult(conn, query);
-    char **row;
-    if ((row = sqlNextRow(sr)) == NULL)
-	errAbort("Couldn't find alignment for %s at %d", acc, start);
-    wholePsl = pslLoad(row+hasBin);
-    sqlFreeResult(&sr);
+    if (ali.quickLiftFile != NULL)
+        {
+        wholePsl = quickLiftFindPsl(&ali, conn, acc, seqName, start);
+        if (wholePsl == NULL)
+            errAbort("Couldn't find a lifted alignment for %s at %s:%d", acc, seqName, start);
+        }
+    else
+        {
+        char table[64];
+        boolean hasBin;
+        if (!hFindSplitTable(database, seqName, aliTable, table, sizeof table, &hasBin))
+            errAbort("aliTable %s not found", aliTable);
+        sqlSafef(query, sizeof(query),
+             "select * from %s where qName = '%s' and tName=\"%s\" and tStart=%d", 
+             table, acc, seqName, start);
+        struct sqlResult *sr = sqlGetResult(conn, query);
+        char **row;
+        if ((row = sqlNextRow(sr)) == NULL)
+            errAbort("Couldn't find alignment for %s at %d", acc, start);
+        wholePsl = pslLoad(row+hasBin);
+        sqlFreeResult(&sr);
+        }
 
-    if (startsWith("ucscRetroAli", aliTable) || startsWith("retroMrnaAli", aliTable) ||
-        sameString("pseudoMrna", aliTable) || startsWith("altSeqLiftOverPsl", aliTable) ||
-        startsWith("fixSeqLiftOverPsl", aliTable) || startsWith("ncbiRefSeqPsl", aliTable))
+    if (startsWith("ucscRetroAli", bareAliTable) || startsWith("retroMrnaAli", bareAliTable) ||
+        sameString("pseudoMrna", bareAliTable) || startsWith("altSeqLiftOverPsl", bareAliTable) ||
+        startsWith("fixSeqLiftOverPsl", bareAliTable) || startsWith("ncbiRefSeqPsl", bareAliTable))
 	{
-        rnaSeq = getBaseColorSequence(acc, aliTable);
+        rnaSeq = getBaseColorSequence(ali.db, acc, aliTable);
 	}
-    else if (sameString("HInvGeneMrna", aliTable))
+    else if (sameString("HInvGeneMrna", bareAliTable))
 	{
 	/* get RNA accession for the gene id in the alignment */
 	sqlSafef(query, sizeof(query), "select mrnaAcc from HInv where geneId='%s'",
 	      acc);
-	rnaSeq = hRnaSeq(database, sqlQuickString(conn, query));
+	rnaSeq = hRnaSeq(ali.db, sqlQuickString(conn, query));
 	}
     else
 	{
-	char *cdnaTable = NULL;
-	struct trackDb *tdb = hashFindVal(trackHash, aliTable);
-	if (tdb != NULL)
-	    cdnaTable = trackDbSetting(tdb, "cdnaTable");
-	if (isNotEmpty(cdnaTable) && hTableExists(database, cdnaTable))
-	    rnaSeq = hGenBankGetMrna(database, acc, cdnaTable);
+	char *cdnaTable = (ali.tdb != NULL) ? trackDbSetting(ali.tdb, "cdnaTable") : NULL;
+	if (isNotEmpty(cdnaTable) && hTableExists(ali.db, cdnaTable))
+	    rnaSeq = hGenBankGetMrna(ali.db, acc, cdnaTable);
 	else
-	    rnaSeq = hRnaSeq(database, acc);
+	    rnaSeq = hRnaSeq(ali.db, acc);
 	}
     hFreeConn(&conn);
     }
@@ -8848,7 +9416,7 @@ if (wholePsl->tStart >= winStart && wholePsl->tEnd <= winEnd)
 else
     partPsl = pslTrimToTargetRange(wholePsl, winStart, winEnd);
 
-if (startsWith("xeno", aliTable))
+if (startsWith("xeno", bareAliTable))
     errAbort("htcCdnaAliInWindow does not support translated alignments.");
 else
     showSomePartialDnaAlignment(partPsl, wholePsl, rnaSeq,
@@ -8899,15 +9467,23 @@ if (sameWord(otherDb, "seq"))
     qSeq = hExtSeqPart(database, psl->qName, psl->qStart, psl->qEnd);
     safef(name, sizeof name, "%s", psl->qName);
     }
+else if (otherTbf != NULL)
+    {
+    // The track names the file that holds the query sequence, so read it from there
+    // rather than from the query database.  There may be no such database (a GenArk
+    // accession, as when a quickLift chain comes from one), or it may hold only
+    // trackDb because the sequence lives in a hub (hs1 and the other curated
+    // assemblies built that way).
+    qSeq = twoBitReadSeqFragLower(otherTbf, psl->qName, psl->qStart, psl->qEnd);
+    if (otherOrg == NULL)
+        safef(name, sizeof name, "%s", psl->qName);
+    else
+        safef(name, sizeof name, "%s.%s", otherOrg, psl->qName);
+    }
 else if (otherDb != NULL)
     {
     qSeq = loadGenomePart(otherDb, psl->qName, psl->qStart, psl->qEnd);
     safef(name, sizeof name, "%s.%s", otherOrg, psl->qName);
-    }
-else if (otherTbf != NULL)
-    {
-    qSeq = twoBitReadSeqFragLower(otherTbf, psl->qName, psl->qStart, psl->qEnd);
-    safef(name, sizeof name, "%s", psl->qName);
     }
 if (qSeq == NULL)
     {
@@ -8916,7 +9492,7 @@ if (qSeq == NULL)
 char title[1024];
 safef(title, sizeof title, "%s %s vs %s %s ",
        (otherOrg == NULL ? "" : otherOrg), psl->qName, org, psl->tName );
-htmlFramesetStart(title);
+alnModernStart(title);
 showSomeAlignment(psl, qSeq, gftDnaX, psl->qStart, psl->qEnd, name, 0, 0);
 }
 
@@ -8973,9 +9549,330 @@ else
 char title[1024];
 safef(title, sizeof title, "%s %s vs %s %s ",
        (otherOrg == NULL ? "" : otherOrg), psl->qName, org, psl->tName );
-htmlFramesetStart(title);
+alnModernStart(title);
 /*showSomeAlignment(psl, qSeq, gftDnaX, psl->qStart, psl->qEnd, name, 0, 0); */
 showSomeAlignment(psl, qSeq, gftDnaX, psl->qStart, psl->qEnd, name, cdsStart, cdsEnd);
+}
+
+static char *blatAsmLabel(char *database)
+/* A user-facing assembly label for the page title.  For an assembly hub the internal
+ * "hub_NNN_GCA_..." database name is not helpful, so use the assembly's friendly organism plus its
+ * accession; for a native assembly just use the db name (e.g. "hg38"). */
+{
+if (!trackHubDatabase(database))
+    return cloneString(database);
+char *acc = trackHubSkipHubName(database);   /* drop the "hub_NNN_" prefix -> the accession */
+char *org = hGenome(acc);                    /* GenArk table's friendly genome name for GC* accs */
+if (isEmpty(org))
+    {
+    org = trackHubAssemblyField(database, "organism");   /* else the hub's genomes.txt organism */
+    org = trackHubSkipHubName(org);          /* strip the "hub_NNN_" prefix addHubName() baked in */
+    }
+if (isEmpty(org))
+    return cloneString(acc);
+char buf[256];
+safef(buf, sizeof buf, "%s %s", org, acc);
+return cloneString(buf);
+}
+
+static void showSomeAlignmentModern(struct psl *psl, bioSeq *oSeq, enum gfType qType,
+                       int qStart, int qEnd, char *qName, int cdsS, int cdsE, boolean blatContext)
+/* Modern single-page version of showSomeAlignment: a gold title bar, a full-height "jump to"
+ * sidebar, then an "Alignment summary" and the base-by-base alignment inlined below with steel-blue
+ * section headers, so the whole page scrolls (no <frameset>).  The alignment body itself is
+ * generated by the shared library as before.  The caller supplies the page chrome via
+ * webStartGbNoBanner()/webEndGb() - a menubar and <main> with no legacy section tables - so
+ * everything here is plain, table-free HTML.  blatContext=TRUE is the hgBlat path: the title says
+ * "BLAT" and the bar carries "Back to results" and "Share a link"; blatContext=FALSE is a plain
+ * track click (mRNA/EST/PSL...), which has no BLAT results to go back to or share. */
+{
+if (qName == NULL)
+    qName = psl->qName;
+char *chrom = chromAliasGetDisplayChrom(database, cart, psl->tName);
+/* For a shared link (htcBlatAlign) qName is read back out of a bigPsl and chrom/tName can be
+ * hub-supplied, so escape them before they go into the HTML summary and the JS string literals
+ * below rather than trusting the caller's sanitizing (hgBlat whitelists fresh-search query names,
+ * but the shared-link path does not run through that). */
+char *qNameHtml = htmlEncode(qName);
+char *chromHtml = htmlEncode(chrom);
+char *qNameJs = javaScriptLiteralEncode(qName);
+char *chromJs = javaScriptLiteralEncode(chrom);
+char *tNameJs = javaScriptLiteralEncode(psl->tName);
+/* Alternate (chromAlias) names for the genomic sequence - e.g. its RefSeq/GenBank/Ensembl accessions
+ * - shown after the main name in the "Only genome sequence" header. */
+struct dyString *aliasDy = dyStringNew(128);
+struct slName *aliasList = chromAliasFindAliases(psl->tName), *al;
+struct hash *seenAlias = hashNew(0);
+hashStore(seenAlias, chrom);        /* skip the name already shown, and the native name */
+hashStore(seenAlias, psl->tName);
+boolean firstAlias = TRUE;
+for (al = aliasList; al != NULL; al = al->next)
+    {
+    if (isEmpty(al->name) || hashLookup(seenAlias, al->name))
+        continue;   /* skip empties, the shown name, and duplicates (e.g. Ensembl and GenBank "7") */
+    hashStore(seenAlias, al->name);
+    dyStringPrintf(aliasDy, "%s%s", firstAlias ? "" : ", ", al->name);
+    firstAlias = FALSE;
+    }
+hashFree(&seenAlias);
+char *aliasStr = dyStringCannibalize(&aliasDy);   /* "NC_000007.14, CM000669.2, 7" or "" */
+double ident = 100.0 - pslCalcMilliBad(psl, TRUE) * 0.1;
+
+char *idColor = (ident >= 98) ? "#1f7a34" : (ident >= 95) ? "#4d7c0f" :
+                (ident >= 90) ? "#b45309" : "#b1301f";
+
+/* Offer "Share a link" only in the hgBlat context, and only when a durable bigPsl custom track
+ * backs these results; without it there is nothing for a shared session to rebuild the alignment
+ * from.  A plain track click has no BLAT session to share. */
+char *shareBb = blatContext ? blatFindPinnedBigPsl(cart) : NULL;
+boolean canShare = (shareBb != NULL);
+freeMem(shareBb);
+
+/* Colors imported from the BLAT Redesign (slide 3): grey page, steel-blue section-header bars, navy
+ * links with maroon hover, slate text.  The <h2>/<hr> the shared alignment code emits are hidden; its
+ * <h4> section headings become the steel-blue bars.  The page chrome is webStartGbNoBanner (a menubar
+ * and <main>, no legacy section tables), so we draw our own gold title bar in plain HTML. */
+printf("<style>"
+       "#main-menu-whole{margin-bottom:0}"   /* no gap between the menubar and the title bar */
+       "#mainContent{background:#eef1f4}"     /* grey page behind the white alignment panel */
+       ".blatTitleBar{background:#eaca92; color:#000; box-sizing:border-box; display:flex;"
+       " align-items:center; justify-content:space-between; padding:8px 16px}"  /* gold title band */
+       ".blatTitleBar .blatTtl{font-size:18px; font-weight:700}"
+       ".blatTitleBar .blatBtns{display:flex; gap:8px; align-items:center}"
+       /* same recipe as .gbPill in gbModern.css (not loaded on this page), so these read as the
+        * same buttons as on the BLAT results page */
+       ".blatBtn{padding:5px 12px; font-size:13px; font-weight:700; border:1px solid #999;"
+       " border-radius:0; background:#fff; text-decoration:none; white-space:nowrap; cursor:pointer}"
+       /* nice_menu.css sets a:link blue (specificity 0,1,1); a.blatBtn:link (0,2,1) beats it */
+       "a.blatBtn:link, a.blatBtn:visited, a.blatBtn:hover{color:#003a72; text-decoration:none}"
+       ".blatBtn:hover{background:#eef2f7}"
+       "#blatAlnBody{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif; color:#374a5e;"
+       " display:grid; grid-template-columns:220px 1fr;"      /* full-height sidebar + content column */
+       " background:#fff}"                                    /* edge to edge: no margin, no border */
+       "#blatAlnBody a{color:#0a3a7a}"
+       "#blatAlnBody a:hover{color:#8b1a1a}"
+       "#blatAlnNav{grid-column:1; grid-row:1; background:#f4f7fb; border-right:1px solid #dde3ea}"
+       /* keep the grey column full height, but pin the links so they stay visible while scrolling */
+       "#blatAlnNavInner{position:sticky; top:0; padding:18px 20px; display:flex; flex-direction:column;"
+       " gap:16px}"
+       "#blatAlnNav a{font-weight:700; text-decoration:none}"   /* already obviously links; no underline */
+       "#blatAlnBlocks{display:flex; flex-direction:column; gap:2px; margin:2px 0 0 14px}"  /* block links, tight list indented under genome sequence */
+       "#blatAlnBlocks a{font-weight:400; font-size:13px}"
+       "#blatAlnContent{grid-column:2; grid-row:1; min-width:0; padding:0 20px 14px}"
+       "#blatAlnContent h2{display:none}"
+       "#blatAlnContent hr{display:none}"
+       "#blatAlnContent h4{margin:16px -20px 0; padding:8px 20px; background:#4c759c; color:#fff;"
+       " font-size:15px; font-weight:700}"                     /* -20px: bar spans full content width */
+       "#blatAlnContent h4:first-child{margin-top:0}"          /* Alignment Summary flush at top */
+       "#blatAlnContent h4 a{color:#fff}"
+       /* undo bootstrap.css (pulled in by webStartGbNoBanner's gbHeader) on the sequence blocks:
+        * it would give <pre> a grey box, a border and word-break that mangles the alignment */
+       "#blatAlnContent pre{margin:0; padding:2px 0 12px; line-height:1.4; background:none; border:0;"
+       " border-radius:0; color:#374a5e; white-space:pre; word-break:normal; word-wrap:normal}"
+       /* key-value summary strip, mirroring hgBlat's .blatStrip (label over value, thin dividers) */
+       ".blatAlnStrip{display:flex; align-items:center; gap:24px; flex-wrap:wrap; margin:12px 0 14px}"
+       ".blatAlnStat{display:flex; flex-direction:column; gap:1px}"
+       ".blatAlnStat .k{font-size:12px; color:#5b6572; font-weight:700}"
+       ".blatAlnStat .v{font-size:14px; color:#1e2833; font-weight:700}"
+       ".blatAlnStrip .d{width:1px; height:28px; background:#d0d0d0}"
+       "</style>\n");
+
+/* gold title bar, drawn directly (no framework subheadingBar, no JS): title on the left, then (in
+ * the hgBlat context) a "Back to results" and, when a durable track backs the results, a "Share a
+ * link" button; in a plain track click, a "Back to Genome Browser" button that returns to hgTracks
+ * at this alignment's location. */
+printf("<div class='blatTitleBar'>");
+char *asmLabel = blatAsmLabel(database);   // may carry a hub's genomes.txt organism string
+char *asmLabelHtml = htmlEncode(asmLabel);
+printf("<span class='blatTtl'>%sBase Alignment: %s</span>",
+       blatContext ? "BLAT " : "", asmLabelHtml);
+freeMem(asmLabelHtml);
+freeMem(asmLabel);
+printf("<span class='blatBtns'>");
+if (blatContext)
+    printf("<a href='hgBlat?blatReopen=1&hgsid=%s' class='blatBtn'>"
+           "\xe2\x80\xb9 Back to results</a>", cartSessionId(cart));
+else
+    printf("<a href='hgTracks?db=%s&position=%s:%d-%d&hgsid=%s' class='blatBtn'>"
+           "Back to Genome Browser \xe2\x80\xba</a>",
+           database, psl->tName, psl->tStart + 1, psl->tEnd, cartSessionId(cart));
+if (canShare)
+    printf("<a href='#' id='blatShareBtn' class='blatBtn'>Share a link</a>");
+printf("</span></div>\n");
+
+/* one white panel laid out as two grid columns: a full-height "jump to" sidebar on the left, and on
+ * the right an "Alignment Summary" header, the summary line, and the base-by-base alignment inlined
+ * so the whole page scrolls */
+printf("<div id='blatAlnBody'>\n");
+
+printf("<div id='blatAlnContent'>\n");
+printf("<h4>Alignment summary</h4>\n");
+/* comma-format the coordinates and base counts, matching the new Table view (readable at the
+ * hundreds-of-millions scale of genomic coordinates, and the convention elsewhere in the browser) */
+char tStartC[32], tEndC[32], matchC[32], qSizeC[32];
+sprintLongWithCommas(tStartC, psl->tStart + 1);
+sprintLongWithCommas(tEndC, psl->tEnd);
+sprintLongWithCommas(matchC, psl->match + psl->repMatch);
+sprintLongWithCommas(qSizeC, psl->qSize);
+/* key-value strip (Query / Position / Identity / Matches / Strand), styled like hgBlat's summary
+ * strip so the two pages read as one design. */
+printf("<div class='blatAlnStrip'>"
+       "<div class='blatAlnStat'><span class='k'>Query</span><span class='v'>%s</span></div>"
+       "<div class='d'></div>"
+       "<div class='blatAlnStat'><span class='k'>Position</span><span class='v'>%s:%s-%s</span></div>"
+       "<div class='d'></div>"
+       "<div class='blatAlnStat'><span class='k'>Identity</span>"
+       "<span class='v' style='color:%s'>%.1f%%</span></div>"
+       "<div class='d'></div>"
+       "<div class='blatAlnStat'><span class='k'>Matches</span><span class='v'>%s of %s</span></div>"
+       "<div class='d'></div>"
+       "<div class='blatAlnStat'><span class='k'>Strand</span><span class='v'>%s</span></div>"
+       "</div>\n",
+       qNameHtml, chromHtml, tStartC, tEndC, idColor, ident, matchC, qSizeC, psl->strand);
+if (isNotEmpty(aliasStr))
+    {
+    char *aliasStrHtml = htmlEncode(aliasStr);
+    printf("<p>Genome sequence %s is also known as: %s.</p>\n", chromHtml, aliasStrHtml);
+    freeMem(aliasStrHtml);
+    }
+/* The shared library returns the number of alignment blocks it actually shows.  The DNA path merges
+ * blocks separated by gaps <= 8 bases, so this can be fewer than psl->blockCount; use it (not
+ * psl->blockCount) so the sidebar's "Block N" links match the #1..#N anchors that were emitted. */
+int blockCount;
+/* Capture the shared library's alignment HTML so we can reorder its sections for this page.  The
+ * library emits them as Query (#cDNA), Genome (#genomic), then Side-by-side (#ali), with the
+ * per-block anchors living inside the Genome section.  We want Query, Side-by-side, Genome so the
+ * long per-block list sits at the bottom of both the page and the sidebar.  Reorder here, on the
+ * server, rather than in JS, so the page does not reflow after it loads. */
+char *alnHtml = NULL;
+size_t alnLen = 0;
+FILE *alnF = open_memstream(&alnHtml, &alnLen);
+if (alnF == NULL)
+    {
+    /* open_memstream failed (out of memory): render straight to stdout, skipping the section
+     * reorder, rather than passing a NULL FILE to the renderer and then calling fclose(NULL). */
+    if (qType == gftRna || qType == gftDna)
+        blockCount = showPartialDnaAlignment(psl, oSeq, stdout, cdsS, cdsE, FALSE);
+    else
+        blockCount = showGfAlignment(psl, oSeq, stdout, qType, qStart, qEnd, qName);
+    }
+else
+    {
+    if (qType == gftRna || qType == gftDna)
+        blockCount = showPartialDnaAlignment(psl, oSeq, alnF, cdsS, cdsE, FALSE);
+    else
+        blockCount = showGfAlignment(psl, oSeq, alnF, qType, qStart, qEnd, qName);
+    fclose(alnF);
+    char *pGenome = (alnHtml != NULL) ? stringIn("<H4><A NAME=genomic>", alnHtml) : NULL;
+    char *pAli    = (alnHtml != NULL) ? stringIn("<H4><A NAME=ali>", alnHtml) : NULL;
+    if (pGenome != NULL && pAli != NULL && pGenome < pAli)
+        {                                                /* Query, then Side-by-side, then Genome */
+        fwrite(alnHtml, 1, pGenome - alnHtml, stdout);   /* legend + Query (#cDNA) section */
+        fputs(pAli, stdout);                             /* Side-by-side (#ali) section, through footnote */
+        fwrite(pGenome, 1, pAli - pGenome, stdout);      /* Genome (#genomic) section, with block anchors */
+        }
+    else
+        fputs((alnHtml != NULL) ? alnHtml : "", stdout);
+    free(alnHtml);   /* libc free: open_memstream's buffer is malloc'd, not a kent needMem block */
+    }
+printf("</div>\n");   /* #blatAlnContent */
+
+/* Sidebar, emitted after the alignment so blockCount is known; CSS grid puts it back in column 1.
+ * The inner div is position:sticky so the links stay in view as the long alignment scrolls. */
+printf("<div id='blatAlnNav'><div id='blatAlnNavInner'>\n");
+printf("<a href='#cDNA'>Only query sequence</a>\n"
+       "<a href='#ali'>Side by side alignment</a>\n"
+       "<a href='#genomic'>Only genome sequence</a>\n");
+if (blockCount > 1)   /* per-block jump links, indented under the genome-sequence item where their anchors live */
+    {
+    int bi;
+    printf("<div id='blatAlnBlocks'>\n");
+    for (bi = 1;  bi <= blockCount;  ++bi)
+        printf("<a href='#%d'>Block %d</a>\n", bi, bi);
+    printf("</div>\n");
+    }
+printf("</div></div>\n");
+
+printf("</div>\n");   /* #blatAlnBody */
+
+/* The cDNA/Genomic/Side-by-side section headers come from shared library code (fuzzyShow.c /
+ * pslShow.c) as "cDNA <qName>" / "Genomic <chrom> :" / "Side by Side Alignment"; relabel them to
+ * the sidebar wording (sentence case) via JS (there is no C hook for it), keeping the
+ * #cDNA/#genomic/#ali jump anchors.  qName and chrom are escaped for a JS string literal
+ * (qNameJs/chromJs) since a shared link's query name is not otherwise sanitized. */
+jsInlineF(
+    "(function(){\n"
+    "function relabel(anchor, text){\n"
+    "  var a = document.getElementsByName(anchor);\n"
+    "  if (a && a.length){\n"
+    "    var h = a[0].parentNode;\n"
+    "    var star = /\\*\\s*$/.test(h.textContent) ? '*' : '';\n"  // keep the footnote marker if present
+    "    h.textContent = '';\n"
+    "    var k = document.createElement('a'); k.name = anchor; h.appendChild(k);\n"
+    "    h.appendChild(document.createTextNode(text + star));\n"
+    "  }\n"
+    "}\n"
+    "relabel('cDNA', 'Only query sequence: %s');\n"
+    "relabel('genomic', 'Only genome sequence: %s');\n"
+    "relabel('ali', 'Side by side alignment');\n"   // match the sidebar wording and sentence case
+    "})();\n",
+    qNameJs, chromJs);
+
+/* "Share a link": save an anonymous session (hgSession API), build a durable hgc?g=htcBlatAlign link
+ * that rebuilds THIS alignment from the session's durable bigPsl custom track (no BLAT re-run, no
+ * stored trash sequence), and hand it to the shared "Share a link" modal (topLinks.js shareUrl,
+ * loaded by the menu bar) so it looks like every other share dialog.  tName and qName are escaped
+ * for the single-quoted JS string literals they land in (tNameJs/qNameJs). */
+if (canShare)
+    jsInlineF(
+    "(function(){\n"
+    "var btn = document.getElementById('blatShareBtn');\n"
+    "if (!btn) return;\n"
+    "btn.addEventListener('click', function(ev){\n"
+    "  ev.preventDefault();\n"
+    "  if (btn.dataset.busy) return;\n"
+    "  btn.dataset.busy = '1';\n"
+    "  var label = btn.textContent;\n"
+    "  btn.textContent = 'Creating link\\u2026';\n"
+    "  fetch('../cgi-bin/hgSession', {method:'POST', credentials:'same-origin',"
+    " headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+    // hgS_snapshotType=blat -> a lightweight snapshot storing only blatLastBigBed (+db), not the
+    // whole cart, under a server-generated unique "__" name (see lib/snapshotSession.c).
+    " body:'hgsid=%s&hgS_doSaveSessionJson=1&hgS_shareAnon=1&hgS_snapshotType=blat'})\n"
+    "  .then(function(r){ return r.json(); }).then(function(data){\n"
+    "    btn.textContent = label; btn.dataset.busy = '';\n"
+    "    if (!data || !data.name) return;\n"
+    "    var link = window.location.origin + window.location.pathname +\n"
+    "      '?g=htcBlatAlign&c=%s&o=%d&i=' + encodeURIComponent('%s') +\n"  // db comes from the session
+    "      '&u=l&s=' + encodeURIComponent(data.name);\n"
+    "    if (window.topLinks && topLinks.shareUrl) topLinks.shareUrl(link, {snapshot: true});\n"
+    "  }).catch(function(){ btn.textContent = label; btn.dataset.busy = ''; });\n"
+    "});\n"
+    "})();\n",
+    cartSessionId(cart), tNameJs, psl->tStart, qNameJs);
+freeMem(qNameHtml);
+freeMem(chromHtml);
+freeMem(qNameJs);
+freeMem(chromJs);
+freeMem(tNameJs);
+}
+
+void alnModernStart(char *classicTitle)
+/* Begin an alignment page.  With the modernAlignPage hg.conf flag set, start the modern single-page
+ * chrome (webStartGbNoBanner) and arm gAlnModern so showSomeAlignment() renders the modern body;
+ * otherwise start the classic <frameset>.  This is the plain track-click entry point (mRNA/EST/PSL
+ * details, transMap, retrogene, literature alignments), so the modern page is drawn in its neutral,
+ * non-BLAT form.  Callers must pair it with showSomeAlignment(), which honors gAlnModern. */
+{
+if (cfgOptionBooleanDefault("modernAlignPage", FALSE))
+    {
+    gAlnModern = TRUE;
+    char pageTitle[256];
+    safef(pageTitle, sizeof pageTitle, "Base Alignment: %s", blatAsmLabel(database));
+    webStartGbNoBanner(cart, database, pageTitle);   // menubar + <main>, no legacy section tables
+    }
+else
+    htmlFramesetStart(classicTitle);
 }
 
 void htcUserAli(char *fileNames)
@@ -8988,13 +9885,35 @@ struct psl *psl;
 int start;
 enum gfType tt, qt;
 boolean isProt;
+/* In hgBlat's new table mode (blatNewPage), or wherever the modernAlignPage flag is set, show a
+ * modern single-page alignment instead of the classic two-frame <frameset>. */
+boolean modern = cartUsualBoolean(cart, "blatNewPage", FALSE)
+                 || cfgOptionBooleanDefault("modernAlignPage", FALSE);
 
 char title[1024];
 safef(title, sizeof title, "User Sequence vs Genomic");
-htmlFramesetStart(title);
+if (modern)
+    {
+    char pageTitle[256];
+    char *asmLabel = blatAsmLabel(database);   // may carry a hub's genomes.txt organism string
+    char *asmLabelHtml = htmlEncode(asmLabel);
+    safef(pageTitle, sizeof pageTitle, "BLAT Base Alignment: %s", asmLabelHtml);
+    webStartGbNoBanner(cart, database, pageTitle);   // menubar + <main>, no legacy section tables
+    freeMem(asmLabelHtml);
+    freeMem(asmLabel);
+    }
+else
+    htmlFramesetStart(title);
 
 start = cartInt(cart, "o");
 parseSs(fileNames, &pslName, &faName, &qName);
+if (modern && (!fileExists(pslName) || !fileExists(faName)))
+    {   /* the search's trash files have been cleaned up: a friendly note, not a raw file error */
+    printf("<p>This BLAT alignment is no longer available. The search results it came from have "
+           "expired. Please run a new <a href=\"hgBlat\">BLAT search</a>.</p>\n");
+    webEndGb();
+    exit(0);
+    }
 pslxFileOpen(pslName, &qt, &tt, &lf);
 isProt = (qt == gftProt);
 while ((psl = pslNext(lf)) != NULL)
@@ -9013,7 +9932,52 @@ for (oSeq = oSeqList; oSeq != NULL; oSeq = oSeq->next)
 	break;
     }
 if (oSeq == NULL)  errAbort("%s is in %s but not in %s. Internal error.", qName, pslName, faName);
-showSomeAlignment(psl, oSeq, qt, 0, oSeq->size, NULL, 0, 0);
+if (modern)
+    {
+    showSomeAlignmentModern(psl, oSeq, qt, 0, oSeq->size, NULL, 0, 0, TRUE);   // hgBlat context
+    webEndGb();
+    cartCheckout(&cart);   // exit(0) below skips main's checkout, so save the cart here or lose it
+    exit(0);   // we drew the whole page; skip the framework's table-closing cartHtmlEnd
+    }
+else
+    showSomeAlignment(psl, oSeq, qt, 0, oSeq->size, NULL, 0, 0);        // classic frameset; exits itself
+}
+
+void htcBlatAlign(char *qName)
+/* Durable base-by-base alignment for a shared BLAT link (g=htcBlatAlign): rebuild one alignment from
+ * the saved session's durable bigPsl custom track (blatLastBigBed) instead of the ephemeral trash
+ * .pslx/.fa the fresh-search htcUserAli path reads.  seqName and o identify the hit; the query
+ * sequence comes from the bigPsl record itself, so no stored trash sequence is needed.  This backs
+ * the "Share a link" button on the modern alignment page. */
+{
+char pageTitle[256];
+safef(pageTitle, sizeof pageTitle, "BLAT Base Alignment: %s", database);
+webStartGbNoBanner(cart, database, pageTitle);   // menubar + <main>, no legacy section tables
+char *bbFile = blatFindPinnedBigPsl(cart);
+if (bbFile == NULL || !fileExists(bbFile))
+    {
+    printf("<p>This shared BLAT alignment is no longer available. The custom track that stored it "
+           "has expired or been removed. Please run a new <a href=\"hgBlat\">BLAT search</a>.</p>\n");
+    webEndGb();
+    cartCheckout(&cart);   // this early return also loaded a session; save it before exit(0)
+    exit(0);
+    }
+int start = cartInt(cart, "o");
+char *seq = NULL;
+struct psl *psl = pslFromBigPslFileMatch(bbFile, seqName, start, qName, &seq, NULL);
+if (psl == NULL || seq == NULL)
+    {
+    printf("<p>This alignment was not found in the shared BLAT results.</p>\n");
+    webEndGb();
+    cartCheckout(&cart);   // this early return also loaded a session; save it before exit(0)
+    exit(0);
+    }
+enum gfType qType = pslIsProtein(psl) ? gftProt : gftDna;
+struct dnaSeq *oSeq = newDnaSeq(cloneString(seq), strlen(seq), qName);
+showSomeAlignmentModern(psl, oSeq, qType, 0, oSeq->size, NULL, 0, 0, TRUE);   // hgBlat shared-link context
+webEndGb();
+cartCheckout(&cart);   // exit(0) below skips main's checkout, so save the cart here or lose it
+exit(0);   // we drew the whole page; skip the framework's table-closing cartHtmlEnd
 }
 
 void htcProteinAli(char *readName, char *table)
@@ -9034,7 +9998,7 @@ char *pred = NULL;
 
 char title[1024];
 safef(title, sizeof title, "Protein Sequence vs Genomic");
-htmlFramesetStart(title);
+alnModernStart(title);
 
 addp = cartUsualInt(cart, "addp",0);
 pred = cartUsualString(cart, "pred",NULL);
@@ -9099,7 +10063,7 @@ boolean hasBin;
 
 char title[1024];
 safef(title, sizeof title, "Sequence %s", readName);
-htmlFramesetStart(title);
+alnModernStart(title);
 
 start = cartInt(cart, "o");
 if (!hFindSplitTable(database, seqName, table, fullTable, sizeof fullTable, &hasBin))
@@ -9449,7 +10413,7 @@ int rowOffset = hOffsetPastBin(database, seqName, pslTable);
 
 char title[1024];
 safef(title, sizeof title, "Sequence %s", probeName);
-htmlFramesetStart(title);
+alnModernStart(title);
 start = cartInt(cart, "o");
 /* get psl */
 sqlSafef(query, sizeof(query), "select * from %s where qName = '%s' and tName = '%s' and tStart=%d",
@@ -10015,7 +10979,7 @@ return prot;
 void ncbiRefSeqSequence(char *itemName)
 {
 char *table = cartString(cart, "o");
-struct dnaSeq *rnaSeq = getBaseColorSequence(itemName, table );
+struct dnaSeq *rnaSeq = getBaseColorSequence(database, itemName, table );
 cartHtmlStart("RefSeq mRNA Sequence");
 
 printf("<PRE><TT>");
@@ -13424,6 +14388,9 @@ if (strstr(rnaName, "NM_") != NULL)
     }
 else
     {
+    /* No refLink row for this accession.  Zero the whole struct so the fields we
+     * do not fill in read as absent, rather than as whatever was on the stack. */
+    ZeroVar(&rlR);
     rlR.name    = strdup(kgId);
     rlR.mrnaAcc = strdup(kgId);
     rlR.locusLinkId = 0;
@@ -15964,7 +16931,7 @@ qSeq = loadGenomePart(otherDb, qChrom, psl->qStart, psl->qEnd);
 snprintf(name, sizeof(name), "%s.%s", otherOrg, qChrom);
 char title[1024];
 safef(title, sizeof title, "%s %dk", name, psl->qStart/1000);
-htmlFramesetStart(title);
+alnModernStart(title);
 showSomeAlignment(psl, qSeq, gftDnaX, psl->qStart, psl->qEnd, name, 0, 0);
 }
 
@@ -22842,7 +23809,8 @@ while ((row = sqlNextRow(sr)) != NULL)
 	    table, smp->chrom, smp->chromStart+smp->samplePosition[0],
 	    smp->chromStart+smp->samplePosition[smp->sampleCount-1] );
 
-    printf("Content-Type: text/html\n\n<HTML><BODY><SCRIPT>\n");
+    cgiPrintContentType("text/html");
+    printf("<HTML><BODY><SCRIPT nonce='%s'>\n", getNonce());
     printf("location.replace('%s')\n",filename);
     printf("</SCRIPT> <NOSCRIPT> No JavaScript support. "
            "Click <b><a href=\"%s\">continue</a></b> for "
@@ -27094,19 +28062,108 @@ makeBigPsl(pslName, faName, database, bigBedFile);
 char* host = getenv("HTTP_HOST");
 
 boolean isProt = cgiOptionalString("isProt") != NULL;
-char *customTextTemplate = "track type=bigPsl indelDoubleInsert=on indelQueryInsert=on pslFile=%s visibility=pack showAll=on htmlUrl=http://%s/goldenPath/help/hgUserPsl.html %s bigDataUrl=%s name=\"%s\" description=\"%s\" colorByStrand=\"0,0,0 0,0,150\" mouseOver=\"${oChromStart}-${oChromEnd} of ${oChromSize} bp, strand ${oStrand}\"\n";  
+// blatResult=on tags this as a BLAT results track so previous ones can be found (see blatOldTracks).
+// group=blat (gated by hg.conf blatResultsGroup) puts BLAT results in their own "BLAT Results" track
+// group instead of Custom Tracks, so they are easy to find and clear as a set (see the group's
+// "Delete all" button in hgTracks).
+char *groupTag = cfgOptionBooleanDefault("blatResultsGroup", FALSE) ? "group=blat " : "";
+char *customTextTemplate = "track type=bigPsl blatResult=on %sindelDoubleInsert=on indelQueryInsert=on pslFile=%s visibility=pack showAll=on htmlUrl=http://%s/goldenPath/help/hgUserPsl.html %s bigDataUrl=%s name=\"%s\" description=\"%s\" colorByStrand=\"0,0,0 0,0,150\" mouseOver=\"${oChromStart}-${oChromEnd} of ${oChromSize} bp, strand ${oStrand}\"\n";
 char *extraForMismatch = "indelPolyA=on showDiffBasesAllScales=. baseColorUseSequence=lfExtra baseColorDefault=diffBases";
-  
+
 if (isProt)
     extraForMismatch = "";
 char buffer[4096];
-safef(buffer, sizeof buffer, customTextTemplate, bigBedTn.forCgi, host, extraForMismatch, bigBedTn.forCgi, trackName, trackDescription);
+safef(buffer, sizeof buffer, customTextTemplate, groupTag, bigBedTn.forCgi, host, extraForMismatch, bigBedTn.forCgi, trackName, trackDescription);
 
 struct customTrack *ctList = getCtList();
 struct customTrack *newCts = customFactoryParse(database, buffer, FALSE, NULL, NULL);
+
+/* Optionally clear PREVIOUS BLAT result tracks (those tagged blatResult=on) so the user is not
+ * confused about which results are current.  hg.conf "blatOldTracks":
+ *   keep   (default) - do nothing, every search's track stays as-is
+ *   hide             - leave earlier BLAT tracks in the session but set them to hide
+ *   delete           - remove earlier BLAT tracks from the session (their trash files age out)
+ * Only BLAT-tagged tracks are touched; the track just made is left alone. */
+char *oldTracks = cfgOptionDefault("blatOldTracks", "keep");
+/* Fail safe on an unrecognized value (e.g. a typo in hg.conf): fall back to "keep" rather than to
+ * the destructive "delete" branch below, so a misconfiguration never silently discards a user's
+ * previous BLAT tracks. */
+if (differentString(oldTracks, "keep") && differentString(oldTracks, "hide")
+    && differentString(oldTracks, "delete"))
+    {
+    warn("hg.conf blatOldTracks has unrecognized value '%s'; expected keep|hide|delete. "
+         "Treating as 'keep'.", oldTracks);
+    oldTracks = "keep";
+    }
+/* The BLAT search form shows a "Keep results" checkbox when this is set to "delete", letting the
+ * user opt out per search; blatKeepResults is the cart variable it sets. */
+if (cartUsualBoolean(cart, "blatKeepResults", FALSE))
+    oldTracks = "keep";
+if (differentString(oldTracks, "keep"))
+    {
+    struct customTrack *ct, *next, *keptList = NULL;
+    for (ct = ctList; ct != NULL; ct = next)
+        {
+        next = ct->next;
+        if (ct->tdb != NULL && sameOk(trackDbSetting(ct->tdb, "blatResult"), "on"))
+            {
+            if (sameString(oldTracks, "hide"))
+                {
+                cartSetString(cart, ct->tdb->track, "hide");
+                slAddHead(&keptList, ct);   /* keep it in the session, just hidden */
+                }
+            /* "delete": drop it from the list so customTracksSaveCart writes it out */
+            }
+        else
+            slAddHead(&keptList, ct);
+        }
+    slReverse(&keptList);
+    ctList = keptList;
+    }
+
+/* "Keep only last search" (RM #38086): per-user opt-in to remove earlier BLAT result tracks,
+ * the checkbox inverse of blatOldTracks=delete above (left untouched).  With the box unchecked
+ * (the default) results accumulate exactly as before, so removal only ever happens because the
+ * user asked for it.  Gated on the same hg.conf setting that shows the checkbox, so a stale
+ * cart variable cannot delete tracks on a site where the feature is off. */
+if (sameString(cfgOptionDefault("blatOnlyLatestCheckbox", "off"), "on")
+    && cartUsualBoolean(cart, "blatOnlyLatest", FALSE))
+    {
+    struct customTrack *ct, *next, *keptList = NULL;
+    for (ct = ctList; ct != NULL; ct = next)
+        {
+        next = ct->next;
+        if (ct->tdb != NULL && sameOk(trackDbSetting(ct->tdb, "blatResult"), "on"))
+            {
+            cartRemove(cart, ct->tdb->track);   /* no orphaned visibility for a reused ct_ id */
+            continue;   /* drop it; customTracksSaveCart below writes out only the kept list */
+            }
+        slAddHead(&keptList, ct);
+        }
+    slReverse(&keptList);
+    ctList = keptList;
+    }
+
+/* Custom track ids are deterministic from the track name, so a fresh BLAT track can be assigned
+ * the same ct_ id as an earlier same-named track the user (or blatOldTracks=hide) hid and later
+ * deleted.  The old visibility cart variable outlives the deleted track and would silently start
+ * the new track hidden (seen with "I'm feeling lucky": the user lands on hgTracks and the result
+ * is invisible, RM #38086).  A brand-new track should always show with its declared visibility,
+ * so drop any stale cart variable for its id.  Runs after every block above that can set "hide"
+ * (blatOldTracks=hide included), so ordering cannot hide the new track again. */
+struct customTrack *newCt;
+for (newCt = newCts; newCt != NULL; newCt = newCt->next)
+    if (newCt->tdb != NULL)
+        cartRemove(cart, newCt->tdb->track);
+
 theCtList = customTrackAddToList(ctList, newCts, NULL, FALSE);
 
 customTracksSaveCart(database, cart, theCtList);
+
+/* Pin this bigPsl file in the cart so hgBlat's Table view can reopen exactly these results from a
+ * shared session (see doShareReopen in hgBlat.c) - unambiguously, even when the cart holds several
+ * BLAT custom tracks from earlier searches. */
+cartSetString(cart, "blatLastBigBed", bigBedFile);
 
 cartSetString(cart, "i", "PrintAllSequences");
 hgCustom(newCts->tdb->track, NULL);
@@ -27136,9 +28193,43 @@ jsInlineF("var doHPRCTable = true;\n");
 
 boolean findNameBasedHandler(struct trackDb *tdb, char *track, char *item);
 
+static void loadBlatShareSessionIfAny()
+/* A durable BLAT "Share a link" alignment (hgc?g=htcBlatAlign&u=l&s=NAME&...) rebuilds one alignment
+ * from a saved anonymous session's durable bigPsl custom track.  Load that session so the cart gets
+ * its db, blatLastBigBed and custom track, then restore the link's own hit selectors, which identify
+ * which single alignment to show rather than the session's saved browser view.  Only g/c/o/i are
+ * selectors (the handler, chrom, start and query name); db and the browser window come from the
+ * session, so the shared link needs to carry only those four. */
+{
+if (cgiOptionalString("s") == NULL || !sameOk(cgiOptionalString("g"), "htcBlatAlign"))
+    return;
+/* The whole-cart session load frees the cart's current values; remember the link's own selectors and
+ * put them back afterwards (g and i are also excluded from saved sessions, so they must come here). */
+char *keep[] = {"g", "c", "o", "i"};
+struct hash *saved = hashNew(0);
+int i;
+for (i = 0; i < ArraySize(keep); ++i)
+    {
+    char *v = cgiOptionalString(keep[i]);
+    if (v != NULL)
+        hashAdd(saved, keep[i], cloneString(v));
+    }
+struct sqlConnection *sConn = hConnectCentral();
+cartLoadUserSession(sConn, cgiUsualString("u", "l"), cgiString("s"), cart, NULL, NULL);
+hDisconnectCentral(&sConn);
+for (i = 0; i < ArraySize(keep); ++i)
+    {
+    char *v = hashFindVal(saved, keep[i]);
+    if (v != NULL)
+        cartSetString(cart, keep[i], v);
+    }
+hashFree(&saved);
+}
+
 void doMiddle()
 /* Generate body of HTML. */
 {
+loadBlatShareSessionIfAny();
 char *track = cartString(cart, "g");
 char *item = cloneString(cartOptionalString(cart, "i"));
 char *parentWigMaf = cartOptionalString(cart, "parentWigMaf");
@@ -27230,11 +28321,22 @@ if ((!isCustomTrack(track) && !isMyVariantsTrack(track) && dbIsFound)
 ||  ((ct!= NULL) && (((ct->dbTrackType != NULL) &&  sameString(ct->dbTrackType, "maf"))|| sameString(ct->tdb->type, "bigMaf"))))
     {
     trackHash = makeTrackHashWithComposites(database, seqName, TRUE);
-    if (sameString("htcBigPslAli", track) || sameString("htcBigPslAliInWindow", track) )
+    // The alignment click-throughs arrive with the track in aliTrack (aliTable can be a
+    // bare table name that means nothing on this assembly), and a hub track's trackDb --
+    // including a quickLifted one -- only reaches trackHash if its hub is attached here.
+    if (sameString("htcBigPslAli", track) || sameString("htcBigPslAliInWindow", track)
+     || sameString("htcCdnaAli", track) || sameString("htcCdnaAliInWindow", track)
+     || sameString("htcProteinAli", track))
 	{
-	char *aliTable = cartString(cart, "aliTable");
-	if (isHubTrack(aliTable))	
-	    tdb = hubConnectAddHubForTrackAndFindTdb( database, aliTable, NULL, trackHash);
+	char *aliTrack = cartUsualString(cart, "aliTrack", NULL);
+	char *aliTable = cartUsualString(cart, "aliTable", NULL);
+	char *hubTrack = NULL;
+	if (isNotEmpty(aliTrack) && isHubTrack(aliTrack))
+	    hubTrack = aliTrack;
+	else if (isNotEmpty(aliTable) && isHubTrack(aliTable))
+	    hubTrack = aliTable;
+	if (hubTrack != NULL)
+	    tdb = hubConnectAddHubForTrackAndFindTdb( database, hubTrack, NULL, trackHash);
 	}
     else if (isHubTrack(track))
 	{
@@ -28014,6 +29116,10 @@ else if (sameWord(table, "htcUserAli"))
     {
     htcUserAli(item);
     }
+else if (sameWord(table, "htcBlatAlign"))
+    {
+    htcBlatAlign(item);
+    }
 else if (sameWord(table, "htcGetBlastPep"))
     {
     doGetBlastPep(item, cartString(cart, "aliTable"));
@@ -28585,7 +29691,10 @@ cart = theCart;
 doMiddle();
 }
 
-char *excludeVars[] = {"Submit", "submit", "g", "i", "aliTable", "addp", "pred", "quickLiftCcds", NULL};
+// "u"/"s" are the shared BLAT link's session selectors (loadBlatShareSessionIfAny); exclude them so
+// they are not left in the reader's cart and written into any session they later save.
+char *excludeVars[] = {"Submit", "submit", "g", "i", "aliTable", "aliTrack", "addp", "pred",
+                       "quickLiftCcds", "u", "s", NULL};
 
 int main(int argc, char *argv[])
 {

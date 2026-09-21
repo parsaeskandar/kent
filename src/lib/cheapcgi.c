@@ -18,9 +18,6 @@
 #endif /* GBROWSE */
 #include <signal.h>
 
-// FAST_CGI_DECODE can be defined in cheapcgi.h to try a faster decode process that
-// also limits variable/value lengths and applies encoding to variable names
-
 //============ javascript inline-separation routines ===============
 
 // One of the main services that CSP (Content Security Policy) provides
@@ -243,6 +240,57 @@ static boolean haveCookiesHash = FALSE;
 static struct hash *cookieHash = NULL;
 static struct cgiVar *cookieList = NULL;
 
+/* An uploaded file is passed on to the code that reads it as the address and
+ * size of the bytes in memory, written as text into a cgi variable.  Every cgi
+ * variable can also be set by the request, so the address has to be checked
+ * against the blocks we handed out before anything dereferences it.  These
+ * blocks are recorded here, keyed by the same text that names them. */
+static struct hash *memBlobHash = NULL;
+
+struct memBlob
+/* A block of memory named by address in a cgi or cart variable. */
+    {
+    char *mem;			/* Start of the block. */
+    unsigned long size;		/* Size of the block. */
+    };
+
+char *cgiMemBlobRegister(char *mem, unsigned long size)
+/* Record a block of memory that may be named by address in a cgi or cart
+ * variable, and return the "<address> <size>" text that names it.  The
+ * returned string is allocated here and belongs to the caller. */
+{
+char spec[64];
+safef(spec, sizeof(spec), "%lu %lu", (unsigned long)mem, size);
+if (memBlobHash == NULL)
+    memBlobHash = hashNew(4);
+struct memBlob *blob = hashFindVal(memBlobHash, spec);
+if (blob == NULL)
+    {
+    AllocVar(blob);
+    blob->mem = mem;
+    blob->size = size;
+    hashAdd(memBlobHash, spec, blob);
+    }
+return cloneString(spec);
+}
+
+char *cgiMemBlobFind(char *spec, unsigned long *retSize)
+/* Return the block of memory named by spec, which is "<address> <size>" text
+ * made by cgiMemBlobRegister or by an uploaded file part.  Return NULL if this
+ * program never registered such a block, in which case the address came from
+ * the request rather than from us and must not be used.  If retSize is not
+ * NULL the size of the block is returned in it. */
+{
+struct memBlob *blob = NULL;
+if (memBlobHash != NULL && spec != NULL)
+    blob = hashFindVal(memBlobHash, spec);
+if (blob == NULL)
+    return NULL;
+if (retSize != NULL)
+    *retSize = blob->size;
+return blob->mem;
+}
+
 // maximum length of CGI variables to dump to stderr, 0 = switch off
 static int logCgiVarMaxLen = 0;
 
@@ -282,6 +330,48 @@ void useTempFile()
 /* tell cheapcgi to use temp files */
 {
 doUseTempFile = TRUE;
+}
+
+static struct slPair *cgiExtraHeaders = NULL;   /* Written ahead of the content type. */
+static boolean didContentType = FALSE;          /* Has the response header been written? */
+
+void cgiAddHttpHeader(char *name, char *value)
+/* Add an HTTP header for cgiPrintContentType() to write ahead of the Content-Type
+ * line, e.g. cgiAddHttpHeader("Cache-Control", "no-store").  Both strings are
+ * cloned.  Has no effect once the header has been written. */
+{
+if (didContentType)
+    return;   // the header block is closed; nothing would ever print this
+slPairAdd(&cgiExtraHeaders, name, cloneString(value));
+}
+
+boolean cgiDidContentType()
+/* Return TRUE if the CGI response header has already been written. */
+{
+return didContentType;
+}
+
+void cgiPrintContentType(char *contentType)
+/* Write the CGI response header: any headers added with cgiAddHttpHeader(), a
+ * Content-Type line, and the blank line that ends the header.  contentType NULL
+ * means "text/html".  Header lines are not ordered, so a CGI that also sends
+ * Status, Set-Cookie, Content-Disposition or the like writes those first and
+ * calls this last to close the header.
+ *
+ * Only the first call in a process writes anything.  A second header cannot
+ * reach the browser as a header - it lands in the page body as text - so a
+ * later caller is always the mistaken one, and several flows (hgc emitting the
+ * header early, then webStart asking again) reach here twice by design. */
+{
+if (didContentType)
+    return;
+didContentType = TRUE;
+struct slPair *h;
+for (h = cgiExtraHeaders; h != NULL; h = h->next)
+    printf("%s: %s\n", h->name, (char *)h->val);
+if (contentType == NULL)
+    contentType = "text/html";
+printf("Content-Type: %s\n\n", contentType);
 }
 
 boolean cgiIsOnWeb()
@@ -417,7 +507,7 @@ enum browserType cgiClientBrowser(char **browserQualifier, enum osType *clientOs
 // WARNING: The specifics of the HTTP_USER_AGENT vary widely.
 //          This has only been tested on a few cases.
 static enum browserType clientBrowser = btUnknown;
-static enum browserType clientOsType  = (enum browserType)osUnknown;
+static enum osType clientOsType  = osUnknown;
 static char *clientBrowserExtra       = NULL;
 static char *clientOsExtra            = NULL;
 
@@ -440,19 +530,19 @@ if (clientBrowser == btUnknown)
             ptr += strlen("MSIE ");
             clientBrowserExtra = cloneFirstWordByDelimiter(ptr,';');
             }
-        else if ((ptr = stringIn("Firefox",userAgent)) != NULL)
+        else if ((ptr = stringIn("Firefox/",userAgent)) != NULL)
             {
             clientBrowser = btFF;
-            ptr += strlen("(Firefox/");
+            ptr += strlen("Firefox/");
             clientBrowserExtra = cloneFirstWordByDelimiter(ptr,' ');
             }
-        else if ((ptr = stringIn("Chrome",userAgent)) != NULL)  // Must be before Safari
+        else if ((ptr = stringIn("Chrome/",userAgent)) != NULL)  // Must be before Safari
             {
             clientBrowser = btChrome;
             ptr += strlen("Chrome/");
             clientBrowserExtra = cloneFirstWordByDelimiter(ptr,' ');
             }
-        else if ((ptr = stringIn("Safari",userAgent)) != NULL)
+        else if ((ptr = stringIn("Safari/",userAgent)) != NULL)
             {
             clientBrowser = btSafari;
             ptr += strlen("Safari/");
@@ -464,27 +554,27 @@ if (clientBrowser == btUnknown)
             }
 
         // Determine the OS
-        if ((ptr = stringIn("Windows",userAgent)) != NULL)
+        if ((ptr = stringIn("Windows ",userAgent)) != NULL)
             {
-            clientOsType = (enum browserType)osWindows;
+            clientOsType = osWindows;
             ptr += strlen("Windows ");
             clientOsExtra = cloneFirstWordByDelimiter(ptr,';');
             }
-        else if ((ptr = stringIn("Linux",userAgent)) != NULL)
+        else if ((ptr = stringIn("Linux ",userAgent)) != NULL)
             {
-            clientOsType = (enum browserType)osLinux;
+            clientOsType = osLinux;
             ptr += strlen("Linux ");
             clientOsExtra = cloneFirstWordByDelimiter(ptr,';');
             }
         else if ((ptr = stringIn("Mac ",userAgent)) != NULL)
             {
-            clientOsType = (enum browserType)osMac;
+            clientOsType = osMac;
             ptr += strlen("Mac ");
             clientOsExtra = cloneFirstWordByDelimiter(ptr,';');
             }
         else
             {
-            clientOsType = (enum browserType)osOther;
+            clientOsType = osOther;
             }
         }
     }
@@ -496,7 +586,7 @@ if (browserQualifier != NULL)
         *browserQualifier = NULL;
     }
 if (clientOs != NULL)
-    *clientOs = (enum osType)clientOsType;
+    *clientOs = clientOsType;
 if (clientOsQualifier != NULL)
     {
     if (clientOsExtra != NULL)
@@ -694,13 +784,9 @@ for(mp=mp->multi;mp;mp=mp->next)
         if (mp->binary)
 	    {
 	    char varNameBinary[256];
-	    char addrSizeBuf[40];
 	    safef(varNameBinary,sizeof(varNameBinary),"%s__binary",cdName);
-            safef(addrSizeBuf,sizeof(addrSizeBuf),"%lu %llu",
-		(unsigned long)mp->data,
-		(unsigned long long)mp->size);
 	    AllocVar(el);
-	    el->val = cloneString(addrSizeBuf);
+	    el->val = cgiMemBlobRegister(mp->data, (unsigned long)mp->size);
 	    slAddHead(&list, el);
 	    hashAddSaveName(hash, varNameBinary, el, &el->name);
 	    }
@@ -746,6 +832,17 @@ slReverse(&list);
 
 
 
+static boolean skipMalformedPairs = FALSE;
+
+void cgiSkipMalformedPairs(boolean on)
+/* Tell the cookie parser to step over a malformed pair instead of losing the
+ * pair after it or aborting the request.  These libraries cannot read hg.conf
+ * themselves, so hgConfig.c pushes the setting in, the same way
+ * cfgSetLogCgiVars pushes cgiSetMaxLogLen.  refs #38340 */
+{
+skipMalformedPairs = on;
+}
+
 static void parseCookies(struct hash **retHash, struct cgiVar **retList)
 /* parses any cookies and puts them into the given hash and list */
 {
@@ -767,37 +864,48 @@ hash = newHash(6);
 namePt = str;
 while (isNotEmpty(namePt))
     {
-    dataPt = strchr(namePt, '=');
-    if (dataPt == NULL)
-	errAbort("Mangled Cookie input string: no = in '%s' (offset %d in complete cookie string: '%s')",
-		 namePt, (int)(namePt - str), getenv("HTTP_COOKIE"));
-    *dataPt++ = 0;
-    nextNamePt = strchr(dataPt, ';');
-    if (nextNamePt != NULL)
+    if (skipMalformedPairs)
 	{
-         *nextNamePt++ = 0;
-	 if (*nextNamePt == ' ')
-	     nextNamePt++;
+	/* Step over the separators of an empty pair, then confine the search
+	 * for the '=' to this pair.  Without both, a cookie with a name and no
+	 * value swallows the cookie after it, and the same cookie at the end
+	 * of the string aborts the CGI.  The browser then sends that cookie
+	 * again on every request, so the reader cannot get a page back until
+	 * they clear it by hand.  refs #38340 */
+	namePt += strspn(namePt, "; ");
+	if (namePt[0] == 0)
+	    break;
+	nextNamePt = strchr(namePt, ';');
+	if (nextNamePt != NULL)
+	    *nextNamePt++ = 0;
+	dataPt = strchr(namePt, '=');
+	if (dataPt == NULL)
+	    {
+	    namePt = nextNamePt;
+	    continue;
+	    }
+	*dataPt++ = 0;
 	}
-#ifndef FAST_CGI_DECODE
+    else
+	{
+	dataPt = strchr(namePt, '=');
+	if (dataPt == NULL)
+	    errAbort("Mangled Cookie input string: no = in '%s' (offset %d in complete cookie string: '%s')",
+		     namePt, (int)(namePt - str), getenv("HTTP_COOKIE"));
+	*dataPt++ = 0;
+	nextNamePt = strchr(dataPt, ';');
+	if (nextNamePt != NULL)
+	    {
+	     *nextNamePt++ = 0;
+	     if (*nextNamePt == ' ')
+		 nextNamePt++;
+	    }
+	}
     cgiDecode(dataPt,dataPt,strlen(dataPt));
     AllocVar(el);
     el->val = dataPt;
     slAddHead(&list, el);
     hashAddSaveName(hash, namePt, el, &el->name);
-#else
-    int dataSize = strlen(dataPt);
-    int nameSize = strlen(namePt);
-    if ((dataSize <= CGI_VAR_SIZE_LIMIT) && (nameSize < CGI_VAR_NAME_LIMIT))
-        {
-        cgiDecode(namePt,namePt,nameSize);
-        cgiDecode(dataPt,dataPt,dataSize);
-        AllocVar(el);
-        el->val = dataPt;
-        slAddHead(&list, el);
-        hashAddSaveName(hash, namePt, el, &el->name);
-        }
-#endif // FAST_CGI_DECODE
     namePt = nextNamePt;
     }
 
@@ -911,6 +1019,45 @@ for (el = *pList; el != NULL; el = next)
 *pList = NULL;
 }
 
+static char *skipEmptyPairs(char *s)
+/* Return the start of the next variable name in a var=val&var=val... string,
+ * skipping the separators of any empty pairs, as in the "&&" of "a=1&&b=2".
+ * Returns a pointer to the terminating zero when nothing is left.
+ *
+ * Without this the parsers below, which split on the first separator after a
+ * value, read the leftover one as part of the next name: "a=1&&b=2" stores "b"
+ * under "&b".  Nothing looks that name up, so the variable is silently lost.
+ * The same empty pair at the end of the string has no '=' after it and instead
+ * aborts the CGI.  cgiEncode escapes everything but alphanumerics, '.' and '_',
+ * so no encoded name can begin with a separator and none is ever eaten here.
+ * refs #38185 */
+{
+if (s == NULL)
+    return NULL;
+return s + strspn(s, "&;");
+}
+
+static char *endCurrentPair(char *pair)
+/* Zero-terminate the var=val pair that starts at pair, and return the start of
+ * whatever follows it, or NULL if it was the last one.
+ *
+ * The parsers below used to look for the separator only after the '=', which
+ * made them read across the end of a pair that has no '=' in it at all.  A
+ * query string of "g-catV2&db=hg38" was stored as one variable named
+ * "g-catV2&db", so db was lost with no warning, and the same pair at the end of
+ * the string had no '=' left to find and aborted the whole request.  Finding
+ * the end of the pair first confines both parsers to one pair at a time.
+ * refs #38335 */
+{
+char *end = strchr(pair, '&');
+if (end == NULL)
+    end = strchr(pair, ';');	/* Accomodate DAS. */
+if (end == NULL)
+    return NULL;
+*end = 0;
+return end+1;
+}
+
 boolean cgiParseNext(char **pInput, char **retVar, char **retVal)
 /* Parse out next var/val in a var=val&var=val... cgi formatted string 
  * This will insert zeroes and other things into string. 
@@ -920,69 +1067,23 @@ boolean cgiParseNext(char **pInput, char **retVar, char **retVal)
  *     while (cgiParseNext(&pt, &var, &val))
  *          printf("%s\t%s\n", var, val); */
 {
-#ifndef FAST_CGI_DECODE
-char *var = *pInput;
-if (var == NULL || var[0] == 0)
-    return FALSE;
-char *val = strchr(var, '=');
-if (val == NULL)
-    errAbort("Mangled CGI input string %s", var);
+char *var, *val;
+for (;;)
+    {
+    var = skipEmptyPairs(*pInput);
+    if (var == NULL || var[0] == 0)
+        return FALSE;
+    *pInput = endCurrentPair(var);
+    val = strchr(var, '=');
+    if (val != NULL)
+        break;
+    /* A pair with no '=' in it names nothing.  Skip it rather than throwing
+     * away the rest of the request over it.  refs #38335 */
+    }
 *val++ = 0;
-char *end = strchr(val, '&');
-if (end == NULL)
-    end = strchr(val, ';');  // For DAS
-if (end == NULL)
-    {
-    end = val + strlen(val);
-    *pInput = NULL;
-    }
-else
-    {
-    *pInput = end+1;
-    *end = 0;
-    }
 *retVar = var;
 *retVal = val;
-cgiDecode(val,val,end-val);
-#else
-char *val = NULL;
-char *var = NULL;
-int varLength = 0;
-int valLength = 0;
-do
-    {
-    var = *pInput;
-    if (var == NULL || var[0] == 0)
-    {
-        *retVar = *retVal = NULL;
-        return FALSE;
-    }
-    val = strchr(var, '=');
-    if (val == NULL || var == val)
-        errAbort("Mangled CGI input string %s", var);
-    varLength = val-var;
-    *val++ = 0;
-    char *end = strchr(val, '&');
-    if (end == NULL)
-        end = strchr(val, ';');  // For DAS
-    if (end == NULL)
-        {
-        end = val + strlen(val);
-        *pInput = NULL;
-        }
-    else
-        {
-        *pInput = end+1;
-        *end = 0;
-        }
-    *retVar = var;
-    *retVal = val;
-    valLength = end-val;
-    } while ((varLength > CGI_VAR_NAME_LIMIT) || (valLength > CGI_VAR_SIZE_LIMIT));
-            // skip variables that are too big
-cgiDecode(var,var,varLength);
-cgiDecode(val,val,valLength);
-#endif // FAST_CGI_DECODE
+cgiDecode(val,val,strlen(val));
 return TRUE;
 }
 
@@ -1013,41 +1114,28 @@ if (logCgiVarMaxLen > 0)
     logMsg = dyStringNew(1024);	
 
 namePt = input;
-while (namePt != NULL && namePt[0] != 0)
+while ((namePt = skipEmptyPairs(namePt)) != NULL && namePt[0] != 0)
     {
+    nextNamePt = endCurrentPair(namePt);
     dataPt = strchr(namePt, '=');
     if (dataPt == NULL)
 	{
-	errAbort("Mangled CGI input string %s", namePt);
+	/* A pair with no '=' in it names nothing.  Skip it rather than
+	 * aborting and throwing away the rest of the request.  refs #38335 */
+	namePt = nextNamePt;
+	continue;
 	}
     *dataPt++ = 0;
-    nextNamePt = strchr(dataPt, '&');
-    if (nextNamePt == NULL)
-	nextNamePt = strchr(dataPt, ';');	/* Accomodate DAS. */
-    if (nextNamePt != NULL)
-         *nextNamePt++ = 0;
 
     if (logMsg && dataPt && strlen(dataPt) < logCgiVarMaxLen)
         dyStringPrintf(logMsg, "%s=%s ", namePt, dataPt); // if dataPt is empty string, still print it, could be important
 
-#ifndef FAST_CGI_DECODE
     cgiDecode(namePt,namePt,strlen(namePt));	/* for unusual ct names */
     cgiDecode(dataPt,dataPt,strlen(dataPt));
     AllocVar(el);
     el->val = dataPt;
     slAddHead(&list, el);
     hashAddSaveName(hash, namePt, el, &el->name);
-#else
-    if ((strlen(namePt) < CGI_VAR_NAME_LIMIT) && (strlen(dataPt) < CGI_VAR_SIZE_LIMIT))
-        {
-        cgiDecode(namePt,namePt,strlen(namePt));	/* for unusual ct names */
-        cgiDecode(dataPt,dataPt,strlen(dataPt));
-        AllocVar(el);
-        el->val = dataPt;
-        slAddHead(&list, el);
-        hashAddSaveName(hash, namePt, el, &el->name);
-        }
-#endif // FAST_CGI_DECODE
     namePt = nextNamePt;
 
     }
@@ -1288,6 +1376,20 @@ if (res == NULL)
 return res;
 }
 
+static boolean jsLiteralBackslash(char c)
+/* Is this a character that we put a backslash in front of in a javascript string literal? */
+{
+return (c == '\''
+     || c == '\"'
+     || c == '&'
+     || c == '\\'
+     || c == '\n'
+     || c == '\r'
+     || c == '\t'
+     || c == '\b'
+     || c == '\f');
+}
+
 char *javaScriptLiteralEncode(char *inString)
 /* Use backslash escaping on newline
  * and quote chars, backslash and others.
@@ -1306,16 +1408,9 @@ if (inString == NULL)
 in = inString;
 while ((c = *in++) != 0)
     {
-    if (c == '\''
-     || c == '\"'
-     || c == '&'
-     || c == '\\'
-     || c == '\n'
-     || c == '\r'
-     || c == '\t'
-     || c == '\b'
-     || c == '\f'
-	)
+    if (c == '<')
+        outSize += 4;   // "\x3C", see below
+    else if (jsLiteralBackslash(c))
         outSize += 2;
     else
         outSize += 1;
@@ -1327,16 +1422,19 @@ in = inString;
 out = outString;
 while ((c = *in++) != 0)
     {
-    if (c == '\''
-     || c == '\"'
-     || c == '&'
-     || c == '\\'
-     || c == '\n'
-     || c == '\r'
-     || c == '\t'
-     || c == '\b'
-     || c == '\f'
-	)
+    if (c == '<')
+	{
+	/* These literals end up inside an inline <script> block, and the HTML parser looks
+	 * for "</script>" in there before javascript ever sees the text.  A backslash does
+	 * not hide the < from the parser, but \x3C is the same character to javascript and
+	 * leaves no < to be found. */
+	*out++ = '\\';
+	*out++ = 'x';
+	*out++ = '3';
+	*out++ = 'C';
+	continue;
+	}
+    if (jsLiteralBackslash(c))
         *out++ = '\\';
     *out++ = c;
     }
@@ -1361,6 +1459,50 @@ return outString;
  * Since FTP does not use URLs with query parameters, use the Full version.
  */
 
+/* SECURITY (refs #38051): 0x01 is the in-band marker that sqlSafef (jksql.c) and
+ * htmlSafef (htmshell.c) use to delimit the values they must escape.  A request
+ * value carrying this byte can forge a delimiter pair and smuggle unescaped text
+ * into a query or into page output, so drop it here as it is decoded.  It is
+ * never legitimate in a request.  Only 0x01 - tab, newline and CR are left alone,
+ * since those are legitimate in custom-track textarea uploads. */
+#define CGI_ESCAPE_MARKER 0x01
+
+static int cgiHexDigit(char c)
+/* Return the value 0-15 of one hexadecimal digit, or -1 if c is not one. */
+{
+if (c >= '0' && c <= '9')
+    return c - '0';
+if (c >= 'a' && c <= 'f')
+    return c - 'a' + 10;
+if (c >= 'A' && c <= 'F')
+    return c - 'A' + 10;
+return -1;
+}
+
+static int cgiEscapedByte(char *in, int avail)
+/* Decode the two hex digits of a %hh escape, where in points just past the '%'
+ * and avail is the number of input bytes remaining there.  Return '?' if the
+ * escape is malformed, matching what the old sscanf-based code did for input
+ * with no leading hex digit at all.
+ *
+ * PERFORMANCE (refs #37262): this used to be sscanf(in, "%2x", &code).  glibc
+ * builds a stream over the whole remaining string on each sscanf call, so it
+ * scans to the terminating null every time.  That made decoding cost time
+ * quadratic in the length of the value, and a value is as long as a cart
+ * variable: 0.3s of CPU on every load of a session we already have on disk,
+ * over 2s for a request at the input size limit.  Reading the two digits
+ * directly is a few hundred times faster and never walks past them. */
+{
+if (avail >= 2)
+    {
+    int hi = cgiHexDigit(in[0]);
+    int lo = cgiHexDigit(in[1]);
+    if (hi >= 0 && lo >= 0)
+	return (hi << 4) + lo;
+    }
+return '?';
+}
+
 void cgiDecode(char *in, char *out, int inLength)
 /* Decode from cgi pluses-for-spaces format to normal.
  * Out will be a little shorter than in typically, and
@@ -1375,13 +1517,15 @@ for (i=0; i<inLength;++i)
 	*out++ = ' ';
     else if (c == '%')
 	{
-	int code;
-        if (sscanf(in, "%2x", &code) != 1)
-	    code = '?';
+	int code = cgiEscapedByte(in, inLength - i - 1);
 	in += 2;
 	i += 2;
+	if (code == CGI_ESCAPE_MARKER)
+	    continue;			// drop our reserved escape marker
 	*out++ = code;
 	}
+    else if (c == CGI_ESCAPE_MARKER)
+	continue;			// drop our reserved escape marker
     else
 	*out++ = c;
     }
@@ -1400,13 +1544,15 @@ for (i=0; i<inLength;++i)
     c = *in++;
     if (c == '%')
 	{
-	int code;
-        if (sscanf(in, "%2x", &code) != 1)
-	    code = '?';
+	int code = cgiEscapedByte(in, inLength - i - 1);
 	in += 2;
 	i += 2;
+	if (code == CGI_ESCAPE_MARKER)
+	    continue;			// drop our reserved escape marker
 	*out++ = code;
 	}
+    else if (c == CGI_ESCAPE_MARKER)
+	continue;			// drop our reserved escape marker
     else
 	*out++ = c;
     }
@@ -1832,8 +1978,10 @@ void cgiMakeRadioButton(char *name, char *value, boolean checked)
  * same name but different values.   The default selection should be
  * sent with checked on. */
 {
+// name and value can carry a hub-supplied string (a bigBed field name from filterValues),
+// so encode them
 printf("<input type=radio name='%s' id='%s' value='%s'",
-        name, name, value);
+        htmlEncode(name), htmlEncode(name), htmlEncode(value));
 if (checked)
    printf(" CHECKED");
 printf(">");
@@ -1893,7 +2041,8 @@ if(id)
 else
     idBuf[0] = 0;
 
-printf("<INPUT TYPE=CHECKBOX NAME=\"%s\"%s VALUE=on %s%s%s>", name, idBuf,
+// name can carry a hub-supplied string (a bigBed field name from labelFields), escape
+printf("<INPUT TYPE=CHECKBOX NAME=\"%s\"%s VALUE=on %s%s%s>", htmlEncode(name), idBuf,
         (moreHtml ? moreHtml : ""),
         (checked ? " CHECKED" : ""),
         (enabled ? "" : " DISABLED"));
@@ -2266,7 +2415,8 @@ if (events)
 if (style)
     printf(" style='%s'", style);
 if (ariaLabel)
-    printf(" aria-label=\"%s\"", ariaLabel);
+    // ariaLabel is often a track shortLabel, which a track hub controls, escape it
+    printf(" aria-label=\"%s\"", htmlEncode(ariaLabel));
 printf(">\n");
 for (i=0; i<menuSize; ++i)
     {
@@ -2490,8 +2640,9 @@ if (anyAll != NULL)
         else
             checked = sameString(val,selected);
         }
+    // the label is HTML text here, not a javascript literal
     dyStringPrintf(output, "<OPTION%s VALUE='%s'>%s</OPTION>\n",(checked ? " SELECTED" : ""),
-                   val, javaScriptLiteralEncode(label));
+                   val, htmlEncode(label));
     if (label != val)
         freeMem(val);
     }
@@ -2512,7 +2663,7 @@ for (; valPair != NULL; valPair = valPair->next)
     if (valPair->val != NULL)
         label = valPair->val;
     dyStringPrintf(output, "<OPTION%s VALUE='%s'>%s</OPTION>\n",(checked ? " SELECTED" : ""),
-                   (char *)valPair->name, javaScriptLiteralEncode(label));
+                   (char *)valPair->name, htmlEncode(label));
     }
 
 dyStringPrintf(output,"</SELECT>\n");
@@ -2570,9 +2721,10 @@ printf("</SELECT>\n");
 void cgiMakeHiddenVarWithIdExtra(char *varName, char *id, char *string,char *extra)
 /* Store string in hidden input for next time around. */
 {
-printf("<INPUT TYPE=HIDDEN NAME='%s'", varName);
+// varName can carry a hub-supplied string (a bigBed field name from labelFields), escape
+printf("<INPUT TYPE=HIDDEN NAME='%s'", htmlEncode(varName));
 if (id)
-    printf(" ID='%s'", id);
+    printf(" ID='%s'", htmlEncode(id));
 if (extra)
     printf(" %s",extra);
 printf(" VALUE='%s'>\n", string);
@@ -2957,4 +3109,35 @@ for (el = elList; el != NULL; el = el->next)
     freez(&s);
     }
 hashElFreeList(&elList);
+}
+
+boolean isValidJsonpCallback(char *s)
+/* Return TRUE if s is safe to use as a JSONP callback name: non-empty, not
+ * too long, and every dot-separated segment is a C symbol (letters, digits,
+ * underscore, not starting with a digit).  This rejects anything with
+ * parentheses, spaces, operators, or other characters that would let an
+ * attacker turn a same-origin JSONP response into arbitrary script. */
+{
+if (isEmpty(s))
+    return FALSE;
+if (strlen(s) > 128)
+    return FALSE;
+char *dupe = cloneString(s);
+boolean ok = TRUE;
+char *seg = dupe;
+char *dot;
+while (seg != NULL)
+    {
+    dot = strchr(seg, '.');
+    if (dot != NULL)
+	*dot = 0;
+    if (!isSymbolString(seg))
+	{
+	ok = FALSE;
+	break;
+	}
+    seg = (dot != NULL) ? dot + 1 : NULL;
+    }
+freeMem(dupe);
+return ok;
 }

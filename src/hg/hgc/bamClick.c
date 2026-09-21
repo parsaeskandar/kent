@@ -9,6 +9,8 @@
 #include "hdb.h"
 #include "hgBam.h"
 #include "hgc.h"
+#include "hui.h"
+#include "htmshell.h"
 #include "knetUdc.h"
 #include "udc.h"
 #include "chromAlias.h"
@@ -131,7 +133,8 @@ else
         {
         char *qSeq = NULL;
         struct ffAli *ffa = bamToFfAli(bam, genoSeq, tStart, useStrand, &qSeq);
-        printf("<B>Alignment of %s to %s:%d-%d%s:</B><BR>\n", itemName,
+        // the read name comes straight out of the BAM file, so encode it before output
+        printf("<B>Alignment of %s to %s:%d-%d%s:</B><BR>\n", htmlEncode(itemName),
                seqName, tStart+1, tEnd, (isRc ? " (reverse complemented)" : ""));
         ffShowSideBySide(stdout, ffa, qSeq, 0, genoSeq->dna, tStart, tLength, 0, tLength, 8, isRc,
                          FALSE);
@@ -203,7 +206,7 @@ if (leftBam && rightBam)
     int start = min(leftCore->pos, rightCore->pos);
     int end = max(leftCore->pos+leftLength, rightCore->pos+rightLength);
     char *itemName = bam1_qname(leftBam);
-    printf("<B>Paired read name:</B> %s<BR>\n", itemName);
+    printf("<B>Paired read name:</B> %s<BR>\n", htmlEncode(itemName));
     printPosOnChrom(seqName, start, end, NULL, FALSE, itemName);
     puts("<P>");
     }
@@ -229,7 +232,7 @@ if (sameString(bam1_qname(bam), btd->itemName))
 	{
 	if (core->pos == btd->itemStart)
 	    {
-	    printf("<B>Read name:</B> %s<BR>\n", btd->itemName);
+	    printf("<B>Read name:</B> %s<BR>\n", htmlEncode(btd->itemName));
 	    singleBamDetails(bam);
 	    }
 	}
@@ -267,10 +270,10 @@ if (udcCacheTimeout() < 300)
 if (sameString(item, "zoom in"))
     printf("Zoom in to a region with fewer items to enable 'detail page' links for individual items.<BR>");
 
-char varName[1024];
-safef(varName, sizeof(varName), "%s_pairEndsByName", tdb->track);
-boolean isPaired = cartUsualBoolean(cart, varName,
-				    (trackDbSetting(tdb, "pairEndsByName") != NULL));
+/* Read the same cart variable the track UI writes and hgTracks reads, which is
+ * separated with a dot and looked up through the container hierarchy. */
+boolean isPaired = cartUsualBooleanClosestToHome(cart, tdb, FALSE, BAM_PAIR_ENDS_BY_NAME,
+			 (trackDbSettingClosestToHome(tdb, BAM_PAIR_ENDS_BY_NAME) != NULL));
 char position[512];
 struct hash *pairHash = isPaired ? hashNew(0) : NULL;
 struct bamTrackData btd = {start, item, pairHash, FALSE};

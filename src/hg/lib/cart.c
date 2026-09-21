@@ -37,19 +37,20 @@
 #include "verbose.h"
 #include "genark.h"
 #include "quickLift.h"
+#include "pcrResult.h"
 #include "botDelay.h"
 #include "curlWrap.h"
 #include "hubSpaceKeys.h"
 #include "myVariantsShare.h"
+#include "customTrack.h"
+#include "dupTrack.h"
+#include "myVariants.h"
 
 static char *sessionVar = "hgsid";	/* Name of cgi variable session is stored in. */
 static char *positionCgiName = "position";
 
 DbConnector cartDefaultConnector = hConnectCart;
 DbDisconnect cartDefaultDisconnector = hDisconnectCart;
-static boolean cartDidContentType = FALSE;
-
-struct slPair *httpHeaders = NULL; // A list of headers to output before the content-type
 
 static void hashUpdateDynamicVal(struct hash *hash, char *name, void *val)
 /* Val is a dynamically allocated (freeMem-able) entity to put
@@ -195,24 +196,209 @@ while ((helOverlay = hashNext(&cookie)) != NULL)
     }
 }
 
+/* Cart variables below hold the name of a file that the server itself made for this user,
+ * either in the trash directory or in the durable session-data directory that a saved
+ * session's trash files get moved to.  Each of these names reaches an open, a read or a
+ * delete somewhere in the tree, and a cart value is not ours to trust: values arrive from
+ * CGI parameters, from an uploaded or fetched hgSession settings file, and from another
+ * user's shared session.  So a value that names some other file is dropped on the way in,
+ * by cartValueIsAcceptable() below.
+ *
+ * Add a name here when a new cart variable comes to hold a server-side file name.  Keep
+ * validating at the point of use as well, with isServerUserFilePath(): some file name
+ * variables are named by a trackDb setting rather than by the code (speciesUseFile), so no
+ * fixed list can cover them.
+ *
+ * hg/utils/cartFileVarCatalog checks these arrays for completeness: it scans the tree for a
+ * cart value reaching a file call and fails if it finds one that is neither listed here nor
+ * described in the catalog.  A name added here wants a row there as well. */
+
+static char *fileNameCartVars[] =
+{
+    "hgta_userRegionsFile",     // user regions, hgTables.h hgtaUserRegionsFile, also hgIntegrator
+    "hgta_identifierFile",      // hgTables pasted identifier list, hgTables.h hgtaIdentifierFile
+    DUP_TRACKS_VAR,             // duplicated track stanzas
+    "blatLastBigBed",           // BLAT bigPsl, see blatFindPinnedBigPsl()
+    "blatPslFile",              // saved BLAT result, see hgBlat doRedisplayResults()
+    "blatFaFile",               // the query sequence that goes with blatPslFile
+    "hgg_mrnaFoldPs",           // hgGene mRNA fold PostScript, hgGene.h hggMrnaFoldPs
+    "hgp_matchFile",            // hgVisiGene search matches, hgVisiGene.h hgpMatchFile
+    "near.customFile",          // hgNear custom column file, hgNear.h customFileVarName
+    "gsTemp",                   // the file hgTables uploads to GenomeSpace
+};
+
+static char *fileNameCartVarPrefixes[] =
+{
+    CT_FILE_VAR_PREFIX,                 // ctfile_<db>, ctfile_hub_<id>: custom tracks
+    MYVARIANTS_FILE_VAR_PREFIX,         // mvCtfile_<db>: myVariants custom track
+    customCompositeCartName "-",        // customComposite-<db>: track collection hub
+    quickLiftCartName "-",              // hubQuickLift-<db>: quickLift hub
+};
+
+/* These two hold either a remote URL or the name of a file the server made, and the code that
+ * reads them tells the cases apart by looking for a protocol.  A value with no protocol falls
+ * through to opening a local file, so it has to be one of ours; a real URL is fine. */
+
+static char *urlOrFileNameCartVars[] =
+{
+    "multiRegionsBedUrl",       // hgTracks multi-region BED: a URL, or the trash file we wrote
+    hgsLoadUrlName,             // hgSession load settings from URL
+};
+
+/* This one does not hold a single file name.  hgPcr writes two file names and an optional
+ * target name into it, separated by spaces: "<psl file> <primer file> [<targetDb name>]".
+ * Both file names are checked; the target name is not a path.  hgPcr appends to both files
+ * when the user asks to add to an existing result, so a retargeted value is a write as well
+ * as a read. */
+
+static char *fileNamePairCartVarPrefixes[] =
+{
+    PCR_RESULT_TRACK_NAME "_",  // hgPcrResult_<db>: in-silico PCR result files
+};
+
+static boolean cartVarHoldsFileName(char *var)
+/* Return TRUE if var is one of the cart variables listed above. */
+{
+int i;
+for (i = 0;  i < ArraySize(fileNameCartVars);  i++)
+    if (sameString(var, fileNameCartVars[i]))
+        return TRUE;
+for (i = 0;  i < ArraySize(fileNameCartVarPrefixes);  i++)
+    if (startsWith(fileNameCartVarPrefixes[i], var))
+        return TRUE;
+return FALSE;
+}
+
+static boolean cartVarHoldsUrlOrFileName(char *var)
+/* Return TRUE if var is one of the cart variables that may hold either. */
+{
+int i;
+for (i = 0;  i < ArraySize(urlOrFileNameCartVars);  i++)
+    if (sameString(var, urlOrFileNameCartVars[i]))
+        return TRUE;
+return FALSE;
+}
+
+static boolean cartVarHoldsFileNamePair(char *var)
+/* Return TRUE if var is one of the variables that hold a pair of file names.
+ * hgPcrResult_targetStyle is a display setting that shares the hgPcrResult_ prefix with the
+ * per-db result variables, so it is excluded by name. */
+{
+if (sameString(var, PCR_RESULT_TARGET_STYLE))
+    return FALSE;
+int i;
+for (i = 0;  i < ArraySize(fileNamePairCartVarPrefixes);  i++)
+    if (startsWith(fileNamePairCartVarPrefixes[i], var))
+        return TRUE;
+return FALSE;
+}
+
+static boolean fileNamePairIsAcceptable(char *val)
+/* Return TRUE if the first two whitespace-separated words of val both name a file the server
+ * made for this user.  Any other shape is refused: the code that reads this value errAborts
+ * on fewer than two words, and reads no more than three. */
+{
+char *dupe = cloneString(val);
+char *words[4];
+int wordCount = chopByWhite(dupe, words, ArraySize(words));
+boolean ok = (wordCount == 2 || wordCount == 3) &&
+             isServerUserFilePath(words[0]) && isServerUserFilePath(words[1]);
+freeMem(dupe);
+return ok;
+}
+
+static void logDroppedFileNameVar(char *var, char *why)
+/* Note the drop in the error log, so that a false positive can be spotted after release.
+ * The variable name comes from the user, so copy out only characters that cannot forge a
+ * log line of their own, and keep the copy short. */
+{
+char clean[129];
+int i;
+for (i = 0;  i < (int)sizeof(clean) - 1 && var[i] != 0;  i++)
+    {
+    unsigned char c = var[i];
+    clean[i] = (isalnum(c) || c == '_' || c == '.' || c == '-') ? c : '?';
+    }
+clean[i] = 0;
+fprintf(stderr, "cart: dropped %s, value is not %s\n", clean, why);
+}
+
+static boolean cartValueIsAcceptable(char *var, char *val)
+/* Return TRUE unless var names a server-created file and val names something else.  An empty
+ * value is fine; the CGIs treat it as "no file" and several saved sessions carry one. */
+{
+if (isEmpty(val))
+    return TRUE;
+if (cartVarHoldsFileName(var))
+    {
+    if (isServerUserFilePath(val))
+        return TRUE;
+    logDroppedFileNameVar(var, "a trash or session-data file name");
+    return FALSE;
+    }
+if (cartVarHoldsUrlOrFileName(var))
+    {
+    if (isServerUserFileOrUrl(val))
+        return TRUE;
+    logDroppedFileNameVar(var, "a URL or a trash or session-data file name");
+    return FALSE;
+    }
+if (cartVarHoldsFileNamePair(var))
+    {
+    if (fileNamePairIsAcceptable(val))
+        return TRUE;
+    logDroppedFileNameVar(var, "a pair of trash or session-data file names");
+    return FALSE;
+    }
+return TRUE;
+}
+
 static void loadHash(struct hash *hash, char *contents)
 /* Load a hash from a cart-like string. */
 {
 char *namePt, *dataPt, *nextNamePt;
+boolean skipMalformed = cfgOptionBooleanDefault("skipMalformedCgiPairs", FALSE);
 namePt = contents;
 while (namePt != NULL && namePt[0] != 0)
     {
-    dataPt = strchr(namePt, '=');
-    if (dataPt == NULL)
-	errAbort("Mangled input string %s", namePt);
-    *dataPt++ = 0;
-    nextNamePt = strchr(dataPt, '&');
-    if (nextNamePt == NULL)
-	nextNamePt = strchr(dataPt, ';');	/* Accomodate DAS. */
-    if (nextNamePt != NULL)
-         *nextNamePt++ = 0;
+    if (skipMalformed)
+	{
+	/* Step over the separators of an empty pair, then confine the search for
+	 * the '=' to this pair.  Without both, a setting with a name and no value
+	 * renames the setting after it, and the same pair at the end of the string
+	 * aborts the CGI.  This string is a saved session or a cart row rather than
+	 * a request, so the reader has no way to clear it.  refs #38340 */
+	namePt += strspn(namePt, "&;");
+	if (namePt[0] == 0)
+	    break;
+	nextNamePt = strchr(namePt, '&');
+	if (nextNamePt == NULL)
+	    nextNamePt = strchr(namePt, ';');	/* Accomodate DAS. */
+	if (nextNamePt != NULL)
+	    *nextNamePt++ = 0;
+	dataPt = strchr(namePt, '=');
+	if (dataPt == NULL)
+	    {
+	    namePt = nextNamePt;
+	    continue;
+	    }
+	*dataPt++ = 0;
+	}
+    else
+	{
+	dataPt = strchr(namePt, '=');
+	if (dataPt == NULL)
+	    errAbort("Mangled input string %s", namePt);
+	*dataPt++ = 0;
+	nextNamePt = strchr(dataPt, '&');
+	if (nextNamePt == NULL)
+	    nextNamePt = strchr(dataPt, ';');	/* Accomodate DAS. */
+	if (nextNamePt != NULL)
+	     *nextNamePt++ = 0;
+	}
     cgiDecode(dataPt,dataPt,strlen(dataPt));
-    hashAdd(hash, namePt, cloneString(dataPt));
+    if (cartValueIsAcceptable(namePt, dataPt))
+        hashAdd(hash, namePt, cloneString(dataPt));
     namePt = nextNamePt;
     }
 }
@@ -402,18 +588,63 @@ sqlUpdate(conn, dy->string);
 dyStringFree(&dy);
 }
 
+boolean cartCollectionHubCopyOnWrite()
+/* Return TRUE if a track collection hub file is copied when the program that writes it asks for
+ * a copy, rather than on every session load.  hg.conf gate for #38273; drop it once the new
+ * behavior has been through a release.
+ *
+ * Retiring the gate is not a uniform "delete the if, keep the body": in
+ * cartCopyLocalHubsOnSessionLoad() the body is the OLD behavior and the whole function and its
+ * callers go away, while the two tests below and the one in sessionData.c lose only the gate
+ * term. */
+{
+return cfgOptionBooleanDefault("collectionHubCopyOnWrite", FALSE);
+}
+
+static boolean gLocalHubCopyRequested = FALSE;
+
+void cartRequestLocalHubCopy()
+/* Declare that this program rewrites the track collection hub file that the cart names, so that
+ * cartNew() replaces it with a private copy in trash before the hubs are loaded.
+ *
+ * Call this before opening the cart.  It has to be a property of the program rather than of the
+ * request, because the copy gives the hub a new id and the hubs are loaded during cart open,
+ * before any CGI's doMiddle() can decide whether this particular request will write.  hgCollection
+ * is the only caller; it is the only program that writes one of these files.  refs #38273 */
+{
+gLocalHubCopyRequested = TRUE;
+}
+
+static boolean hubFileIsOurScratchCopy(char *hubFileName)
+/* Return TRUE if hubFileName is a plain file in the trash directory, which means it is a working
+ * copy this cart already owns and hgCollection may rewrite in place.
+ *
+ * A trash path that is a symbolic link is NOT one: saveTrackFile() replaces the trash file with a
+ * link to the session's durable copy when a session is saved (see sessionData.c), and writing
+ * through that link would rewrite the file the saved session names.  Do not use realpath() here;
+ * these links are deliberate. */
+{
+if (!isTrashPath(hubFileName))
+    return FALSE;
+struct stat st;
+if (lstat(hubFileName, &st) != 0)
+    return FALSE;
+return !S_ISLNK(st.st_mode);
+}
+
 static void copyLocalHubs(struct cart *cart, struct hashEl *el)
-/* Copy a set of custom composites to a new hub file. Update the 
+/* Copy a custom composite hub to a new hub file in trash. Update the
  * relevant cart variables. */
 {
 struct tempName hubTn;
 char *hubFileVar = el->name;
 char *oldHubFileName = el->val;
-if (startsWith(customCompositeCartName, el->name))
-    trashDirDateFile(&hubTn, "hgComposite", "hub", ".txt");
-else if (startsWith(quickLiftCartName, el->name))
-    trashDirDateFile(&hubTn, "quickLift", "hub", ".txt");
-char *newHubFileName = cloneString(hubTn.forCgi);
+
+// The cart is not ours: every cart variable can be set from the URL.  Screen the path the same
+// way getHubName() does before opening it, and leave a rejected value in the cart so the user
+// can still fix it.
+if (!isServerUserFilePath(oldHubFileName))
+    return;
 
 // let's make sure the hub hasn't been cleaned up
 int fd = open(oldHubFileName, O_RDONLY);
@@ -422,8 +653,15 @@ if (fd < 0)
     cartRemove(cart, hubFileVar);
     return;
     }
-
 close(fd);
+
+// Under copy-on-write a hub we already own is left alone.  Copying it again would give the hub a
+// new id on every edit, and the track names the browser is holding carry that id.  refs #38273
+if (cartCollectionHubCopyOnWrite() && hubFileIsOurScratchCopy(oldHubFileName))
+    return;
+
+trashDirDateFile(&hubTn, "hgComposite", "hub", ".txt");
+char *newHubFileName = cloneString(hubTn.forCgi);
 copyFile(oldHubFileName, newHubFileName);
 cartReplaceHubVars(cart, hubFileVar, oldHubFileName, newHubFileName);
 }
@@ -493,17 +731,30 @@ cartSetString(cart, hgHubConnectRemakeTrackHub, "on");
 cartSetString(cart, hubFileVar, newHubUrl);
 }
 
-void cartCopyLocalHubs(struct cart *cart)
-/* Find any custom composite hubs and copy them so they can be modified. */
+static void cartCopyLocalHubs(struct cart *cart)
+/* Find any custom composite hubs and copy them so they can be modified.  Under the
+ * collectionHubCopyOnWrite gate a hub this cart already owns is left alone; see
+ * copyLocalHubs(). */
 {
 struct hashEl *el, *elList = hashElListHash(cart->hash);
 
 for (el = elList; el != NULL; el = el->next)
     {
-    // we probably shouldn't be doing this until the user actually makes a change in the collection
-    if (startsWith(customCompositeCartName, el->name))
+    // the "-" matters: it is what fileNameCartVarPrefixes screens on, and a name that only
+    // starts with "customComposite" has had no path check applied to its value
+    if (startsWith(customCompositeCartName "-", el->name))
         copyLocalHubs(cart, el);
     }
+}
+
+void cartCopyLocalHubsOnSessionLoad(struct cart *cart)
+/* Copy any custom composite hubs after loading a session.  This is the pre-#38273 behavior and
+ * costs an hgcentral.hubStatus row per load; under the collectionHubCopyOnWrite gate it does
+ * nothing, because the program that writes the hub asks for its own copy instead.  When the gate
+ * goes away, this function and every call to it go with it. */
+{
+if (!cartCollectionHubCopyOnWrite())
+    cartCopyLocalHubs(cart);
 }
 
 static void storeInOldVars(struct cart *cart, struct hash *oldVars, char *var)
@@ -601,6 +852,8 @@ for (cv = cgiVarList(); cv != NULL; cv = cv->next)
     {
     if (! (startsWith(booShadow, cv->name) || hashLookup(booHash, cv->name)))
 	{
+        if (!cartValueIsAcceptable(cv->name, cv->val))
+            continue;   // leave the file name the server itself stored in the cart alone
 	storeInOldVars(cart, oldVars, cv->name);
 	cartRemove(cart, cv->name);
         if (differentString(cv->val, CART_VAR_EMPTY))  // NOTE: CART_VAR_EMPTY logic not implemented for boolShad
@@ -712,6 +965,12 @@ if (row != NULL)
         if (isNotEmpty(actionVar))
             cartRemove(cart, actionVar);
         hDisconnectCentral(&conn2);
+
+        /* A full (non-merge) load just threw away whatever the user had in the browser before.
+         * Leave a marker so that the next hgTracks page can say what was opened and that the
+         * old view is gone.  A merge keeps the current view, so it needs no note. */
+        if (!merge)
+            cartSetString(cart, hgsSessionJustLoaded, "on");
 
         /* When loading another user's session, strip accepted-share cart vars
          * so we don't carry shares from the session owner into the current user's
@@ -1246,7 +1505,8 @@ if (addToCart)
             {
             if (decodeVal)
                 decodeForHgSession(val);
-            cartAddString(cart, var, val);
+            if (cartValueIsAcceptable(var, val))
+                cartAddString(cart, var, val);
             updatePrevVar(pPrevVar, var);
             }
         }
@@ -1468,6 +1728,27 @@ for(; tdb; tdb = tdb->next)
 cartRemove(cart, CART_HAS_DEFAULT_VISIBILITY);
 }
 
+static boolean resolveGenarkDb(struct cart *cart)
+/* If db names a Genark assembly, turn it into the genome and hubUrl variables that
+ * connect that Genark hub, and return TRUE.   Otherwise leave the cart alone and
+ * return FALSE. */
+{
+char *db = cartOptionalString(cart,"db");
+
+if ((db == NULL) || startsWith("hub_", db) || sameString("0", db))
+    return FALSE;
+
+char *url = genarkUrl(db);
+
+if (url == NULL)
+    return FALSE;
+
+cartSetString(cart, "genome", db);
+cartAddString(cart, "hubUrl", url);
+cartRemove(cart, "db");
+return TRUE;
+}
+
 static void fixUpDb(struct cart *cart)
 // we want to load Genark hubs or error out if db is not available
 {
@@ -1475,23 +1756,13 @@ char *db = cartOptionalString(cart,"db");
 
 if ((db == NULL) || startsWith("hub_", db) || sameString("0", db))
     return;
-else
-    {
-    char *url = genarkUrl(db);
 
-    if (url != NULL)
-        {
-        cartSetString(cart, "genome", db);
-        cartAddString(cart, "hubUrl", url);
-        cartRemove(cart, "db");
-        }
-    else if (!hDbIsActive(db))
-	errAbort("Can not find database '%s'.<br>"
-                "You can <a href='https://genome.ucsc.edu/assemblySearch.html?q=%s'>search for the genome %s</a> in "
-                "the list of NCBI/INSDC assemblies, then click 'request' when you have found the right assembly "
-                "and enter your email address. We will then make a genome browser and get back to you within a few days.",
-                db, db, db);
-    }
+if (!resolveGenarkDb(cart) && !hDbIsActive(db))
+    errAbort("Can not find database '%s'.<br>"
+            "You can <a href='https://genome.ucsc.edu/assemblySearch.html?q=%s'>search for the genome %s</a> in "
+            "the list of NCBI/INSDC assemblies, then click 'request' when you have found the right assembly "
+            "and enter your email address. We will then make a genome browser and get back to you within a few days.",
+            db, db, db);
 }
 
 boolean isValidToken(char *token)
@@ -1523,14 +1794,24 @@ return cgiOptionalString("hgsid");
 void printCaptcha() 
 /* print an html page that shows the captcha and on success, reloads the page with the token added as token=x */
 {
+    // A CGI run from the command line has no browser to solve a captcha, so the
+    // challenge page would just replace the output the caller asked for. Only a
+    // real command-line run reaches here with wasSpoofed set: cgiFromCommandLine()
+    // returns early, leaving it FALSE, whenever the web server has set
+    // REQUEST_METHOD, so this cannot be reached from an HTTP request.
+    if (cgiWasSpoofed())
+        return;
+
     char *cfSiteKey = cfgVal(CLOUDFLARESITEKEY);
     if (!cfSiteKey)
         return;
 
-    fprintf(stderr, "CAPTCHA_PRINT %s\n", getSessionId());
-    puts("Content-Type:text/html\n"); // puts outputs one newline. Header requires two newlines.
+    if (cfgOptionBooleanDefault("captchaDebug", FALSE))
+        fprintf(stderr, "CAPTCHA_PRINT %s\n", getSessionId());
+    cspWriteResponseHeader();
+    cgiPrintContentType("text/html");
     puts("<html><head>");
-    puts("<script>");
+    printf("<script nonce='%s'>\n", getNonce());
     printf("function showWidget() { \n"
        "turnstile.render('#myWidget', {\n"
          "sitekey: '%s',\n"
@@ -1637,7 +1918,8 @@ if (token)
         }
     else
         {
-        puts("Content-Type: text/html\n");
+        cspWriteResponseHeader();
+        cgiPrintContentType("text/html");
         puts("<html><body>Internal captcha error: Cloudflare rejected the captcha token. "
                 "Something is not working internally, we are very sorry. You can try reloading the page. "
                 "If this problem persists, send an email to genome-www@soe.ucsc.edu and we will "
@@ -1753,6 +2035,10 @@ if (! (cgiScriptName() && endsWith(cgiScriptName(), "hgSession")))
     else if (cartVarExists(cart, hgsDoLoadUrl))
 	{
 	char *url = cartString(cart, hgsLoadUrlName);
+	/* netUrlOpen() treats a string with no protocol as a local path and open()s it
+	 * (lib/net.c), so this has to be a URL or a file we made before it is opened. */
+	if (!isServerUserFileOrUrl(url))
+	    errAbort("Can only load session settings from a URL.");
 	struct lineFile *lf = netLineFileOpen(url);
         struct dyString *dyMessage = dyStringNew(0);
 	boolean ok = cartLoadSettingsFromUserInput(lf, cart, oldVars, hgsDoLoadUrl, dyMessage);
@@ -1774,6 +2060,22 @@ if (cartVarExists(cart, hgHubDoDisconnect))
     doDisconnectHub(cart);
 
 if (didSessionLoad)
+    {
+    cartCopyLocalHubsOnSessionLoad(cart);
+
+    // Loading a session empties the cart and then puts the CGI variables back, which
+    // undoes the work fixUpDb did above.  A Genark accession in db= has to be turned
+    // back into a genome and a hubUrl before we connect the hubs.  refs #38184
+    resolveGenarkDb(cart);
+    }
+
+// A program that rewrites the track collection hub file has asked for its own copy of it (see
+// cartRequestLocalHubCopy).  If the file belongs to a saved session then every load of that
+// session names it and other users may load it too, so it must not be written in place.  Under
+// copy-on-write this is the only place the copy is made, and it has to happen here, before the
+// hubs are loaded below, because the copy gets a new hub id and the track names come from it.
+// refs #38273
+if (cartCollectionHubCopyOnWrite() && gLocalHubCopyRequested)
     cartCopyLocalHubs(cart);
 
 char *newDatabase = hubConnectLoadHubs(cart);
@@ -1781,11 +2083,18 @@ char *newDatabase = hubConnectLoadHubs(cart);
 if (newDatabase != NULL)
     {
     char *cartDb = cartOptionalString(cart, "db");
+    char *oldDb = (oldVars != NULL) ? hashFindVal(oldVars, "db") : NULL;
 
     if ((cartDb == NULL) || differentString(cartDb, newDatabase))
         {
+        // resolveGenarkDb takes db out of the cart, so a Genark db= that names the assembly
+        // the cart was already on looks like a database change here.  It is not one, and the
+        // magic below would replace the position we just loaded from a session with the
+        // assembly default and drop the multi-region variables.  refs #38184
+        boolean sameDb = !IS_CART_VAR_EMPTY(oldDb) && sameString(oldDb, newDatabase);
+
         // this is some magic to use the defaultPosition and reset cart variables
-        if (oldVars)
+        if (oldVars && !sameDb)
             {
             struct hashEl *hel;
             if ((hel = hashLookup(oldVars,"db")) != NULL)
@@ -2593,7 +2902,10 @@ cartDefaultDisconnector(&conn);
 }
 
 void cartWriteCookie(struct cart *cart, char *cookieName)
-/* Write out HTTP Set-Cookie statement for cart. */
+/* Queue the HTTP Set-Cookie statement(s) for the cart.  cgiPrintContentType() writes them,
+ * so this has to run before that does but does not have to be the thing that writes them:
+ * a caller that has already closed the header block loses the cookie rather than printing
+ * a Set-Cookie line into the page body, where it never did anything anyway. */
 {
 char *domain = cfgVal("central.domain");
 if (sameWord("HTTPHOST", domain))
@@ -2622,12 +2934,14 @@ if (sameString(userIdKey,"")) // make sure we do not write any blank cookies.
     }
 else
     {
+    char cookie[1024];
     if (!isEmpty(domain))
-	printf("Set-Cookie: %s=%s; path=/; domain=%s; expires=%s\r\n",
+	safef(cookie, sizeof cookie, "%s=%s; path=/; domain=%s; expires=%s",
 		cookieName, userIdKey, domain, cookieDate());
     else
-	printf("Set-Cookie: %s=%s; path=/; expires=%s\r\n",
+	safef(cookie, sizeof cookie, "%s=%s; path=/; expires=%s",
 		cookieName, userIdKey, cookieDate());
+    cgiAddHttpHeader("Set-Cookie", cookie);
     }
 if (geoMirrorEnabled())
     {
@@ -2636,7 +2950,10 @@ if (geoMirrorEnabled())
     char *redirect = cgiOptionalString("redirect");
     if (redirect)
         {
-        printf("Set-Cookie: redirect=%s; path=/; domain=%s; expires=%s\r\n", redirect, cgiServerName(), cookieDate());
+        char cookie[1024];
+        safef(cookie, sizeof cookie, "redirect=%s; path=/; domain=%s; expires=%s",
+                redirect, cgiServerName(), cookieDate());
+        cgiAddHttpHeader("Set-Cookie", cookie);
         }
     }
 /* Validate login cookies if login is enabled */
@@ -2644,14 +2961,14 @@ if (loginSystemEnabled())
     {
     struct slName *newCookies = loginValidateCookies(cart), *sl;
     for (sl = newCookies;  sl != NULL;  sl = sl->next)
-        printf("Set-Cookie: %s\r\n", sl->name);
+        cgiAddHttpHeader("Set-Cookie", sl->name);
     }
 }
 
 static void cartJsonStart()
 /* Write the necessary headers for Apache */
 {
-puts("Content-Type: application/json\n");
+cgiPrintContentType("application/json");
 }
 
 static void cartJsonEnd(struct jsonWrite *jw)
@@ -2766,32 +3083,27 @@ cartExclude(cart, "verbose");
 return cart;
 }
 
-static void addHttpHeaders()
-/* CGIs can initialize the global variable httpHeaders to control their own HTTP
- * headers. This allows, for example, to prevent web browser caching of hgTracks
- * responses, but implicitly allow web browser caching everywhere else */
-{
-struct slPair *h;
-for (h = httpHeaders; h != NULL; h = h->next)
-    {
-    printf("%s: %s\n", h->name, (char *)h->val);
-    }
-}
-
 void cartWriteHeaderAndCont(struct cart* cart, char *cookieName, char *contType)
-/* write http headers including cookie and content type line. 
- * contType defaults to text/html when NULL. 
+/* write http headers including cookie and content type line.
+ * contType defaults to text/html when NULL.
  * cookieName defaults to hUserCookie() when NULL */
 {
-if (!contType)
-    contType = "text/html";
+/* Nothing can be added to a header block that has already been closed, so there is nothing
+ * useful left to do.  The flows that reach here twice - hgc emitting the header early via
+ * cartAndCookieWithHtml and then webStart asking again - are the common case; the other one
+ * is an early warn() during cartNew, which writes its own header before there is a cart to
+ * take a cookie from.  cartAndCookieWithHtml queues the content policy ahead of that warn
+ * for exactly that reason; the cookie cannot be queued that early and is simply lost. */
+if (cgiDidContentType())
+    return;
 if (!cookieName)
     cookieName = hUserCookie();
 
-addHttpHeaders();
+/* These two queue header lines and cgiPrintContentType writes them, so their order here is
+ * a matter of taste rather than of the wire format. */
+cspWriteResponseHeader();
 cartWriteCookie(cart, cookieName);
-printf("Content-Type: %s\n\n", contType);
-cartDidContentType = TRUE;
+cgiPrintContentType(contType);
 }
 
 struct cart *cartAndCookieWithHtml(char *cookieName, char **exclude,
@@ -2800,13 +3112,18 @@ struct cart *cartAndCookieWithHtml(char *cookieName, char **exclude,
  * and optionally content-type part HTTP preamble to web page.  Don't
  * write any HTML though. */
 {
+/* Queue the content policy before anything can write a header.  An early warn during
+ * cartForSession() below prints the Content-Type line itself, and after that no header
+ * line can be added, so a policy queued only at cartWriteHeaderAndCont() time would be
+ * missing from exactly the pages that report a problem. */
+cspWriteResponseHeader();
 // Note: early abort works fine but early warn does not
 htmlPushEarlyHandlers();
 struct cart *cart = cartForSession(cookieName, exclude, oldVars);
 popWarnHandler();
 popAbortHandler();
 
-if (doContentType && !cartDidContentType)
+if (doContentType)
     cartWriteHeaderAndCont(cart, cookieName, NULL);
 
 return cart;
@@ -2851,11 +3168,7 @@ va_list argscp;
 va_copy(argscp, args);
 if (!initted && !cgiOptionalString("ajax"))
     {
-    if (!cartDidContentType)
-        {
-        puts("Content-Type: text/html\n");
-        cartDidContentType = TRUE;
-        }
+    cgiPrintContentType("text/html");
     htmStart(stdout, "Early Error");
     initted = TRUE;
     }
@@ -2983,8 +3296,10 @@ void setThemeFromCart(struct cart *cart)
  * defined for this theme Also set the "styleTheme", with additional styles
  * that can overwrite the main style settings */
 {
-// Get theme from cart and use it to get background file from config;
-// format is browser.theme.<name>=<stylesheet>[,<background>]
+// Get theme from cart and use it to get the stylesheet from config;
+// format is browser.theme.<name>=<cssFileInStyleDir>, where <name> may carry a
+// sort prefix, browser.theme.3.Sans_Serif=theme-modern.css.  A value of "<>"
+// means "no theme file", leaving whatever browser.style set.
 
 char *cartTheme = cartOptionalString(cart, "theme");
 
@@ -3005,11 +3320,15 @@ if (isNotEmpty(cartTheme))
     char *themeKey = catTwoStrings("browser.theme.", cartTheme);
     styleFile = cfgOption(themeKey);
     freeMem(themeKey);
-    if (isEmpty(styleFile))
+    // "<>" means "default settings" = "no file".  Test styleFile, not the link:
+    // webCssLink returns html or an empty string, never the "<>" marker itself.
+    if (isEmpty(styleFile) || sameString(styleFile, "<>"))
         return;
 
     char * link = webCssLink(styleFile, FALSE); // resource file link wrapped in html
-    if (link != NULL && !sameOk(link, "<>")) // "<>" means "default settings" = "no file"
+    // An empty link means the file was not found.  Leave browser.style alone rather
+    // than overwriting it with nothing.
+    if (isNotEmpty(link))
         {
         htmlSetStyleTheme(link); // for htmshell.c, used by hgTracks
         webSetStyle(link);       // for web.c, used by hgc
@@ -3158,6 +3477,11 @@ if ((val = cartUsualString(cart, speciesUseFile, NULL)) == NULL)
     {
     errAbort("can't find species list file var '%s' in cart\n",speciesUseFile);
     }
+
+/* speciesUseFile names the cart variable, and a trackDb or hub author picks that name, so no
+ * fixed list in the cart can screen this one -- check the value here instead. */
+if (!isServerUserFilePath(val))
+    errAbort("species list file var '%s' does not name a file we made\n", speciesUseFile);
 
 struct lineFile *lf = lineFileOpen(val, TRUE);
 
@@ -3646,7 +3970,10 @@ boolean cartTdbTreeReshapeIfNeeded(struct cart *cart,struct trackDb *tdbContaine
 /* When subtrack vis is set via findTracks, and composite has no cart settings,
    then "shape" composite to match found */
 {
-if (!tdbIsContainer(tdbContainer))
+// Reshaping raises the container to the max of its children and drops child vis that
+// matches.  For a faceted composite the container vis is a ceiling set by the curator,
+// so raising it would silently widen it and the child vis is not ours to drop.
+if (!tdbIsContainer(tdbContainer) || tdbIsFacetedComposite(tdbContainer))
     return FALSE;  // Don't do any shaping
 
 // First look for subtrack level vis
@@ -3848,7 +4175,9 @@ while ((oneName = slPopHead(&changedSettings)) != NULL)
     if (cartRemoveOldFromTdbTree(newCart,oldVars,tdb,suffix,oneName->val,TRUE) > 0)
         clensed++;
     }
-if  (containerVisChanged && !hasViews)
+// Not for faceted composites: there the container vis is only a maximum, so changing it
+// must leave the children's own display modes alone.
+if  (containerVisChanged && !hasViews && !tdbIsFacetedComposite(tdb))
     { // vis is a special additive case!
     char *vis = hStringFromTv(tdbVisLimitedByAncestry(newCart, tdb, FALSE));
     if (cartRemoveOldFromTdbTree(newCart,oldVars,tdb,NULL,vis,TRUE) > 0)

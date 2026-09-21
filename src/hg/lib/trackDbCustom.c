@@ -485,6 +485,15 @@ if (tdb->settingsHash == NULL)
 return hashFindVal(tdb->settingsHash, name);
 }
 
+boolean tdbIsFacetedComposite(struct trackDb *tdb)
+/* Is this a composite whose children are picked from a metadata table rather than a
+ * subgroup matrix?  Unlike other composites, a faceted composite's own visibility is a
+ * maximum for its children rather than a value they inherit. */
+{
+return tdb != NULL && tdbIsComposite(tdb)
+    && sameOk(trackDbLocalSetting(tdb, "compositeTrack"), "faceted");
+}
+
 struct slName *trackDbLocalSettingsWildMatch(struct trackDb *tdb, char *expression)
 // Return local settings that match expression else NULL.  In alpha order.
 {
@@ -734,7 +743,7 @@ else if (sameWord("bigDbSnp", type))
     cType = cfgBigDbSnp;
 else if(startsWith("longTabix", type))
     cType = cfgLong;
-else if (startsWith("netAlign", type)
+else if (startsWith("netAlign", type) || startsWith("bigNet", type)
      || startsWith("net", tdb->track)) // SPECIAL CASE from hgTrackUi which might not be needed
     cType = cfgNetAlign;
 else if(sameWord("bed5FloatScore",       type)
@@ -1052,15 +1061,10 @@ for (tdb = superlessList; tdb != NULL; tdb = next)
 	    errAbort("Track %s lists itself as its own parent", tdb->track);
 	struct trackDb *parent = hashFindVal(trackHash, parentName);
 	if (parent != NULL)
-        {
-        if (trackDbLocalSetting(tdb, "container"))
             {
-            errAbort("Composite track '%s' cannot have child track '%s',"
-                " which is a container  multiWig.", parentName, tdb->track);
+            slAddHead(&parent->subtracks, tdb); // composite/multiWig children are ONLY subtracks
+            tdb->parent = parent;
             }
-        slAddHead(&parent->subtracks, tdb); // composite/multiWig children are ONLY subtracks
-        tdb->parent = parent;
-        }
 	else
 	    {
 	    errAbort("Parent track %s of child %s doesn't exist", parentName, tdb->track);
@@ -1217,6 +1221,31 @@ struct slRef *trackDbListGetRefsToDescendantLeaves(struct trackDb *tdbList)
 {
 struct slRef *refList = NULL;
 rGetRefsToDescendantLeaves(&refList, tdbList);
+slReverse(&refList);
+return refList;
+}
+
+static void rGetRefsToDescendantLeavesOrContainers(struct slRef **pList, struct trackDb *tdbList)
+/* Like rGetRefsToDescendantLeaves, but stop at (and include) container (multiWig) nodes
+ * instead of descending into them.  Still recurses through views and other non-container
+ * intermediate nodes. */
+{
+struct trackDb *tdb;
+for (tdb = tdbList; tdb != NULL; tdb = tdb->next)
+    {
+    if (tdb->subtracks != NULL && trackDbLocalSetting(tdb, "container") == NULL)
+	rGetRefsToDescendantLeavesOrContainers(pList, tdb->subtracks);
+    else
+	refAdd(pList, tdb);   // a leaf, or a container node we stop at
+    }
+}
+
+struct slRef *trackDbListGetRefsToDescendantLeavesOrContainers(struct trackDb *tdbList)
+/* Return reference list of all leaves in forest, plus any container (multiWig) nodes,
+ * not descending into containers. Do slFreeList when done. */
+{
+struct slRef *refList = NULL;
+rGetRefsToDescendantLeavesOrContainers(&refList, tdbList);
 slReverse(&refList);
 return refList;
 }
@@ -1632,6 +1661,14 @@ char *labelAsFilteredNumber(char *label, unsigned numOut)
 {
 char buffer[2048];
 safef(buffer, sizeof buffer, " (%d items filtered out)", numOut);
+return catTwoStrings(label, buffer);
+}
+
+char *labelAsNotLiftedNumber(char *label, unsigned numOut)
+/* add text to label to indicate items were dropped by the lift, not by a filter */
+{
+char buffer[2048];
+safef(buffer, sizeof buffer, " (%d items could not be lifted)", numOut);
 return catTwoStrings(label, buffer);
 }
 

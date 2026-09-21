@@ -24,6 +24,11 @@
 #include "bigLink.h"
 #include "chromAlias.h"
 #include "customTrack.h"
+#include "encode/encodePeak.h"
+#include "psl.h"
+#include "chainToPsl.h"
+#include "pslTransMap.h"
+#include "maf.h"
 
 struct bigBedInterval *quickLiftGetIntervals(char *quickLiftFile, struct bbiFile *bbi,   char *chrom, int start, int end, struct hash **pChainHash)
 /* Return intervals from "other" species that will map to the current window.
@@ -130,10 +135,111 @@ bed->chromStarts = needMem(sizeof(int));
 bed->chromStarts[0] = 0;
 }
 
+static int snapToBlock(struct chain *chain, int pos, boolean forward)
+/* remapRangeList will only place a coordinate that falls inside an aligned block, so a
+ * clipped end has to land on real alignment, not merely inside the chain.  Return pos if
+ * it is already aligned, otherwise the nearest aligned coordinate looking forward (for a
+ * start) or backward (for an end).  Return -1 if there is no such coordinate.
+ * The asymmetry matches remapRangeList: a start needs b->tStart <= start < b->tEnd, so
+ * b->tStart is legal; an end needs b->tStart < end <= b->tEnd, so b->tEnd is legal. */
+{
+struct cBlock *b, *prev = NULL;
+
+for (b = chain->blockList; b != NULL; b = b->next)
+    {
+    if ((b->tStart <= pos) && (pos < b->tEnd))
+        return pos;
+    if (forward && (b->tStart > pos))
+        return b->tStart;
+    if (b->tEnd <= pos)
+        prev = b;
+    }
+
+return (!forward && (prev != NULL)) ? prev->tEnd : -1;
+}
+
+static boolean clipBedToChains(struct hash *chainHash, struct bed *bed)
+/* An item can be far bigger than the region we loaded chains for -- ClinVar has copy
+ * number variants spanning most of a chromosome.  Its ends then sit where no chain
+ * reaches, remapRangeList can place neither of them, and the whole item is dropped even
+ * though the part on screen maps perfectly well.  Pull the ends in to the nearest aligned
+ * base so the visible part can lift.  Return TRUE if the item was clipped. */
+{
+struct chain *chain = liftOverChainForRange(chainHash, bed->chrom,
+                                            bed->chromStart, bed->chromEnd);
+if (chain == NULL)
+    return FALSE;               // nothing covers it, let it fail the way it used to
+
+int newStart = snapToBlock(chain, bed->chromStart, TRUE);
+int newEnd = snapToBlock(chain, bed->chromEnd, FALSE);
+
+if ((newStart < 0) || (newEnd < 0) || (newStart >= newEnd))
+    return FALSE;
+if ((newStart == bed->chromStart) && (newEnd == bed->chromEnd))
+    return FALSE;               // both ends already sit on alignment, nothing to do
+
+/* Trim the blocks to the new range.  Blocks are in ascending order, so walk them and
+ * keep the part that survives; a block entirely outside the range is dropped. */
+if (bed->blockCount > 0)
+    {
+    int i, keep = 0;
+    for (i = 0;  i < bed->blockCount;  ++i)
+        {
+        int bStart = bed->chromStart + bed->chromStarts[i];
+        int bEnd = bStart + bed->blockSizes[i];
+
+        if (bStart < newStart)
+            bStart = newStart;
+        if (bEnd > newEnd)
+            bEnd = newEnd;
+        if (bStart >= bEnd)
+            continue;
+        bed->chromStarts[keep] = bStart - newStart;
+        bed->blockSizes[keep] = bEnd - bStart;
+        keep++;
+        }
+    if (keep == 0)
+        return FALSE;
+    bed->blockCount = keep;
+    }
+
+bed->chromStart = newStart;
+bed->chromEnd = newEnd;
+if (bed->thickStart < newStart)
+    bed->thickStart = newStart;
+if (bed->thickEnd > newEnd)
+    bed->thickEnd = newEnd;
+if (bed->thickStart > bed->thickEnd)
+    bed->thickStart = bed->thickEnd;
+
+return TRUE;
+}
+
+static struct bed *quickLiftBed(struct bbiFile *bbi, struct hash *chainHash, struct bigBedInterval *bb, boolean clip);
+
 struct bed *quickLiftIntervalsToBed(struct bbiFile *bbi, struct hash *chainHash, struct bigBedInterval *bb)
 /* Using chains stored in chainHash, port a bigBedInterval from another assembly to a bed
  * on the reference.
  */
+{
+return quickLiftBed(bbi, chainHash, bb, FALSE);
+}
+
+struct bed *quickLiftIntervalsToBedClip(struct bbiFile *bbi, struct hash *chainHash, struct bigBedInterval *bb)
+/* Like quickLiftIntervalsToBed, but an item too big for the chains we loaded is pulled in
+ * to what they cover rather than dropped.  Callers that need the item's true extent (the
+ * details page) should use quickLiftIntervalsToBed instead. */
+{
+// quickLiftClipToChains=off restores the old behavior, where an item whose ends fall
+// outside the chains we loaded is dropped instead of being pulled in.
+boolean clip = cfgOptionBooleanDefault("quickLiftClipToChains", TRUE);
+
+return quickLiftBed(bbi, chainHash, bb, clip);
+}
+
+static struct bed *quickLiftBed(struct bbiFile *bbi, struct hash *chainHash, struct bigBedInterval *bb, boolean clip)
+/* Port a bigBedInterval to a bed on the reference.  If clip, an item too big for the
+ * chains we loaded is pulled in to what they cover rather than dropped. */
 {
 char startBuf[16], endBuf[16];
 char *bedRow[bbi->fieldCount];
@@ -148,6 +254,9 @@ struct bed *bed = bedLoadN(bedRow, bbi->definedFieldCount);
 char *error;
 if (bbi->definedFieldCount < 12)
     make12(bed);
+
+if (clip)
+    clipBedToChains(chainHash, bed);
 
 if ((error = remapBlockedBed(chainHash, bed, 0.0, 0.1, TRUE, TRUE, NULL, NULL)) == NULL)
     return bed;
@@ -194,17 +303,26 @@ if (geneId)
 return ret;
 }
 
+#define QUICKLIFT_RANGE_PAD 100000
+
 static struct chain *quickLiftLoadChains(char *quickLiftFile, char *chrom, int start, int end)
 /* Load the chains from quickLiftFile that overlap a padded window around the
  * destination range. */
 {
+// A track can name the assembly it came from without naming a chain file, since nothing
+// stops a hub from setting one of the pair and not the other.  With no chains there is
+// nothing to lift, and every caller copes with an empty answer.
+if (quickLiftFile == NULL)
+    return NULL;
+
 // need to add some padding to these coordinates
-int padStart = start - 100000;
+int padStart = start - QUICKLIFT_RANGE_PAD;
 if (padStart < 0)
     padStart = 0;
 
 char *linkFileName = bigChainGetLinkFile(quickLiftFile);
-return chainLoadIdRangeHub(NULL, quickLiftFile, linkFileName, chrom, padStart, end+100000, -1);
+return chainLoadIdRangeHub(NULL, quickLiftFile, linkFileName, chrom, padStart,
+    end + QUICKLIFT_RANGE_PAD, -1);
 }
 
 static void quickLiftChainQueryRange(struct chain *chain, int *retQStart, int *retQEnd)
@@ -236,6 +354,98 @@ if (chain->qStrand == '-')
 *retQEnd = qEnd;
 }
 
+static boolean quickLiftChainRangeIn(struct chain *chain, int tStart, int tEnd,
+    int *retQStart, int *retQEnd)
+/* The query side range matching tStart..tEnd on the target, rather than the whole extent
+ * of the chain's blocks.  One block can be enormous:  hg19 and hg38 run identical for
+ * 12.8Mb on chr7, so the whole-block answer would ask the other assembly for millions of
+ * bases either side of the window.  Within a block the two sides are colinear, so the
+ * part that matters can be worked out exactly.  Returns FALSE if no block overlaps. */
+{
+struct cBlock *cb;
+int qStart = 0, qEnd = 0;
+boolean any = FALSE;
+
+for (cb = chain->blockList; cb != NULL; cb = cb->next)
+    {
+    int s = max(cb->tStart, tStart);
+    int e = min(cb->tEnd, tEnd);
+    if (s >= e)
+        continue;
+
+    int qLo = cb->qStart + (s - cb->tStart);
+    int qHi = cb->qStart + (e - cb->tStart);
+    if (!any || (qLo < qStart))
+        qStart = qLo;
+    if (!any || (qHi > qEnd))
+        qEnd = qHi;
+    any = TRUE;
+    }
+if (!any)
+    return FALSE;
+
+// correct for strand
+if (chain->qStrand == '-')
+    {
+    int saveStart = qStart;
+    qStart = chain->qSize - qEnd;
+    qEnd = chain->qSize - saveStart;
+    }
+*retQStart = qStart;
+*retQEnd = qEnd;
+return TRUE;
+}
+
+struct quickLiftRange *quickLiftSourceRanges(char *quickLiftFile, char *chrom, int start, int end,
+    struct hash *chainHash)
+// The ranges in the other assembly that map into chrom:start-end on the reference.  The
+// chains that do the mapping are added to chainHash, which is the form the lift functions
+// read.  Use this when the items cannot be had from a query quickLiftSql knows how to make.
+{
+struct chain *chain, *chainList = quickLiftLoadChains(quickLiftFile, chrom, start, end);
+struct quickLiftRange *rangeList = NULL;
+
+for(chain = chainList; chain; chain = chain->next)
+    {
+    if (chain->blockList == NULL)
+        continue;
+
+    // pad the window the same way quickLiftLoadChains does, so an item that reaches into
+    // the window from just outside it is still found
+    int qStart, qEnd;
+    int padStart = start - QUICKLIFT_RANGE_PAD;
+    if (padStart < 0)
+        padStart = 0;
+    if (quickLiftChainRangeIn(chain, padStart, end + QUICKLIFT_RANGE_PAD, &qStart, &qEnd))
+        {
+        struct quickLiftRange *range;
+        AllocVar(range);
+        range->chrom = cloneString(chain->qName);
+        range->start = qStart;
+        range->end = qEnd;
+        slAddHead(&rangeList, range);
+        }
+
+    // the query range was read off the chain as it came, so swap only afterwards
+    chainSwap(chain);
+    liftOverAddChainHash(chainHash, chain);
+    }
+slReverse(&rangeList);
+return rangeList;
+}
+
+struct hash *quickLiftChainHash(char *quickLiftFile, char *chrom, int start, int end)
+// Load the quickLift chains covering chrom:start-end on the reference and return them in a
+// hash keyed on the other assembly's sequence names, which is the shape the lift functions
+// want.  Use this when the items were fetched some other way, so quickLiftSql was not the
+// thing that collected the chains.
+{
+struct hash *chainHash = newHash(8);
+
+quickLiftSourceRanges(quickLiftFile, chrom, start, end, chainHash);
+return chainHash;
+}
+
 struct slList *quickLiftSql(struct sqlConnection *conn, char *quickLiftFile, char *table, char *chrom, int start, int end,  char *query, char *extraWhere, ItemLoader2 loader, int numFields,struct hash *chainHash)
 // retrieve items for which we have a loader from a SQL database for which we have a set quickLift chains.
 // Save the chains we used to map the item back to the current reference.
@@ -261,6 +471,13 @@ for(chain = chainList; chain; chain = chain->next)
                          qStart, qEnd, extraWhere, &rowOffset);
     else
         sr = sqlGetResult(conn, query);
+
+    // numFields is what the loader will read, so it is also the least the row can have.
+    // The native loaders check this; without it a table of the wrong type walks off the
+    // end of the row.
+    if ((numFields > 0) && (sqlCountColumns(sr) < numFields + rowOffset))
+        errAbort("table %s in %s has %d columns, need at least %d",
+                 table, sqlGetDatabase(conn), sqlCountColumns(sr), numFields + rowOffset);
 
     while ((row = sqlNextRow(sr)) != NULL)
         {
@@ -343,11 +560,417 @@ for(bed = bedList; bed; bed = nextBed)
 return liftedBedList;
 }
 
+static long pslAlignedBases(struct psl *psl)
+/* Total size of the alignment's blocks, in whatever units the blocks are in. */
+{
+long total = 0;
+int i;
+
+for (i = 0; i < psl->blockCount; i++)
+    total += psl->blockSizes[i];
+return total;
+}
+
+static void quickLiftPslCounts(struct psl *psl, struct psl *lifted)
+/* Put the original match, mismatch, repeat and N counts back on a lifted alignment,
+ * scaled by how much of it survived the lift.  pslTransMap recounts them off the blocks,
+ * which reads every lifted alignment as a perfect match:  the details page then claims
+ * 100% identity and the browser draws every item at full shade. */
+{
+// A protein alignment comes back from the lift in nucleotide space, so its block sizes,
+// and therefore its counts, are in different units than the ones we started with.
+double protMul = (pslIsProtein(psl) && !pslIsProtein(lifted)) ? 3.0 : 1.0;
+long origBases = pslAlignedBases(psl);
+long newBases = pslAlignedBases(lifted);
+
+if ((origBases <= 0) || (newBases <= 0))
+    return;
+
+double survived = newBases / (origBases * protMul);
+if (survived > 1.0)
+    survived = 1.0;
+
+lifted->match = round(psl->match * protMul * survived);
+lifted->misMatch = round(psl->misMatch * protMul * survived);
+lifted->repMatch = round(psl->repMatch * protMul * survived);
+lifted->nCount = round(psl->nCount * protMul * survived);
+}
+
+static struct psl *mapPslForChain(struct hash **pMapPsls, struct chain *chain)
+/* The mapping alignment for one chain, made once and kept.  The chains in a quickLift
+ * chainHash have the other assembly on the target side, which is what remapBlockedBed
+ * wants.  pslTransMap wants it the other way round: query on the other assembly, target
+ * on the reference.
+ * Building this per item costs nothing at gene zoom, where a chain covers a handful of
+ * blocks, and a great deal zoomed out, where the chain covering the window carries
+ * thousands of blocks and an alignment track can have hundreds of thousands of items. */
+{
+char key[32];
+
+if (*pMapPsls == NULL)
+    *pMapPsls = newHash(8);
+safef(key, sizeof key, "%p", chain);
+
+struct psl *mapPsl = hashFindVal(*pMapPsls, key);
+if (mapPsl == NULL)
+    {
+    mapPsl = chainToPsl(chain);
+    pslSwap(mapPsl, FALSE);
+    hashAdd(*pMapPsls, key, mapPsl);
+    }
+return mapPsl;
+}
+
+static boolean quickLiftPslBackToProtein(struct psl *lifted)
+/* pslTransMap puts a protein alignment into nucleotide space to do the mapping and leaves
+ * it there, so the query start, end and size come back three times too large and the base
+ * alignment view refuses the alignment ("size of rna X is 604, has changed since alignment
+ * was performed when it was 1812").  Put the query side back into protein units.  Returns
+ * FALSE, leaving the alignment alone, when the lift split a codon so the query side no
+ * longer divides evenly. */
+{
+int i;
+
+if ((lifted->qStart % 3) || (lifted->qEnd % 3) || (lifted->qSize % 3) ||
+    (lifted->qBaseInsert % 3))
+    return FALSE;
+for (i = 0; i < lifted->blockCount; i++)
+    if ((lifted->blockSizes[i] % 3) || (lifted->qStarts[i] % 3))
+        return FALSE;
+
+// A protein psl always has its query on the forward strand, "++" or "+-".  pslTransMap can
+// hand back strand[0] == '-' (it reverse complements the input when the two alignments
+// disagree about the shared sequence's strand), and "-+" would tell pslShow to reverse
+// complement the protein as though it were DNA.  Turn it over so the minus lands on the
+// target side, where the protein display expects it.
+// pslRc makes the target strand explicit as it turns the alignment over, so the
+// assignment below is the other half of this test, not something to do as well.
+if (lifted->strand[0] == '-')
+    pslRc(lifted);
+else
+    {
+    // A protein psl carries the target strand explicitly, and pslTransMap normalized the
+    // target onto the forward strand on the way out.
+    lifted->strand[1] = '+';
+    lifted->strand[2] = 0;
+    }
+
+lifted->qStart /= 3;
+lifted->qEnd /= 3;
+lifted->qSize /= 3;
+lifted->qBaseInsert /= 3;
+for (i = 0; i < lifted->blockCount; i++)
+    {
+    lifted->blockSizes[i] /= 3;
+    lifted->qStarts[i] /= 3;
+    }
+return TRUE;
+}
+
+struct psl *quickLiftPsl(struct hash *chainHash, struct hash **pMapPsls, struct psl *psl)
+// Map the target side of an alignment from the other assembly onto our current reference.
+// The query side (the mRNA, EST or protein the alignment is to) is left alone.  Returns
+// NULL if the alignment doesn't map.  pMapPsls points at a hash of mapping alignments the
+// caller keeps across a run of items; point it at a NULL hash to start.
+{
+struct chain *chain = liftOverChainForRange(chainHash, psl->tName, psl->tStart, psl->tEnd);
+if (chain == NULL)
+    return NULL;
+
+struct psl *mapPsl = mapPslForChain(pMapPsls, chain);
+
+// pslTransMap aborts when the two alignments disagree about the size of the sequence they
+// share.  That means the chain and the track were built against different versions of the
+// other assembly, so drop the item rather than taking the CGI down with it.
+if (psl->tSize != mapPsl->qSize)
+    return NULL;
+
+struct psl *lifted = pslTransMap(pslTransMapNoOpts, psl, pslTypeUnspecified,
+                                 mapPsl, pslTypeUnspecified);
+if (lifted != NULL)
+    {
+    // before counting, so quickLiftPslCounts sees both sides in the same units
+    if (pslIsProtein(psl))
+        quickLiftPslBackToProtein(lifted);
+    quickLiftPslCounts(psl, lifted);
+    }
+return lifted;
+}
+
+static struct chain *chainFromPsl(struct psl *psl)
+/* The inverse of chainToPsl.  Score and id are the caller's to fill in, since an alignment
+ * does not carry them. */
+{
+struct chain *chain;
+struct cBlock *blockList = NULL, *b;
+int i;
+
+AllocVar(chain);
+chain->tName = cloneString(psl->tName);
+chain->tSize = psl->tSize;
+chain->tStart = psl->tStart;
+chain->tEnd = psl->tEnd;
+chain->qName = cloneString(psl->qName);
+chain->qSize = psl->qSize;
+chain->qStrand = psl->strand[0];
+
+// chainToPsl turns the chain's query bounds the right way up for a psl, so turn them back
+if (chain->qStrand == '-')
+    {
+    chain->qStart = psl->qSize - psl->qEnd;
+    chain->qEnd = psl->qSize - psl->qStart;
+    }
+else
+    {
+    chain->qStart = psl->qStart;
+    chain->qEnd = psl->qEnd;
+    }
+
+for (i = psl->blockCount - 1; i >= 0; i--)
+    {
+    AllocVar(b);
+    b->tStart = psl->tStarts[i];
+    b->tEnd = b->tStart + psl->blockSizes[i];
+    b->qStart = psl->qStarts[i];
+    b->qEnd = b->qStart + psl->blockSizes[i];
+    slAddHead(&blockList, b);
+    }
+chain->blockList = blockList;
+return chain;
+}
+
+struct mafAli *quickLiftMafs(struct hash *chainHash, struct mafAli *mafList,
+    char *sourceDb, char *refSrc, int refSrcSize)
+// Map MAF blocks from the other assembly onto our current reference.
+//
+// A MAF block has to be one contiguous run on its first row, and the lift does not keep
+// the reference contiguous:  where the reference assembly has lost bases the columns for
+// them go away, and where it has gained bases the alignment says nothing about them.  So a
+// block is cut at every chain block boundary.  Inside one chain block the two assemblies
+// run in step, which is what lets the columns be carried over untouched:  only the first
+// row's coordinates change, and mafSubset does the rest of the arithmetic.
+//
+// refSrc is the name the browser expects on the reference row, "<db>.<chrom>", with no hub
+// prefix.  Blocks whose reference does not map are dropped.
+{
+struct mafAli *outList = NULL;
+struct mafAli *maf, *nextMaf;
+
+for (maf = mafList; maf != NULL; maf = nextMaf)
+    {
+    nextMaf = maf->next;
+    maf->next = NULL;
+
+    // The first row of a MAF is its reference, and a reference row is always forward.
+    struct mafComp *ref = maf->components;
+    if ((ref == NULL) || (ref->strand != '+') || (ref->size <= 0))
+        {
+        mafAliFree(&maf);
+        continue;
+        }
+
+    // the chains are keyed on the sequence name in the other assembly
+    // mafSplitSrcGetChrom writes into what it is given, so it needs a copy, and the copy
+    // has to be allocated:  a maf component name comes from a hub and safecpy into a
+    // fixed buffer would abort on a long one rather than truncate.
+    char *srcBuf = cloneString(ref->src);
+    char *srcChrom = mafSplitSrcGetChrom(srcBuf, sourceDb);
+    int refStart = ref->start;
+    int refEnd = refStart + ref->size;
+
+    struct chain *chain = liftOverChainForRange(chainHash, srcChrom, refStart, refEnd);
+    if (chain == NULL)
+        {
+        freeMem(srcBuf);
+        mafAliFree(&maf);
+        continue;
+        }
+
+    struct cBlock *cb;
+    for (cb = chain->blockList; cb != NULL; cb = cb->next)
+        {
+        int runStart = max(cb->tStart, refStart);
+        int runEnd = min(cb->tEnd, refEnd);
+        if (runStart >= runEnd)
+            continue;
+
+        struct mafAli *sub = mafSubset(maf, ref->src, runStart, runEnd);
+        if (sub == NULL)
+            continue;
+
+        int destStart = cb->qStart + (runStart - cb->tStart);
+        if (chain->qStrand == '-')
+            {
+            // The lift turns the block over, so turn every row over with it.  A chain
+            // keeps its query side reverse complemented, so the forward start of the run
+            // comes from the far end of it.
+            mafFlipStrand(sub);
+            destStart = chain->qSize - (cb->qStart + (runEnd - cb->tStart));
+            }
+
+        struct mafComp *subRef = sub->components;
+        freeMem(subRef->src);
+        subRef->src = cloneString(refSrc);
+        subRef->srcSize = refSrcSize;
+        subRef->strand = '+';
+        subRef->start = destStart;
+        slAddHead(&outList, sub);
+        }
+    freeMem(srcBuf);
+    mafAliFree(&maf);
+    }
+slReverse(&outList);
+return outList;
+}
+
+boolean quickLiftIsLifted(struct trackDb *tdb)
+// TRUE when this track's data comes from another assembly and there is enough to lift it.
+// Both halves have to be there:  the chain file that does the lifting and the assembly the
+// data came from.  A hub can set either one on its own, and half the pair is no use.
+{
+return (tdb != NULL) &&
+       (trackDbSetting(tdb, "quickLiftUrl") != NULL) &&
+       (trackDbSetting(tdb, "quickLiftDb") != NULL);
+}
+
+boolean quickLiftIsOwnChainTrack(struct trackDb *tdb)
+// TRUE when this is the chain track quickLift builds to show the lift itself.  That stanza
+// carries quickLiftUrl and quickLiftDb like any lifted track, but its data is already in
+// reference coordinates and must not be lifted a second time.  The giveaway is that its
+// bigDataUrl IS the quickLift chain file.
+{
+char *quickLiftFile = trackDbSetting(tdb, "quickLiftUrl");
+
+if (quickLiftFile == NULL)
+    return FALSE;
+if (startsWithNoCase("bigQuickLiftChain", tdb->type))
+    return TRUE;
+
+char *bigDataUrl = trackDbSetting(tdb, "bigDataUrl");
+return (bigDataUrl != NULL) && sameString(bigDataUrl, quickLiftFile);
+}
+
+struct chain *quickLiftChain(struct hash *chainHash, struct hash **pMapPsls, struct chain *chain)
+// Map a chain's target side from the other assembly onto our current reference.  A chain is
+// an alignment between that assembly and some other species, so this composes the two and
+// leaves a chain between the reference and that species.  The query side is left alone.
+// Returns NULL if the chain doesn't map.  The chain handed in is not modified.
+{
+// chainToPsl copies the header, and every chain loader leaves the header describing the
+// whole chain while loading only the blocks that overlap the range asked for.  Correct it
+// for the conversion, then put it back:  callers still want the whole-chain header, which
+// is what the native details page reports.
+int saveTStart = chain->tStart, saveTEnd = chain->tEnd;
+int saveQStart = chain->qStart, saveQEnd = chain->qEnd;
+struct cBlock *b = chain->blockList;
+
+if (b == NULL)
+    return NULL;
+
+int tStart = b->tStart, tEnd = b->tEnd, qStart = b->qStart, qEnd = b->qEnd;
+for (; b != NULL; b = b->next)
+    {
+    if (b->tStart < tStart)
+        tStart = b->tStart;
+    if (b->tEnd > tEnd)
+        tEnd = b->tEnd;
+    if (b->qStart < qStart)
+        qStart = b->qStart;
+    if (b->qEnd > qEnd)
+        qEnd = b->qEnd;
+    }
+chain->tStart = tStart;
+chain->tEnd = tEnd;
+chain->qStart = qStart;
+chain->qEnd = qEnd;
+
+struct psl *psl = chainToPsl(chain);
+
+chain->tStart = saveTStart;
+chain->tEnd = saveTEnd;
+chain->qStart = saveQStart;
+chain->qEnd = saveQEnd;
+
+struct psl *lifted = quickLiftPsl(chainHash, pMapPsls, psl);
+pslFree(&psl);
+if (lifted == NULL)
+    return NULL;
+
+struct chain *out = chainFromPsl(lifted);
+out->score = chain->score;
+out->id = chain->id;
+pslFree(&lifted);
+return out;
+}
+
+struct psl *quickLiftPsls(struct hash *chainHash, struct psl *pslList)
+// Map a list of alignments in the other assembly's coordinates onto our current reference.
+// Alignments that don't map are dropped.
+{
+struct psl *liftedList = NULL;
+struct psl *psl, *nextPsl;
+struct hash *mapPsls = NULL;
+
+for(psl = pslList; psl; psl = nextPsl)
+    {
+    nextPsl = psl->next;
+    psl->next = NULL;
+
+    struct psl *lifted = quickLiftPsl(chainHash, &mapPsls, psl);
+    if (lifted != NULL)
+        slAddHead(&liftedList, lifted);
+    pslFree(&psl);
+    }
+slReverse(&liftedList);
+return liftedList;
+}
+
+struct encodePeak *quickLiftPeaks(struct encodePeak *peakList, struct hash *chainHash)
+// Map a list of encodePeaks in query coordinates to our current reference.  These can't go
+// through quickLiftBeds:  the thickStart and thickEnd it assigns overlay signalValue and
+// pValue in struct encodePeak.
+{
+struct encodePeak *liftedList = NULL;
+struct encodePeak *nextPeak;
+struct encodePeak *peak;
+for(peak = peakList; peak; peak = nextPeak)
+    {
+    nextPeak = peak->next;
+    peak->next = NULL;
+
+    char *error = liftOverRemapRange(chainHash, 0.0, peak->chrom, peak->chromStart, peak->chromEnd,
+                            peak->strand[0],
+                            0.001, &peak->chrom, (int *)&peak->chromStart, (int *)&peak->chromEnd,
+                            &peak->strand[0]);
+
+    if (error == NULL)
+        slAddHead(&liftedList, peak);
+    }
+return liftedList;
+}
+
 boolean quickLiftEnabled(struct cart *cart)
 /* Return TRUE if feature is available */
 {
 char *cfgEnabled = cartOrCfgOption(cart, "browser.quickLift");
 return cfgEnabled && (sameString(cfgEnabled, "on") || sameString(cfgEnabled, "true")) ;
+}
+
+boolean quickLiftAlignmentsEnabled(struct cart *cart)
+/* Return TRUE if quickLift is allowed to lift alignment tracks: psl, bigPsl, chain,
+ * bigChain, maf, bigMaf and wigMaf.  Off unless hg.conf says
+ * browser.quickLiftAlignments=on, and a cart variable of the same name overrides that so
+ * one machine can show both answers.  The hg.conf half is read with a literal
+ * cfgOptionBooleanDefault rather than cartOrCfgOption because harvestHgConf.py only sees
+ * the cfgOption* accessors, which is why browser.quickLift itself is missing from the
+ * hg.conf catalog. */
+{
+char *cartEnabled = cartOptionalString(cart, "browser.quickLiftAlignments");
+
+if (cartEnabled != NULL)
+    return sameString(cartEnabled, "on") || sameString(cartEnabled, "true") ||
+           sameString(cartEnabled, "yes");
+return cfgOptionBooleanDefault("browser.quickLiftAlignments", FALSE);
 }
 
 static int hrCmp(const void *va, const void *vb)

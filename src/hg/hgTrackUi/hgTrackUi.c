@@ -14,6 +14,7 @@
 #include "hdb.h"
 #include "hCommon.h"
 #include "hui.h"
+#include "hVarSubst.h"
 #include "fileUi.h"
 #include "ldUi.h"
 #include "snpUi.h"
@@ -2293,7 +2294,7 @@ jsInline(
 "    box.val('pack');\n"
 "}\n");
 printf("<input name='%s' id='%s' size=\"%d\" value=\"%s\" type=\"TEXT\">",
-    oligoMatchVar, oligoMatchVar, 45, oligo);
+    oligoMatchVar, oligoMatchVar, 45, htmlEncode(oligo));   // cart value, encode it
 puts("<br>Examples: TATAWAAR, AAAAA");
 jsOnEventById("input", oligoMatchVar, "packTrack();");
 
@@ -2319,7 +2320,7 @@ jsInline(
 "    box.val('full');\n"
 "}\n");
 printf("<input name='%s' id='%s' size=\"%d\" value=\"%s\" type=\"TEXT\">",
-    gcOnFlyWindowSize, gcOnFlySizeVar, 15, winSize);
+    gcOnFlyWindowSize, gcOnFlySizeVar, 15, htmlEncode(winSize));   // cart value, encode it
 jsOnEventById("input", gcOnFlySizeVar, "fullTrack();");
 puts("<P>UCSC standard window size is 5 bases.  Adjust size as desired.</P>");
 /* Add standard wiggle graph controls (height, scale, graph type, smoothing, etc.) */
@@ -2828,9 +2829,17 @@ for (childRef = superTdb->children; childRef != NULL; childRef = childRef->next)
     struct trackDb *tdb = childRef->val;
     if (childRef == superTdb->children) // first time through
         {
-        printf("<TR style='border-bottom: none'><TD style='margin-bottom:10px' NOWRAP colspan=2>\n");
+        printf("<TR style='border-bottom: none'><TD style='padding-bottom:8px' NOWRAP colspan=2>\n");
 
-        printf("<b>Apply visibility: </b>\n");
+        // Hide/show everything with a single click, the two most common cases
+        printf("<button type='button' id='superVizHideAllButton'>Hide all tracks</button>\n");
+	jsOnEventById("click", "superVizHideAllButton", "superUiSetAllTracks('hide')");
+
+        printf("<button type='button' style='margin-left: 10px' id='superVizShowAllButton'>"
+               "Show all tracks</button>\n");
+	jsOnEventById("click", "superVizShowAllButton", "superUiSetAllTracks('pack')");
+
+        printf("<span style='margin-left: 20px'><b>Apply visibility: </b></span>\n");
         printf("<select id='superSubViz' class='normalText'>\n");
         printf("<option value='hide'>Hide</option>");
         printf("<option value='dense'>Dense</option>");
@@ -2839,17 +2848,14 @@ for (childRef = superTdb->children; childRef != NULL; childRef = childRef->next)
         printf("<option value='full'>Full</option>\n");
         printf("</select>\n");
 
-        printInfoIcon("The 'Apply to all visible tracks' button sets the visibility selected in this dropdown on all tracks below that are not hidden.<br>"
+        printInfoIcon("The 'Show all tracks' button sets all tracks below to pack, except for those "
+                      "that do not support it, e.g. signal tracks, which are set to full.<br>"
 		      "The 'Apply to all tracks' button sets the visibility selected in this dropdown on all tracks below, including hidden ones.");
 
-        // First button: set all selectors that are not on 'hide' to the current value of the top select 
-        printf("<button type='button' id='superVizApplyButton'>Apply to all visible tracks</button>\n");
-	jsOnEventById("click", "superVizApplyButton", "superUiSetAllTracks(true)");
-
-        // Second button: set all selectors to the current value of the top select
-        printf("<button type='button' style='margin-left: 10px' id='superVizApplyAllButton'>Apply to all tracks</button>&nbsp;\n");
+        // set all selectors to the current value of the top select
+        printf("<button type='button' id='superVizApplyAllButton'>Apply to all tracks</button>&nbsp;\n");
 	jsOnEventById("click", "superVizApplyAllButton", "superUiSetAllTracks()");
-        
+
         printf("</TD></TR>\n");
         }
     printf("<TR><TD NOWRAP>");
@@ -3055,6 +3061,11 @@ for (int i = 0; i < n_datatypes; i++)
     slPairAdd(&list, name, cloneString(title));
     }
 freeMem(tdbDataTypes);
+// slPairAdd() prepends, so the list is backwards from the trackDb setting at
+// this point.  The order is what the javascript renders the data type
+// checkboxes in, and what cartDump.c uses to order a sample's subtracks, so it
+// has to match the order the track was written in.
+slReverse(&list);
 return list;
 }
 
@@ -3112,7 +3123,32 @@ const char *metaDataId = tdb->track;
 const int metaDataIdLen = strlen(metaDataId);
 
 printf(pageStyle);       // css
-printf(placeholderDiv);  // placholder
+
+compositeHideEmptySubtracksUi(cart, tdb);
+
+// --- Composite-level filters ---
+// Faceted composites skip hCompositeUi(), so we're doing our own filters setup.
+// The section is named "bedFilters" rather than "filters" because the JS builds
+// its own "#filters" div for the metadata facets.
+if (bedHasFilters(tdb))
+    {
+    puts("<div class='bedFiltersWrap'>");
+    puts("<style>#bedFilters-1 > td > br:first-of-type, "
+         "#bedFilters-1 > td > p:empty { display:none; }</style>");
+    puts("<table>");  // required by jsBeginCollapsibleSection*, which emits a <TR>
+    jsBeginCollapsibleSectionFontSize(cart, tdb->track, "bedFilters", "Data filters",
+                                      FALSE, "medium");
+    printf("<p class='smallText' style='margin-top:0'>These filters apply to every "
+           "subtrack in this container. ");
+    printInfoIcon("A filter set on an individual subtrack's own configuration page "
+                  "overrides the value here, for that subtrack only.");
+    puts("</p>");
+    scoreCfgUi(database, cart, tdb, tdb->track, NULL, 1000, /*boxed=*/FALSE);
+    jsEndCollapsibleSection();
+    puts("</table></div>");
+    }
+
+printf(placeholderDiv);
 
 // start by figuring out what's on by default and hasn't been overridden
 struct hash *defaultOn = hashNew(0);
@@ -3270,6 +3306,10 @@ else
 jsonWriteListEnd(jw);
 
 jsonWriteString(jw, "mdid", (char *)metaDataId);
+// The javascript keys its saved UI state (facets, page length, dragged row
+// order) on the assembly plus the metadata id, so two assemblies using the
+// same track name do not share one entry in localStorage.
+jsonWriteString(jw, "db", database);
 jsonWriteString(jw, "primaryKey", (char *)primaryKey);  // must exist
 if (maxCheckboxes) // only if present in trackDb.settings entry
     jsonWriteString(jw, "maxCheckboxes", (char *)maxCheckboxes);
@@ -3280,6 +3320,46 @@ jsonWriteString(jw, "track", tdb->track);
 char *defaultSortField = trackDbSetting(tdb, "defaultSortField");
 if (isNotEmpty(defaultSortField))
     jsonWriteString(jw, "defaultSortField", defaultSortField);
+// How the user last sorted the faceted table, if they have.  This overrides
+// defaultSortField in the javascript, which is the only side that can act on it -
+// turning field names into column positions needs the metadata file.  The value
+// comes back from the cart, so it's untrusted, and this JSON lands inside a
+// <script> block: only pass through the characters "field=+ field2=-" needs.
+char facetSortVar[1024];
+safef(facetSortVar, sizeof(facetSortVar), "%s.facetSortOrder", metaDataId);
+char *facetSortOrder = cartOptionalString(cart, facetSortVar);
+if (isNotEmpty(facetSortOrder))
+    {
+    boolean clean = TRUE;
+    char *c = facetSortOrder;
+    for ( ; *c != '\0'; c++)
+        {
+        if (!isalnum((unsigned char)*c) && *c != '_' && *c != '.' && *c != '-'
+            && *c != '+' && *c != '=' && *c != ' ')
+            {
+            clean = FALSE;
+            break;
+            }
+        }
+    if (clean)
+        jsonWriteString(jw, "facetSortOrder", facetSortOrder);
+    }
+// Whether a sample's subtracks are kept together in the image, or all the
+// subtracks of one data type are.  Only meaningful with data types, since
+// without them a sample is a single track.  The cart value wins over the
+// trackDb default; both are checked against the two words we accept, so
+// nothing unvalidated reaches the <script> block.
+if (hasDataTypes)
+    {
+    char groupByVar[1024];
+    safef(groupByVar, sizeof(groupByVar), "%s.groupBy", metaDataId);
+    char *groupBy = cartOptionalString(cart, groupByVar);
+    if (isEmpty(groupBy))
+        groupBy = trackDbSetting(tdb, "defaultGroupBy");
+    if (isNotEmpty(groupBy)
+        && (sameString(groupBy, "sample") || sameString(groupBy, "dataType")))
+        jsonWriteString(jw, "groupBy", groupBy);
+    }
 if (isNotEmpty(subtrackUrls))
     {
     struct slPair *pairs = slPairListFromString((char *)subtrackUrls, TRUE);
@@ -3306,10 +3386,14 @@ jsonWriteFree(&jw);
 
 jsIncludeFile("dataTables-2.2.2.min.js", NULL);
 jsIncludeFile("dataTables.select-3.0.0.min.js", NULL);
+// RowReorder 1.5.1 is the last release for the DataTables 2.x line; 2.0.0
+// requires DataTables 3.
+jsIncludeFile("dataTables.rowReorder-1.5.1.min.js", NULL);
 jsIncludeFile("facetedComposite.js", NULL);
 
 webIncludeResourceFile("dataTables-2.2.2.min.css");
 webIncludeResourceFile("dataTables.select-3.0.0.min.css");
+webIncludeResourceFile("dataTables.rowReorder-1.5.1.min.css");
 webIncludeResourceFile("facetedComposite.css");
 
 
@@ -3396,7 +3480,7 @@ boolean isGencode3 = trackDbSettingOn(tdb, "isGencode3");
 // 4) special cases falling through the cracks but based upon type
 if (tdbIsSuperTrack(tdb))
     superTrackUi(tdb, tdbList);
-else if (tdbIsComposite(tdb) && sameOk(trackDbLocalSetting(tdb, "compositeTrack"), "faceted"))
+else if (tdbIsFacetedComposite(tdb))
     facetedCompositeUi(tdb);
 else if (sameString(track, "stsMap"))
     stsMapUi(tdb);
@@ -3597,7 +3681,7 @@ if (!ajax) // ajax asks for a simple cfg dialog for right-click popup or hgTrack
     // It'd be nice to handle faceted composites as a separate container type, but practically so much
     // of the display features we want are identical to composites - it's easier to special case the UI.
     if (tdbIsComposite(tdb) && !isLogo) // for the moment generalizing this to include other containers...
-        if (!sameOk(trackDbLocalSetting(tdb, "compositeTrack"), "faceted")) // but not faceted containers ...
+        if (!tdbIsFacetedComposite(tdb)) // but not faceted containers ...
             hCompositeUi(db, cart, tdb, NULL, NULL, MAIN_FORM);
 
     // Additional special case navigation links may be added
@@ -3661,11 +3745,14 @@ printf("<b>Configure track container: "
             database, chromosome, cgiEncode(tdbParent->track), tdbParent->longLabel);
 printf("<p>");
 
-if (tdbIsComposite(tdb) && sameOk(trackDbLocalSetting(tdb, "compositeTrack"), "faceted"))
+if (tdbIsFacetedComposite(tdb))
     return;
 
 if (tdbParent->html)
     {
+    // the excerpt below is the container's own description page, so it needs the same
+    // substitution the track's page gets further down
+    hVarSubstTrackDbHtml(tdbParent, database);
     // collapsed panel for Description
     printf("<p><table>");  // required by jsCollapsible
     jsBeginCollapsibleSectionFontSize(cart, tdb->track, "superDescription", "Description", FALSE,
@@ -3787,6 +3874,8 @@ if (ajax && cartOptionalString(cart, "descriptionOnly"))
     char *liftDb = cloneString(trackDbSetting(tdb, "quickLiftDb"));
     if (liftDb)
         tdb->html = getTrackHtml(liftDb, tdb->table);
+    // a hub's description page has not been substituted yet
+    hVarSubstTrackDbHtml(tdb, database);
     //struct trackDb *tdbParent = tdbFillInAncestry(cartString(cart, "db"),tdb);
     if (tdb->html != NULL && tdb->html[0] != 0)
         {
@@ -3801,6 +3890,7 @@ if (ajax && cartOptionalString(cart, "descriptionOnly"))
             ; // Get the first parent that has html
         if (tdbParent != NULL && tdbParent->html != NULL && tdbParent->html[0])
             {
+            hVarSubstTrackDbHtml(tdbParent, database);
             printf("<h2 style='color:%s'>Retrieved from %s Track...</h2>\n",
                    COLOR_DARKGREEN,tdbParent->shortLabel);
             printRelatedTracks(database,trackHash,tdb,cart);
@@ -3884,8 +3974,21 @@ else
         printf("<A HREF='/ENCODE/index.html'><IMG style='vertical-align:middle;' "
                "width=100 src='/images/ENCODE_scaleup_logo.png'><A>");
     // set large title font size, but less so for long labels to minimize wrap
+    // longLabel can come from a track hub (user-supplied), escape before echoing
     printf("<B style='font-size:%d%%;'>%s%s</B>\n", strlen(tdb->longLabel) > 30 ? 133 : 200,
-                tdb->longLabel, tdbIsSuper(tdb) ? " tracks" : "");
+                htmlEncode(tdb->longLabel), tdbIsSuper(tdb) ? " tracks" : "");
+
+    // Add a description link if there is one.  Only for faceted composites for now.
+    if (isNotEmpty(tdb->html) && tdbIsFacetedComposite(tdb))
+        {
+        char *downArrow = "&dArr;";
+        enum browserType browser = cgiBrowser();
+        if (browser == btIE || browser == btFF)
+            downArrow = "&darr;";
+        printf("&nbsp;&nbsp;(<A HREF='#TRACK_HTML' TITLE='Jump to description section of page'>"
+               "Description%s</A>)", downArrow);
+        }
+
     }
 
 
@@ -3916,8 +4019,10 @@ if (!ajax)
     // incoming links from Google searches can go directly to a composite child trackUi page: tell users 
     // that they're inside a container now and can go back up the hierarchy
     if (tdbGetComposite(tdb)) {
-        printf("<p>This track is a subtrack of the composite container track \"%s\".<br>", tdb->parent->shortLabel);
-        printf("<a href='hgTrackUi?db=%s&c=%s&g=%s'>Click here</a> to display the \"%s\" container configuration page.", database, chromosome, tdb->parent->track, tdb->parent->shortLabel);
+        // shortLabel comes from trackDb, which a track hub controls, escape
+        printf("<p>This track is part of the track container \"%s\".<br>",
+               htmlEncode(tdb->parent->shortLabel));
+        printf("<a href='hgTrackUi?db=%s&c=%s&g=%s'>Click here</a> to display the \"%s\" container configuration page.", database, chromosome, tdb->parent->track, htmlEncode(tdb->parent->shortLabel));
     }
 
     }
@@ -3945,8 +4050,16 @@ else if (sameString(tdb->type, "hic"))
 if (!tdbIsDownloadsOnly(tdb))
     {
     /* Display visibility menu */
-    if (tdbIsComposite(tdb) && multViewCount(tdb) > 0)
+    boolean isFaceted = tdbIsFacetedComposite(tdb);
+    if (tdbIsComposite(tdb) && (multViewCount(tdb) > 0 || isFaceted))
+        {
         printf("<B>Maximum&nbsp;display&nbsp;mode:&nbsp;</B>");
+        if (isFaceted)
+            printInfoIcon("This is the most detailed display mode any track in this "
+                          "container may use. Tracks that ask for a less detailed mode of "
+                          "their own will keep it, and changing this maximum does not "
+                          "discard those settings.");
+        }
     else if (tdbIsSuper(tdb))
         {
         printf("<B>Show or hide this container and all tracks:&nbsp;</B>");
@@ -3987,6 +4100,19 @@ if (!tdbIsDownloadsOnly(tdb))
         else
             hTvDropDownClassVisOnlyAndExtra(tdb->track,vis,canPack,"normalText visDD",
                                             trackDbSetting(tdb, "onlyVisibility"),NULL);
+
+        // A faceted composite caps its children, so say so rather than quietly clamping.
+        // NOTE: no shortLabel in the mouseover - printInfoIcon doesn't escape its text.
+        if (tdbIsContainerChild(tdb) && tdbIsFacetedComposite(tdb->parent))
+            {
+            enum trackVisibility maxVis = tdbVisLimitedByAncestors(cart, tdb->parent,
+                                                                   FALSE, TRUE);
+            char note[512];
+            safef(note, sizeof(note), "The parent container is currently set to a maximum "
+                  "display mode of '%s', so this track will display at no more than that.",
+                  hStringFromTv(maxVis));
+            printInfoIcon(note);
+            }
         }
 
     if (!ajax)
@@ -4107,20 +4233,6 @@ if (!tdbIsSuper(tdb) && !tdbIsDownloadsOnly(tdb) && !ajax)
             }
         printf("&nbsp;</span>");
         }
-    else if (tdbIsComposite(tdb) && sameOk(trackDbLocalSetting(tdb, "compositeTrack"), "faceted"))
-        {
-        char *downArrow = "&dArr;";
-        enum browserType browser = cgiBrowser();
-        if (browser == btIE || browser == btFF)
-            downArrow = "&darr;";
-        if (isNotEmpty(tdb->html))
-            {
-            printf("\n&nbsp;&nbsp;<span id='navDown' style='float:right; display:none;'>");
-            printf("&nbsp;&nbsp;<A HREF='#TRACK_HTML' TITLE='Jump to description section of page'>"
-                   "Description%s</A>", downArrow);
-            printf("&nbsp;</span>");
-            }
-        }
     }
 if (!tdbIsSuperTrack(tdb) && !tdbIsComposite(tdb))
     puts("<BR>");
@@ -4195,6 +4307,8 @@ char *liftDb = cloneString(trackDbSetting(tdb, "quickLiftDb"));
 // quickLiftChain has static html
 if (liftDb && differentString(trackHubSkipHubName(tdb->track), "quickLiftChain"))
     tdb->html = getTrackHtml(liftDb, tdb->table);
+// a hub's description page has not been substituted yet
+hVarSubstTrackDbHtml(tdb, database);
 if (tdb->html != NULL && tdb->html[0] != 0)
     {
     char *browserVersion;
@@ -4304,7 +4418,8 @@ return newTrack;
 }
 
 /* Setting names whose file contents are safe to serve via hgFetch.
- * Only admin-configured (native track) values are checked -- never hub or custom tracks.
+ * Only admin-configured values are checked -- native tracks and curated hubs,
+ * never user hubs or custom tracks.
  * Do NOT add bigDataUrl or bigDataIndex here -- those may be restricted (we
  * might change this later to instead respect the tableBrowser setting in trackDb). */
 static char *fetchableSettings[] = {"metaDataUrl", "colorSettingsUrl", NULL};
@@ -4332,6 +4447,28 @@ for (p = fetchableSettings; *p != NULL; p++)
 return FALSE;
 }
 
+static boolean trackIsFromCuratedHub(char *db, char *track,
+                                     struct hubConnectStatus *hubStatusList)
+/* Check if a hub track comes from the curated hub that dbDb names for this assembly.
+ * A curated hub such as hs1 keeps its data outside the hub.txt directory, so
+ * fileUrlMatchesHub rejects it, but its trackDb is admin-configured and as
+ * trustworthy as a native track's.  A user hub attached to the same assembly is
+ * not, hence the match against the one hub dbDb names. */
+{
+char *curatedUrl = NULL;
+if (!hubConnectGetCuratedUrl(trackHubSkipHubName(db), &curatedUrl) || isEmpty(curatedUrl))
+    return FALSE;
+curatedUrl = hReplaceGbdb(curatedUrl);
+unsigned hubId = hubIdFromTrackName(track);
+struct hubConnectStatus *hubStatus;
+for (hubStatus = hubStatusList; hubStatus != NULL; hubStatus = hubStatus->next)
+    {
+    if (hubStatus->id == hubId)
+        return sameString(hubStatus->hubUrl, curatedUrl);
+    }
+return FALSE;
+}
+
 void handleFileFetch(struct cart *cart)
 /* Checks if a requested file is a legal request based on an attached cart or
  * native track.  If so, retrieves the file content via UDC and retransmits
@@ -4350,33 +4487,30 @@ freeMem(urlClone);
 boolean matchFound = FALSE;
 
 // Check if fileUrl falls under a connected hub's base directory
-struct slName *hubIds = hubConnectHubsInCart(cart);
-struct slName *thisHubId = hubIds;
-while (thisHubId != NULL)
+struct hubConnectStatus *hubStatusList = hubConnectStatusListFromCartAll(cart);
+struct hubConnectStatus *hubStatus = hubStatusList;
+while (hubStatus != NULL)
     {
-    struct hubConnectStatus *hubStatus = hubFromIdNoAbort(sqlUnsigned(thisHubId->name));
-    if (hubStatus != NULL)
+    if (isEmpty(hubStatus->errorMessage) && fileUrlMatchesHub(fileUrl, hubStatus))
         {
-        if (isEmpty(hubStatus->errorMessage) && fileUrlMatchesHub(fileUrl, hubStatus))
-            {
-            matchFound = TRUE;
-            break;
-            }
+        matchFound = TRUE;
+        break;
         }
-    thisHubId = thisHubId->next;
+    hubStatus = hubStatus->next;
     }
 
-// For native database tracks (not hub or custom tracks), check if fileUrl matches
-// a whitelisted trackDb setting.  Only native tracks are checked here because their
-// settings are admin-configured and trusted.  Hub and custom track settings are
-// user-controlled and could be used for SSRF attacks.
+// For native database tracks and curated hub tracks, check if fileUrl matches a
+// whitelisted trackDb setting.  Only these are checked here because their settings are
+// admin-configured and trusted.  User hub and custom track settings are user-controlled
+// and could be used for SSRF attacks.
 if (!matchFound)
     {
     char *track = cartOptionalString(cart, "track");
     char *sourceDb = cartOptionalString(cart, "sourceDb"); // for future quickLift use
     if (sourceDb == NULL)
         sourceDb = database;
-    if (track != NULL && !isHubTrack(track) && !isCustomTrack(track))
+    if (track != NULL && !isCustomTrack(track) &&
+        (!isHubTrack(track) || trackIsFromCuratedHub(sourceDb, track, hubStatusList)))
         {
         struct trackDb *tdb = tdbForTrack(sourceDb, track, NULL);
         if (tdb != NULL)
@@ -4401,7 +4535,7 @@ struct udcFile *udc = udcFileMayOpen(fileUrl, NULL);
 if (udc == NULL)
     {
     puts("Status: 404 Not Found");
-    puts("Content-Type: text/plain\n");
+    cgiPrintContentType("text/plain");
     printf("Error: could not open %s\n", fileUrl);
     freeMem(fileUrl);
     return;
@@ -4430,7 +4564,7 @@ if (isNotEmpty(ifNone))
         }
     }
 
-puts("Content-Type: text/plain\n");
+cgiPrintContentType("text/plain");
 char *content = udcFileReadAll(fileUrl, NULL, 0, NULL);
 puts(content);
 freeMem(content);
@@ -4485,7 +4619,15 @@ if (issueBotWarning)
     }
 
 cart = theCart;
-track = cartString(cart, "g");
+/* The track name is not kept in the cart, so it has to come with the request.  Without it
+ * there is no page to draw, and saying so beats the bare hash lookup failure that a
+ * hand-edited or truncated URL used to produce.  A missing parameter is bad input rather
+ * than a program error, so hUserAbort, which keeps it out of the stack dumps. */
+track = cartOptionalString(cart, "g");
+if (isEmpty(track))
+    hUserAbort("This page's address does not include a track name.  Add the track name to the "
+               "address with the g parameter, e.g. hgTrackUi?db=hg38&g=knownGene, or open a "
+               "track's settings from the Genome Browser.");
 getDbAndGenome(cart, &database, &ignored, NULL);
 initGenbankTableNames(database);
 chromosome = cartUsualString(cart, "c", hDefaultChrom(database));
@@ -4609,7 +4751,6 @@ if (isDup)
     tdb = dupTdbFrom(tdb, dup);
     }
 
-
 if(cartOptionalString(cart, "ajax"))
     {
     // html is going to be used w/n a dialog in hgTracks.js so serve up stripped down html
@@ -4621,26 +4762,29 @@ if(cartOptionalString(cart, "ajax"))
     }
 else
     {
-    char title[1000];
+    // htmlNoEscape() below lets the <span> through, so the labels themselves have to be
+    // escaped here - they come from trackDb, which a track hub controls
+    struct dyString *title = dyStringNew(0);
     if (tdb->parent)
         {
-        safef(title, sizeof title, 
+        dyStringPrintf(title,
                         // TODO: replace in-line styling with class
                 "<span style='background-color: #c3d4f4; "
                     "padding-left: 10px; padding-right: 10px;"
                     "margin-right: 10px; margin-left: -8px;'>"
                        "%s</span> %s", 
-                tdb->parent->shortLabel, tdb->shortLabel);
+                htmlEncode(tdb->parent->shortLabel), htmlEncode(tdb->shortLabel));
         }
     else
-        safef(title, sizeof title, "%s", tdb->shortLabel);
+        dyStringPrintf(title, "%s", htmlEncode(tdb->shortLabel));
     char *titleEnd = (tdbIsSuper(tdb) ? "Tracks" :
                tdbIsDownloadsOnly(tdb) ? DOWNLOADS_ONLY_TITLE : "Track Settings");
     htmlNoEscape();     // allow HTML tags to format title blue bar (using short label)
-    cartWebStart(cart, database, "%s %s", title, titleEnd);
+    cartWebStart(cart, database, "%s %s", title->string, titleEnd);
     htmlDoEscape();
     trackUi(tdb, tdbList, ct, FALSE);
     printf("<BR>\n");
+    jsFixUpPageLinks();
     jsonPrintGlobals();
     webEnd();
     }

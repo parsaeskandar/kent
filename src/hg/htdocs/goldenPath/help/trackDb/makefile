@@ -10,7 +10,7 @@ TDOC_DIR=goldenPath/help/trackDb/
 # when hub spec is versioned, increment version (e.g. change v0 to v1 (or v0a)), 
 #   checkin new file (e.g. trackDbHub.v1.html), and add to file list
 
-CURRENT_HUB_SPEC=v2
+CURRENT_HUB_SPEC=v3
 
 HUB_SPEC_FILES= trackDbHub.v0.html \
 		trackDbHub.v1.html \
@@ -35,6 +35,12 @@ install:
 
 
 
+# trackDbSettings.yaml and .json are generated from trackDbLibrary.shtml and
+# trackDbHub.v3.html, and checked in, so doInstall only copies the json. Needs PyYAML
+# and BeautifulSoup.
+settings:
+	python3 trackDbSettingsGen.py --import --json
+
 doInstall:
 	echo ${CURRENT_HUB_SPEC}
 	cp ${CPFLAGS} trackDbLibrary.shtml ${DEST}
@@ -43,4 +49,5 @@ doInstall:
 	cp ${CPFLAGS} trackDbDoc.html ${DEST}
 	cp ${CPFLAGS} trackDbHub.html ${DEST}
 	cp ${CPFLAGS} changes.html ${DEST}
+	cp ${CPFLAGS} trackDbSettings.json ${DEST}
 	cp ${CPFLAGS} ${HUB_SPEC_FILES} ${DEST}

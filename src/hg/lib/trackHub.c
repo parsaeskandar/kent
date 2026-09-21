@@ -27,6 +27,7 @@
 #include "filePath.h"
 #include "htmlPage.h"
 #include "trackDb.h"
+#include "htmlSanitize.h"
 #include "trackHub.h"
 #include "errCatch.h"
 #include "hgBam.h"
@@ -58,6 +59,7 @@
 #include "hgConfig.h"
 #include "cartTrackDb.h"
 #include "quickLift.h"
+#include "portable.h"
 
 #ifdef USE_HAL
 #include "halBlockViz.h"
@@ -407,10 +409,15 @@ else
 }
 
 struct chromInfo *trackHubMaybeChromInfo(char *database, char *chrom)
-/* Return a chromInfo structure for just this chrom in this database. 
+/* Return a chromInfo structure for just this chrom in this database.  The database
+ * may be decorated with a hub_<id>_ prefix or undecorated.
  * Return NULL if chrom doesn't exist. */
 {
-struct trackHubGenome *genome = trackHubGetGenome(database);
+struct trackHubGenome *genome = NULL;
+if (hubAssemblyHash != NULL)
+    genome = trackHubGetGenome(database);
+if (genome == NULL)
+    genome = trackHubGetGenomeUndecorated(trackHubSkipHubName(database));
 if (genome == NULL)
     return NULL;
 
@@ -518,6 +525,18 @@ if ((str = hashFindVal(hash, name)) == NULL)
 return str;
 }
 
+static void checkHubIdName(char *type, char *name)
+/* Abort if name holds a character that is not valid in an identifier.  A hub
+ * identifier - a genome name, a group name - is printed into dozens of URLs,
+ * form values and attributes all over the CGIs, so the check belongs here rather than at every
+ * one of those places.  Real names use letters, digits, underscore, dot and dash. */
+{
+if (strchr(name, '<') || strchr(name, '>') || strchr(name, '"')
+    || strchr(name, '\'') || strchr(name, '&'))
+    errAbort("Bad %s name: \"%s\". The characters < > \" ' and & are not allowed in a %s name.",
+             type, name, type);
+}
+
 struct grp *readGroupRa(char *groupFileName)
 /* Read in the ra file that describes the groups in an assembly hub. */
 {
@@ -534,6 +553,7 @@ while ((ra = raNextRecord(lf)) != NULL)
     slAddHead(&list, grp);
 
     grp->name = cloneString(getRequiredGrpSetting(ra, "name", lf));
+    checkHubIdName("group", grp->name);
     grp->label = cloneString(getRequiredGrpSetting(ra, "label", lf));
 
     grp->priority = BIGDOUBLE;
@@ -692,6 +712,7 @@ while ((ra = raNextRecord(lf)) != NULL)
         badGenomeStanza(lf);
     if (hasWhiteSpace(genome))
         errAbort("Bad genome name: \"%s\". Only alpha-numeric characters and \"_\" are allowed ([A-Za-z0-9_]).", genome);
+    checkHubIdName("genome", genome);
     if (hashLookup(hash, genome) != NULL)
         errAbort("Duplicate genome %s in stanza ending line %d of %s",
 		genome, lf->lineIx, lf->fileName);
@@ -978,6 +999,13 @@ if (!trackDbSetting(tdb, BAR_CHART_CATEGORY_URL) && !trackDbSetting(tdb, BAR_CHA
     errAbort("BarChart track '%s' is missing either %s or %s setting. Please add one of those settings to the appropriate stanza", tdb->track, BAR_CHART_CATEGORY_LABELS, BAR_CHART_CATEGORY_URL);
 }
 
+boolean trackHubBigNetEnabled()
+/* Return TRUE if the bigNet track type is turned on.  Off unless hg.conf says
+ * bigNet=on.  Everything that accepts or advertises the type asks this. */
+{
+return cfgOptionBooleanDefault("bigNet", FALSE);
+}
+
 static void validateOneTrack( struct trackHub *hub, 
     struct trackHubGenome *genome, struct trackDb *tdb)
 /* Validate a track's trackDb entry. */
@@ -1039,6 +1067,7 @@ else
                   startsWithWord("bigGenePred", type) ||
                   startsWithWord("bigNarrowPeak", type) ||
                   startsWithWord("bigChain", type) ||
+                  (startsWithWord("bigNet", type) && trackHubBigNetEnabled()) ||
                   startsWithWord("bigLolly", type) ||
                   startsWithWord("bigBaseView", type) ||
                   startsWithWord("bigRmsk", type) ||
@@ -1294,13 +1323,13 @@ for (tdb = tdbList; tdb != NULL; tdb = tdb->next)
     }
 }
 
-void trackHubAddOneDescription(char *trackDbFile, struct trackDb *tdb)
-/* Fetch tdb->track's html description and store in tdb->html. */
+static char *trackHubDescriptionText(char *trackDbFile, struct trackDb *tdb)
+/* Fetch the text of tdb->track's html description page, or NULL if it has none. */
 {
 /* html setting should always be set because we set it at load time */
 char *htmlName = trackDbSetting(tdb, "html");
 if (htmlName == NULL)
-    return;
+    return NULL;
 
 char *simpleName = hubConnectSkipHubPrefix(htmlName);
 char *url = trackHubRelativeUrl(trackDbFile, simpleName);
@@ -1311,8 +1340,31 @@ if (!endsWith(url, ".html"))
     safef(buffer, sizeof buffer, "%s.html", url);
     fixedUrl = buffer;
     }
-tdb->html = udcFileReadAllIfExists(fixedUrl, NULL, 0, NULL);
+char *html = udcFileReadAllIfExists(fixedUrl, NULL, 0, NULL);
 freez(&url);
+return html;
+}
+
+void trackHubAddOneDescription(char *trackDbFile, struct trackDb *tdb)
+/* Fetch tdb->track's html description and store in tdb->html. */
+{
+char *html = trackHubDescriptionText(trackDbFile, tdb);
+if (html == NULL)
+    return;                     /* no page of its own, so leave any it inherited alone */
+tdb->html = htmlSanitize(html);
+freeMem(html);
+}
+
+struct slName *trackHubDescriptionRemovals(char *trackDbFile, struct trackDb *tdb)
+/* Return a list of messages naming the parts of tdb's description page that we do not
+ * print, or NULL if we print all of it. */
+{
+char *html = trackHubDescriptionText(trackDbFile, tdb);
+struct slName *removed = NULL;
+char *clean = htmlSanitizeReport(html, &removed);
+freeMem(html);
+freeMem(clean);
+return removed;
 }
 
 void trackHubAddDescription(char *trackDbFile, struct trackDb *tdb)
@@ -1452,16 +1504,16 @@ return TRUE;
 void hubCheckBigDataUrl(struct trackHub *hub, struct trackHubGenome *genome, struct trackDb *tdb)
 /* Check remote file exists and is of correct type. Wrap this in error catcher */
 {
-char *relativeUrl = trackDbSetting(tdb, "bigDataUrl");
-if (relativeUrl != NULL)
+/* trackHubTracksForGenome() has already run expandBigDataUrl() on this tdb, so
+ * bigDataUrl and bigDataIndex are no longer relative to genome->trackDbFile and must
+ * be used as they are.  Resolving them a second time here prepended the hub directory
+ * twice whenever a local hub was reached by a relative path, so that
+ * "hubCheck out/hub.txt" looked for out/out/hg19/x.bb and reported it missing. */
+char *bigDataUrl = trackDbSetting(tdb, "bigDataUrl");
+if (bigDataUrl != NULL)
     {
     char *type = trackDbRequiredSetting(tdb, "type");
-    char *bigDataUrl = trackHubRelativeUrl(genome->trackDbFile, relativeUrl);
-
-    char *bigDataIndex = NULL;
-    char *relIdxUrl = trackDbSetting(tdb, "bigDataIndex");
-    if (relIdxUrl != NULL)
-        bigDataIndex = trackHubRelativeUrl(genome->trackDbFile, relIdxUrl);
+    char *bigDataIndex = trackDbSetting(tdb, "bigDataIndex");
 
     verbose(2, "checking %s.%s type %s at %s\n", genome->name, tdb->track, type, bigDataUrl);
     if (startsWithWord("bigWig", type))
@@ -1472,7 +1524,8 @@ if (relativeUrl != NULL)
         }
     else if (startsWithWord("bigNarrowPeak", type) || startsWithWord("bigBed", type) ||
              startsWithWord("bigGenePred", type)  || startsWithWord("bigPsl", type)||
-             startsWithWord("bigChain", type)|| startsWithWord("bigMaf", type) ||
+             startsWithWord("bigChain", type)|| startsWithWord("bigNet", type) ||
+             startsWithWord("bigMaf", type) ||
              startsWithWord("bigBarChart", type) || startsWithWord("bigInteract", type) ||
              startsWithWord("bigLolly", type) || startsWithWord("bigRmsk",type) ||
              startsWithWord("bigMethyl", type))
@@ -1537,19 +1590,18 @@ if (relativeUrl != NULL)
         }
     else
         errAbort("unrecognized type %s in genome %s track %s", type, genome->name, tdb->track);
-    freez(&bigDataUrl);
     }
 }
 
-static void outHubHeader(FILE *f, char *db)
+static void outHubHeader(struct dyString *dy, char *db)
 // output a track hub header
 {
-fprintf(f,"hub quickLiftHub%s\n\
+dyStringPrintf(dy,"hub quickLiftHub%s\n\
 shortLabel QuickLift from %s\n\
 longLabel QuickLift from %s\n\
 useOneFile on\n\
 email genome-www@soe.ucsc.edu\n\n", db, db, db);
-fprintf(f,"genome %s\n\n", db);
+dyStringPrintf(dy,"genome %s\n\n", db);
 }
 
 static char *getHubName(struct cart *cart, char *db)
@@ -1596,30 +1648,16 @@ int len = (sp != NULL) ? (sp - s) : (int)strlen(s);
 return cloneStringZ(s, len);
 }
 
-boolean quickLiftHubRemoveTrack(struct cart *cart, char *sourceDb, char *trackName)
-/* Remove a track stanza from the quickLift hub file for sourceDb, along with
- * any descendant stanzas (transitively) whose parent is being removed.
- * Returns TRUE if at least one stanza was removed. */
+static struct quickLiftStanza *readStanzas(struct lineFile *lf, struct dyString *header)
+/* Read track stanzas out of a quickLift hub file, or out of a string of freshly
+ * generated stanzas.  Everything ahead of the first track line goes into header.
+ * A container is many stanzas here, one per track line, not a single block. */
 {
-char buffer[4096];
-safef(buffer, sizeof buffer, "%s-%s", quickLiftCartName, sourceDb);
-char *filename = cartOptionalString(cart, buffer);
-if (filename == NULL)
-    return FALSE;
-
-struct lineFile *lf = lineFileMayOpen(filename, TRUE);
-if (lf == NULL)
-    return FALSE;
-
-char *bareName = trackHubSkipHubName(trackName);
-struct dyString *header = dyStringNew(0);
 struct quickLiftStanza *stanzaList = NULL;
 struct quickLiftStanza *cur = NULL;
 char *line;
 int lineSize;
 
-/* Pass 1: read the file into a header + list of stanzas, recording each
- * stanza's name and (if any) parent. */
 while (lineFileNext(lf, &line, &lineSize))
     {
     char *trim = skipLeadingSpaces(line);
@@ -1641,6 +1679,43 @@ while (lineFileNext(lf, &line, &lineSize))
     dyStringAppendC(target, '\n');
     }
 slReverse(&stanzaList);
+return stanzaList;
+}
+
+static void freeStanzas(struct quickLiftStanza **pList)
+/* Free a list of stanzas. */
+{
+struct quickLiftStanza *s;
+for (s = *pList; s != NULL; s = s->next)
+    {
+    dyStringFree(&s->text);
+    freeMem(s->name);
+    freeMem(s->parent);
+    }
+slFreeList(pList);
+}
+
+boolean quickLiftHubRemoveTrack(struct cart *cart, char *sourceDb, char *trackName)
+/* Remove a track stanza from the quickLift hub file for sourceDb, along with
+ * any descendant stanzas (transitively) whose parent is being removed.
+ * Returns TRUE if at least one stanza was removed. */
+{
+char buffer[4096];
+safef(buffer, sizeof buffer, "%s-%s", quickLiftCartName, sourceDb);
+char *filename = cartOptionalString(cart, buffer);
+if (filename == NULL || !isServerUserFilePath(filename))
+    return FALSE;
+
+struct lineFile *lf = lineFileMayOpen(filename, TRUE);
+if (lf == NULL)
+    return FALSE;
+
+char *bareName = trackHubSkipHubName(trackName);
+struct dyString *header = dyStringNew(0);
+
+/* Pass 1: read the file into a header + list of stanzas, recording each
+ * stanza's name and (if any) parent. */
+struct quickLiftStanza *stanzaList = readStanzas(lf, header);
 lineFileClose(&lf);
 
 /* Build a removal set: start with the named track, then iterate adding any
@@ -1689,13 +1764,7 @@ if (removedAny)
 dyStringFree(&header);
 dyStringFree(&out);
 hashFree(&removeSet);
-for (s = stanzaList; s != NULL; s = s->next)
-    {
-    dyStringFree(&s->text);
-    freeMem(s->name);
-    freeMem(s->parent);
-    }
-slFreeList(&stanzaList);
+freeStanzas(&stanzaList);
 return removedAny;
 }
 
@@ -1863,6 +1932,12 @@ dyStringPrintf(dy, "track %s\nquickLifted on\n", track);
 
 if (tdbIsSuperTrack(tdb))
     {
+    // dumpTdbAndChildren walks the settings below, and the source container carries its
+    // own superTrack setting, which is "on hide" whenever the user has not opened it.
+    // That line would land after this one and win, hiding the container and every track
+    // we just lifted into it.  Drop it, the way walkTree drops the copy the children
+    // inherit.
+    hashRemove(tdb->settingsHash, "superTrack");
     dyStringPrintf(dy, "superTrack on show\n");
     }
 
@@ -1874,21 +1949,44 @@ dumpTdbAndChildren(cart, dy, tdb);
 return dy;
 }
 
-static boolean validateOneTdb(char *db, struct trackDb *tdb, struct trackDb **badList)
+static boolean isAlignmentType(char *type)
+/* The alignment types quickLift can lift.  These are newer than the rest of quickLift and
+ * are gated in hg.conf, so quickLiftAlignmentsEnabled decides whether one may enter the
+ * hub.  This is the only door:  quickLiftUrl and quickLiftDb, the pair every lift path
+ * keys off, are written by the quickLift hub writer and by nothing else. */
+{
+// trackDb types are matched without regard to case since that's how the rest of the
+// browser reads them (some trackDb stanzas say "bigbed" rather than "bigBed").
+return startsWithNoCase("bigPsl", type) ||
+       startsWithNoCase("bigChain", type) ||
+       startsWithNoCase("bigMaf", type) ||
+       startsWithNoCase("wigMaf", type) ||
+       sameWord("chain", type) ||
+       startsWithNoCase("chain ", type) ||
+       sameWord("psl", type) ||
+       startsWithNoCase("psl ", type);
+}
+
+static boolean validateOneTdb(struct cart *cart, char *db, struct trackDb *tdb, struct trackDb **badList)
 /* Make sure the tdb is a track type we grok.  badList may be NULL to validate
  * silently (no user-facing complaint about non-liftable types). */
 {
+// trackDb types are matched without regard to case since that's how the rest of the
+// browser reads them (some trackDb stanzas say "bigbed" rather than "bigBed").
 if (sameString("cytoBandIdeo", trackHubSkipHubName(tdb->track)) ||
-    !( startsWith("bigBed", tdb->type) || \
-       startsWith("bigWig", tdb->type) || \
-       startsWith("bigDbSnp", tdb->type) || \
-       startsWith("bigGenePred", tdb->type) || \
-       startsWith("gvf", tdb->type) || \
-       startsWith("genePred", tdb->type) || \
-       startsWith("narrowPeak", tdb->type) || \
-       startsWith("bigLolly", tdb->type) || \
-       sameString("bed", tdb->type) ||
-       startsWith("bed ", tdb->type)))
+    !( startsWithNoCase("bigBed", tdb->type) || \
+       startsWithNoCase("bigWig", tdb->type) || \
+       startsWithNoCase("bigDbSnp", tdb->type) || \
+       startsWithNoCase("bigGenePred", tdb->type) || \
+       startsWithNoCase("gvf", tdb->type) || \
+       startsWithNoCase("genePred", tdb->type) || \
+       startsWithNoCase("narrowPeak", tdb->type) || \
+       startsWithNoCase("broadPeak", tdb->type) || \
+       startsWithNoCase("bigLolly", tdb->type) || \
+       (startsWithNoCase("bigNet", tdb->type) && trackHubBigNetEnabled()) || \
+       (isAlignmentType(tdb->type) && quickLiftAlignmentsEnabled(cart)) || \
+       sameWord("bed", tdb->type) ||
+       startsWithNoCase("bed ", tdb->type)))
     {
     if (badList != NULL)
         slAddHead(badList, tdb);
@@ -1896,8 +1994,12 @@ if (sameString("cytoBandIdeo", trackHubSkipHubName(tdb->track)) ||
     }
 
 // make sure we have a bigDataUrl
-if (startsWith("bigBed", tdb->type) || \
-       startsWith("bigWig", tdb->type))
+if (startsWithNoCase("bigBed", tdb->type) || \
+       startsWithNoCase("bigNet", tdb->type) || \
+       startsWithNoCase("bigPsl", tdb->type) || \
+       startsWithNoCase("bigChain", tdb->type) || \
+       startsWithNoCase("bigMaf", tdb->type) || \
+       startsWithNoCase("bigWig", tdb->type))
     {
     char *fileName = cloneString(trackDbSetting(tdb, "bigDataUrl"));
 
@@ -1944,7 +2046,7 @@ else
         boolean visible = isParentVisible(cart, tdb) && isSubtrackVisible(cart, tdb);
         // Lift all siblings of a visible subtrack, but only complain about
         // non-liftable ones the user actually asked for (visible ones).
-        if (validateOneTdb(db, tdb, visible ? badList : NULL))
+        if (validateOneTdb(cart, db, tdb, visible ? badList : NULL))
             {
             slAddHead(&validTdbs, tdb);
             if (visible)
@@ -1971,19 +2073,20 @@ if (tdb->subtracks)
     return TRUE;
     }
 
-return validateOneTdb(db, tdb, badList);
+return validateOneTdb(cart, db, tdb, badList);
 }
 
-static void outTrack(FILE *f, struct cart *cart, struct trackDb *tdb, unsigned priority)
+static void outTrack(struct dyString *out, struct cart *cart, struct trackDb *tdb, double priority)
 /* Set priority and output track to hub. */
 {
 char buffer[1024];
 
-safef(buffer, sizeof buffer, "%d", priority);
+safef(buffer, sizeof buffer, "%g", priority);
 hashReplace(tdb->settingsHash, "priority", cloneString(buffer));
 
 struct dyString *dy = trackDbString(cart, tdb);
-fprintf(f, "%s\n", dy->string);
+dyStringPrintf(out, "%s\n", dy->string);
+dyStringFree(&dy);
 }
 
 static boolean checkCartVisibility(struct cart *cart, struct trackDb *tdb)
@@ -2002,24 +2105,33 @@ return trackDbSetting(tdb, "quickLiftUrl") != NULL ||
        trackDbSetting(tdb, "quickLifted") != NULL;
 }
 
-static void walkTree(FILE *f, char *db, struct cart *cart,  struct trackDb *tdb, struct dyString *visDy, struct trackDb **badList, struct hash *existingTracks, unsigned startPriority)
+static void walkTree(struct dyString *out, char *db, struct cart *cart,  struct trackDb *tdb, struct trackDb **badList)
 /* walk tree looking for visible tracks to output to hub.  Skip tracks that already
- * came from a quickLift hub, and skip tracks whose name is already present in
- * the existing hub file. */
+ * came from a quickLift hub.  Every visible track is written, whether or not it is
+ * already in the hub file: the caller merges these stanzas over the old ones, so a
+ * track that was lifted before gets its current state rather than the one it had
+ * when it was first lifted. */
 {
-unsigned priority = startPriority;
 struct hash *haveSuper = newHash(0);
 struct trackDb *tdbNext = NULL;
+
+// The priority written to the hub is the track's rank in the source list, which the
+// caller has sorted on group priority and then track priority.  The rank has to count
+// every track we walk past, not just the ones we output: tracks accumulate in the hub
+// file across requests, so the number a track gets must depend only on how the source
+// is laid out, never on which request it happened to be added in.
+//
+// The source priority itself will not do.  All lifted tracks land in one group on the
+// target (trackHubAddGroupName rewrites the group of every hub track), so a priority
+// that only orders within a source group is being compared across groups.
+double rank = 0;
 
 for(; tdb; tdb = tdbNext)
     {
     tdbNext = tdb->next;
+    rank += 1;
 
     if (isFromQuickLiftHub(tdb))
-        continue;
-
-    if (existingTracks != NULL &&
-        hashLookup(existingTracks, trackHubSkipHubName(tdb->track)) != NULL)
         continue;
 
     boolean isVisible =  FALSE;
@@ -2032,13 +2144,10 @@ for(; tdb; tdb = tdbNext)
             {
             //if (checkCartVisibility(cart, tdb->parent))
                 {
-                char *bareParent = trackHubSkipHubName(tdb->parent->track);
-                if (existingTracks == NULL ||
-                    hashLookup(existingTracks, bareParent) == NULL)
-                    {
-                    tdb->parent->visibility = hTvFromString("tvShow");
-                    outTrack(f, cart, tdb->parent, priority++);
-                    }
+                tdb->parent->visibility = hTvFromString("tvShow");
+                // a superTrack is not in the list we are walking, so it has no rank
+                // of its own.  Slot it just above the first child that brought it in.
+                outTrack(out, cart, tdb->parent, rank - 0.5);
                 hashStore(haveSuper, tdb->parent->track);
                 }
             }
@@ -2058,45 +2167,86 @@ for(; tdb; tdb = tdbNext)
             hashReplace(tdb->settingsHash, "longLabel", trackDbSetting(tdb, "description"));
             }
 
-        outTrack(f, cart, tdb, priority++);
+        outTrack(out, cart, tdb, rank);
         }
     }
 }
 
-static void readExistingHubTracks(char *filename, struct hash *trackNames, unsigned *retMaxPriority)
-/* Scan an existing quickLift hub file and populate trackNames with the set of
- * track names already present.  Also returns the highest priority value seen
- * (0 if the file has no track stanzas yet) so new tracks can be appended after
- * existing ones. */
+static void writeMergedHubFile(char *filename, char *db, struct dyString *newContent)
+/* Write the hub file from the stanzas we just generated plus whatever was already
+ * in the file.  A generated stanza replaces the old stanza of the same track, in
+ * the slot the old one held, so the file keeps parents ahead of their children.
+ * A track in the file that we did not generate this time is kept as it was, so
+ * tracks still accumulate across lifts in one session. */
 {
-unsigned maxPriority = 0;
+struct dyString *header = dyStringNew(0);
+struct quickLiftStanza *oldList = NULL;
 struct lineFile *lf = lineFileMayOpen(filename, TRUE);
 if (lf != NULL)
     {
-    char *line;
-    while (lineFileNextReal(lf, &line))
-        {
-        if (startsWithWord("track", line))
-            {
-            char *name = skipLeadingSpaces(line + 5);
-            if (isNotEmpty(name))
-                hashStoreName(trackNames, cloneString(firstWordInLine(name)));
-            }
-        else if (startsWithWord("priority", line))
-            {
-            char *val = skipLeadingSpaces(line + 8);
-            if (isNotEmpty(val))
-                {
-                unsigned p = sqlUnsigned(firstWordInLine(val));
-                if (p > maxPriority)
-                    maxPriority = p;
-                }
-            }
-        }
+    oldList = readStanzas(lf, header);
     lineFileClose(&lf);
     }
-if (retMaxPriority != NULL)
-    *retMaxPriority = maxPriority;
+
+/* The generated stanzas have no header of their own; scratch collects nothing. */
+struct dyString *scratch = dyStringNew(0);
+lf = lineFileOnString("quickLift stanzas", TRUE, cloneString(newContent->string));
+struct quickLiftStanza *newList = readStanzas(lf, scratch);
+lineFileClose(&lf);
+
+struct hash *newByName = newHash(8);
+struct quickLiftStanza *s;
+for (s = newList; s != NULL; s = s->next)
+    {
+    if ((s->name != NULL) && (hashLookup(newByName, s->name) == NULL))
+        hashAdd(newByName, s->name, s);
+    }
+
+struct dyString *out = dyStringNew(0);
+if (isEmpty(header->string))
+    outHubHeader(out, trackHubSkipHubName(db));
+else
+    dyStringAppend(out, header->string);
+
+struct hash *written = newHash(8);
+for (s = oldList; s != NULL; s = s->next)
+    {
+    struct quickLiftStanza *fresh = (s->name == NULL) ? NULL : hashFindVal(newByName, s->name);
+    if (fresh == NULL)
+        dyStringAppend(out, s->text->string);
+    else if (hashLookup(written, fresh->name) == NULL)
+        {
+        dyStringAppend(out, fresh->text->string);
+        hashStore(written, fresh->name);
+        }
+    }
+
+for (s = newList; s != NULL; s = s->next)
+    {
+    if ((s->name != NULL) && (hashLookup(written, s->name) != NULL))
+        continue;
+    dyStringAppend(out, s->text->string);
+    if (s->name != NULL)
+        hashStore(written, s->name);
+    }
+
+/* Write a temporary file and rename it into place.  The target assembly reads this
+ * same file, and rewriting it in place would show a reader a truncated hub. */
+char tmpName[PATH_LEN];
+safef(tmpName, sizeof tmpName, "%s.tmp", filename);
+FILE *f = mustOpen(tmpName, "w");
+fputs(out->string, f);
+carefulClose(&f);
+chmod(tmpName, 0666);
+mustRename(tmpName, filename);
+
+dyStringFree(&out);
+dyStringFree(&header);
+dyStringFree(&scratch);
+hashFree(&newByName);
+hashFree(&written);
+freeStanzas(&oldList);
+freeStanzas(&newList);
 }
 
 static int cmpPriority(const void *va, const void *vb)
@@ -2118,11 +2268,12 @@ else
    return 1;
 }
 
-char *trackHubBuild(char *db, struct cart *cart, struct dyString *visDy, struct trackDb **badList)
+char *trackHubBuild(char *db, struct cart *cart, struct trackDb **badList)
 /* Build a track hub using trackDb and the cart.  If a hub file already exists
- * for db (i.e. earlier quickLift work in the same session), append new track
- * stanzas to it instead of overwriting, and skip tracks that are already in
- * the file. */
+ * for db (i.e. earlier quickLift work in the same session), merge the new track
+ * stanzas into it: a track that is being lifted again gets the state it has now,
+ * and a track that is in the file but is not visible on the source any more is
+ * left alone. */
 {
 struct  trackDb *tdbList, *tdb;
 struct grp *grpList;
@@ -2142,18 +2293,10 @@ slSort(&tdbList, cmpPriority);
 
 char *filename = getHubName(cart, db);
 
-struct hash *existingTracks = newHash(8);
-unsigned maxPriority = 0;
-readExistingHubTracks(filename, existingTracks, &maxPriority);
-boolean hubExists = (hashNumEntries(existingTracks) > 0);
-
-FILE *f = mustOpen(filename, hubExists ? "a" : "w");
-chmod(filename, 0666);
-if (!hubExists)
-    outHubHeader(f, trackHubSkipHubName(db));
-
-walkTree(f, db, cart, tdbList, visDy, badList, existingTracks, maxPriority + 1);
-fclose(f);
+struct dyString *newContent = dyStringNew(0);
+walkTree(newContent, db, cart, tdbList, badList);
+writeMergedHubFile(filename, db, newContent);
+dyStringFree(&newContent);
 
 return cloneString(filename);
 }

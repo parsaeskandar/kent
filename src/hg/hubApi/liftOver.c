@@ -145,7 +145,7 @@ if (chainListCount == 0 && isNotEmpty(fromDb) && isNotEmpty(toDb))
     char *ottoTable = cfgOption("ottoTable");
     if (isNotEmpty(ottoTable))
         {
-        struct sqlConnection *ottoConn = hConnectOtto();
+        struct sqlConnection *ottoConn = hConnectCentral();
         if (sqlTableExists(ottoConn, ottoTable))
             {
             struct dyString *pq = newDyString(0);
@@ -165,12 +165,57 @@ if (chainListCount == 0 && isNotEmpty(fromDb) && isNotEmpty(toDb))
                 }
             sqlFreeResult(&sr);
             }
-        hDisconnectOtto(&ottoConn);
+        hDisconnectCentral(&ottoConn);
         }
     }
 
 apiFinishOutput(0, NULL, jw);
 hDisconnectCentral(&conn);
+}
+
+static boolean fetchGbMembersFromCentral(char *userName, char **retEmail, char **retRealName)
+/* Relay to genome.ucsc.edu's own loginStatus endpoint to get email/realName
+ * for userName, forwarding this request's Cookie header so genome.ucsc.edu
+ * authenticates the same session.  Used on ucsc.edu hosts that lack SQL
+ * grants on hgcentral.gbMembers.  Returns FALSE on any failure. */
+{
+char *cookieHeader = getenv("HTTP_COOKIE");
+if (isEmpty(cookieHeader))
+    return FALSE;
+
+struct dyString *reqHeader = dyStringNew(0);
+dyStringPrintf(reqHeader, "Cookie: %s\r\n", cookieHeader);
+char *url = "https://genome.ucsc.edu/cgi-bin/hubApi/liftOver/loginStatus";
+int sd = netOpenHttpExt(url, "GET", reqHeader->string);
+dyStringFree(&reqHeader);
+if (sd < 0)
+    return FALSE;
+
+char *redirectedUrl = NULL;
+if (!netSkipHttpHeaderLinesWithRedirect(sd, url, &redirectedUrl))
+    {
+    close(sd);
+    return FALSE;
+    }
+
+struct dyString *body = netSlurpFile(sd);
+close(sd);
+
+boolean ok = FALSE;
+struct errCatch *errCatch = errCatchNew();
+if (errCatchStart(errCatch))
+    {
+    struct jsonElement *json = jsonParse(body->string);
+    char *email = jsonStringField(json, "email");
+    char *realName = jsonStringField(json, "realName");
+    *retEmail = cloneString(email ? email : "");
+    *retRealName = cloneString(realName ? realName : "");
+    ok = TRUE;
+    }
+errCatchEnd(errCatch);
+errCatchFree(&errCatch);
+dyStringFree(&body);
+return ok;
 }
 
 static void loginStatus()
@@ -190,27 +235,32 @@ else
 if (userName != NULL)
     {
     // Get both email and realName from gbMembers table
-    struct sqlConnection *sc = NULL;
-    if (privateHost)
-	sc = hConnectCentral();
-    else
-	sc = hConnectOtto();
-    struct dyString *query = sqlDyStringCreate("select email, realName from gbMembers where userName = '%s'", userName);
-    struct sqlResult *sr = sqlGetResult(sc, dyStringCannibalize(&query));
-    char **row = sqlNextRow(sr);
-
     char *email = NULL;
     char *realName = NULL;
-    if (row != NULL)
+
+    if (inUcscEduDomain() && !onGenomeRRMachine())
         {
-        email = cloneString(row[0] ? row[0] : "");
-        realName = cloneString(row[1] ? row[1] : "");
+        // dev sandboxes, hgwbeta, etc: no local grants on gbMembers,
+        // relay to genome.ucsc.edu instead
+        if (!fetchGbMembersFromCentral(userName, &email, &realName))
+            warn("loginStatus: failed to fetch email/realName from genome.ucsc.edu relay for user '%s'", userName);
         }
-    sqlFreeResult(&sr);
-    if (privateHost)
-	hDisconnectCentral(&sc);
     else
-	hDisconnectOtto(&sc);
+        {
+        // RR machines, and anything entirely outside ucsc.edu: unchanged
+        struct sqlConnection *sc = hConnectCentral();
+        struct dyString *query = sqlDyStringCreate("select email, realName from gbMembers where userName = '%s'", userName);
+        struct sqlResult *sr = sqlGetResult(sc, dyStringCannibalize(&query));
+        char **row = sqlNextRow(sr);
+
+        if (row != NULL)
+            {
+            email = cloneString(row[0] ? row[0] : "");
+            realName = cloneString(row[1] ? row[1] : "");
+            }
+        sqlFreeResult(&sr);
+        hDisconnectCentral(&sc);
+        }
 
     // Build logout URL with returnto parameter
     char *returnTo = cgiOptionalString("returnTo");
@@ -376,7 +426,7 @@ unsigned uEnd = 0;
 uStart = sqlUnsigned(start);
 uEnd = sqlUnsigned(end);
 if (uEnd < uStart)
-    apiErrAbort(err400, err400Msg, "given start coordinate %u is greater than given end coordinate", uStart, uEnd);
+    apiErrAbort(err400, err400Msg, "given start coordinate %u is greater than given end coordinate %u", uStart, uEnd);
 
 struct dbDb *fromDb = hDbDb(fromGenome);
 if (fromDb == NULL)
@@ -445,74 +495,44 @@ if (toDb == NULL)
     {
     toDb = genarkLiftOverDb(toGenome);
     }
-if ( (fromDb == NULL) || (fromDb == NULL) )
+if ( (fromDb == NULL) || (toDb == NULL) )
     {
     if ( (fromDb == NULL) && (toDb == NULL) )
 	    apiErrAbort(err400, err400Msg, "can not find either 'fromGenome=%s' or 'toGenome=%s' for endpoint '/liftOver", fromGenome, toGenome);
         else
-	    apiErrAbort(err400, err400Msg, "can not find 'fromoGenome=%s' for endpoint '/liftOver", fromGenome);
-    if (toDb == NULL)
-        apiErrAbort(err400, err400Msg, "can not find 'toGenome=%s' for endpoint '/liftOver", toGenome);
+	    {
+	    if (fromDb == NULL)
+		apiErrAbort(err400, err400Msg, "can not find 'fromoGenome=%s' for endpoint '/liftOver", fromGenome);
+	    else
+		apiErrAbort(err400, err400Msg, "can not find 'toGenome=%s' for endpoint '/liftOver", toGenome);
+	    }
     }
 
-/* duplicate-row guard: any existing row in ottoRequest for this pair
- * (either direction, any status) blocks resubmission.  The form's JS
- * already shows a "pending" panel for this case via the listExisting
- * endpoint; this is the backstop for clients that bypass the form. */
-{
-char *dupOttoTable = cfgOption("ottoTable");
-if (isNotEmpty(dupOttoTable))
-    {
-    struct sqlConnection *conn = hConnectOtto();
-    if (sqlTableExists(conn, dupOttoTable))
-        {
-        struct dyString *dq = newDyString(0);
-        sqlDyStringPrintf(dq,
-            "SELECT COUNT(*) FROM %s WHERE requestType='liftOver' AND "
-            "((fromDb='%s' AND toDb='%s') OR (fromDb='%s' AND toDb='%s'))",
-            dupOttoTable, fromGenome, toGenome, toGenome, fromGenome);
-        int dupCount = sqlQuickNum(conn, dyStringCannibalize(&dq));
-        hDisconnectOtto(&conn);
-        if (dupCount > 0)
-            apiErrAbort(err409, err409Msg,
-                "A request for %s <-> %s has already been submitted "
-                "and is on record.  Duplicates are not accepted.",
-                fromGenome, toGenome);
-        }
-    else
-        hDisconnectOtto(&conn);
-    }
-}
+/* Record the request in the ottoRequest table: duplicate-row guard, daily
+ * rate-limit guard, then an atomic insert.  Done locally (this host has
+ * hgcentral write grants) or relayed to genome.ucsc.edu (it doesn't) --
+ * see inUcscEduDomain()/onGenomeRRMachine(). */
+char *ottoStatus;
+if (inUcscEduDomain() && !onGenomeRRMachine())
+    ottoStatus = relaySubmitOttoRequest("liftOver", fromGenome, toGenome, email, comment);
+else
+    ottoStatus = submitOttoRequest("liftOver", fromGenome, toGenome, email, comment);
 
-/* per-email daily rate limit, per requestType, calendar-day server time */
-char *limitStr = cfgOption("liftDailyLimit");
-int dailyLimit = isNotEmpty(limitStr) ? atoi(limitStr) : 0;
-if (dailyLimit > 0)
+if (sameString(ottoStatus, "duplicate"))
+    apiErrAbort(err409, err409Msg,
+        "A request for %s <-> %s has already been submitted "
+        "and is on record.  Duplicates are not accepted.",
+        fromGenome, toGenome);
+else if (sameString(ottoStatus, "rateLimited"))
     {
-    char *limitOttoTable = cfgOption("ottoTable");
-    if (isNotEmpty(limitOttoTable))
-        {
-        struct sqlConnection *conn = hConnectOtto();
-        if (sqlTableExists(conn, limitOttoTable))
-            {
-            struct dyString *q = newDyString(0);
-            sqlDyStringPrintf(q,
-                "SELECT COUNT(*) FROM %s "
-                "WHERE requestType='liftOver' AND email='%s' "
-                "AND DATE(requestTime) = CURDATE()",
-                limitOttoTable, email);
-            int todayCount = sqlQuickNum(conn, dyStringCannibalize(&q));
-            hDisconnectOtto(&conn);
-            if (todayCount >= dailyLimit)
-                apiErrAbort(err429, err429Msg,
-                    "Daily limit reached: %d liftOver requests per day. "
-                    " Please try again tomorrow.",
-                    dailyLimit);
-            }
-        else
-            hDisconnectOtto(&conn);
-        }
+    char *limitStr = cfgOption("liftDailyLimit");
+    apiErrAbort(err429, err429Msg,
+        "Daily limit reached: %s liftOver requests per day. "
+        " Please try again tomorrow.",
+        isNotEmpty(limitStr) ? limitStr : "the daily limit of");
     }
+else if (sameString(ottoStatus, "error"))
+    apiErrAbort(err500, err500Msg, "internal error recording liftOver request");
 
 char *toAddr = cfgOption("chainFileRequestEmail");
 char *fromAddr = cfgOption("apiFromEmail");
@@ -532,34 +552,5 @@ if (isNotEmpty(toAddr) && isNotEmpty(fromAddr))
     struct jsonWrite *jw = apiStartOutput();
     jsonWriteString(jw, "msg", dyStringCannibalize(&msg));
     apiFinishOutput(0,NULL,jw);
-    char *ottoTable = cfgOption("ottoTable");	/* probably ottoRequest */
-    if (isNotEmpty(ottoTable))
-        {
-        struct sqlConnection *conn = hConnectOtto();
-        if (sqlTableExists(conn, ottoTable))
-	    {
-            /* Atomic insert with duplicate check - prevents race condition */
-            struct dyString *update = newDyString(0);
-            sqlDyStringPrintf(update,
-                "INSERT INTO %s (requestType, fromDb, toDb, email, comment, requestTime, status, buildDir) "
-                "SELECT 'liftOver', '%s', '%s', '%s', '%s', now(), 0, '' "
-                "WHERE NOT EXISTS ("
-                "  SELECT 1 FROM %s WHERE requestType='liftOver' AND "
-                "  ((fromDb='%s' AND toDb='%s') OR (fromDb='%s' AND toDb='%s'))"
-                ")",
-                ottoTable, fromGenome, toGenome, email, comment,
-                ottoTable, fromGenome, toGenome, toGenome, fromGenome);
-            int rowsAffected = sqlUpdateRows(conn, dyStringCannibalize(&update), NULL);
-            if (rowsAffected == 0)
-                {
-                hDisconnectOtto(&conn);
-                apiErrAbort(err409, err409Msg,
-                    "A request for %s <-> %s has already been submitted "
-                    "and is on record.  Duplicates are not accepted.",
-                    fromGenome, toGenome);
-                }
-	    }
-        hDisconnectOtto(&conn);
-        }
     }
 }	/*	void apiLiftRequest(char *words[MAX_PATH_INFO])	*/
