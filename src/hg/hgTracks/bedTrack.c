@@ -686,6 +686,12 @@ else if (tg->colorShades)
 
 color = colorFromCart(tg, color);
 
+// user-chosen per-item color (right-click "Color this item"). Simple bed has no background-box
+// support, so both modes just recolor the glyph.
+Color itemColorOver;
+if (itemColorOverride(tg, bed, &itemColorOver, NULL))
+    color = itemColorOver;
+
 /*	Keep the item at least 4 pixels wide at all viewpoints */
 if (thickDrawItem && (w < 4))
     {
@@ -1006,7 +1012,7 @@ unsigned char r, g, b;
 char *colors = cloneString(trackDbSetting(tg->tdb, "colorByStrand"));
 if (!colors)
     errAbort("colorByStrand setting missing (in %s)", tg->track);
-if (chopByWhite(colors, words, sizeof(words)) != 2)
+if (chopByWhite(colors, words, ArraySize(words)) != 2)
     errAbort("invalid colorByStrand setting %s (expecting pair of RGB values r,g,b r,g,b)", colors);
 if (orientation == 1)
     parseColor(words[0], &r, &g, &b);
@@ -1038,7 +1044,7 @@ struct bed *b = item;
 return itemColorByStrand(tg, (b->strand[0] == '+' ? 1 : (b->strand[0] == '-' ? -1 : 0)), hvg);
 }
 
-void complexBedMethods(struct track *track, struct trackDb *tdb, boolean isBigBed,
+void complexBedMethods(struct track *track, struct trackDb *tdb,
                                 int wordCount, char *words[])
 /* Fill in methods for more complex bed tracks. */
 {
@@ -1051,10 +1057,7 @@ if (wordCount > 1)
     fieldCount = atoi(words[1]);
 
 track->bedSize = fieldCount;
-track->isBigBed = isBigBed;
-
-//if (track->isBigBed)
-    //track->nextItemButtonable = FALSE;
+track->isBigBed = FALSE;
 
 if (fieldCount < 8)
     {

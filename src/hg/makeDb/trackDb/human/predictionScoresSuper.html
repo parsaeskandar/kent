@@ -5,6 +5,23 @@ The "Prediction Scores" container track contains subtracks showing the results o
 scores. Usually these are prediction algorithms that use protein features, conservation, nucleotide composition and similar
 signals to determine if a genome variant is pathogenic or not.</p>
 
+<h3>AlphaGenome - hg38</h3>
+<p>
+<b>Interpretation:</b> Scores are PHRED-scaled, so 10 marks the top 10 percent of the most
+impactful substitutions in the genome, 20 the top 1 percent and 30 the top 0.1 percent. Higher
+values are more likely to be damaging. The authors do not define a pathogenicity cutoff.
+</p>
+<p>
+<a href="hgTrackUi?g=alphaGenome">AlphaGenome</a>
+shows the AlphaGenome Variant Impact (AVI) score from Google DeepMind, a machine-learning
+prediction that combines AlphaGenome regulatory predictions, AlphaMissense scores, sequence
+conservation and other functional annotations. Unlike most of the other scores in this
+container, it is not restricted to coding sequence: the track contains four bigWig subtracks
+(one per alternate allele) covering all 8.8 billion possible single-base substitutions in the
+genome, including introns and intergenic regulatory regions. The score has not yet been
+described in a peer-reviewed publication, and the data cannot be redistributed by UCSC.
+</p>
+
 <h3>BayesDel - Only hg19</h3>
 <p><a href="hgTrackUi?g=bayesDel">BayesDel</a> is a deleteriousness meta-score for coding and 
 non-coding variants, single nucleotide
@@ -154,6 +171,14 @@ proteins as a heatmap, colored on a global gradient from
 
 <h2>Display Conventions and Configuration</h2>
 
+<h3>AlphaGenome</h3>
+<p>Four bigWig subtracks, one per alternate nucleotide, covering every position in the
+genome. The subtrack matching the reference base at a given position has no substitution
+to score and is shown as zero. The default view is scaled to 0 to 30, while the observed
+maximum is about 89, so the range can be raised in the track configuration. This data
+cannot be redistributed, so it is not available from the Table Browser or our download
+server; see the per-track description page for where to obtain it.</p>
+
 <h3>BayesDel</h3>
 <p>There are eight subtracks for the BayesDel track: four include pre-computed MaxAF-integrated BayesDel
 scores for missense variants, one for each base. The other four are of the same format, but scores
@@ -166,7 +191,7 @@ nucleotide mutation. The fourth value, &quot;no mutation&quot;, representing the
 <p><b>Note:</b> There are cases in which a genomic position will have one value missing.
 </p>
 
-<p>When using this track, zoom in until you can see every base pair at the top of the display.
+<p>When using this track, zoom in until you can see every base at the top of the display.
 Otherwise, there are several nucleotides per pixel under your mouse cursor and instead of an actual
  score, the tooltip text will show the average score of all nucleotides under the cursor. This is
 indicated by the prefix &quot;~&quot; in the mouseover.
@@ -208,7 +233,7 @@ zoomed in to a single gene or exon.</p>
 <h2>Data Access</h2>
 The raw data can be explored interactively with the <a href="../cgi-bin/hgTables">Table Browser</a>
 or the <a href="../cgi-bin/hgIntegrator">Data Integrator</a>. The data can be
-accessed from scripts through our <a href="https://api.genome.ucsc.edu">API</a>, the track names can
+accessed from scripts through our <a href="https://api.genome.ucsc.edu" target="_blank">API</a>, the track names can
 be found via the table browser or by clicking onto the signal tracks.
 
 <p>
@@ -219,7 +244,7 @@ The files for this track are called usually called by their alternate allele, e.
 regions or the whole genome annotation can be obtained using our tool <tt>bigWigToBedGraph</tt>
 which can be compiled from the source code or downloaded as a precompiled
 binary for your system. Instructions for downloading source code and binaries can be found
-<a href="http://hgdownload.soe.ucsc.edu/downloads.html#utilities_downloads">here</a>.
+<a href="http://hgdownload.soe.ucsc.edu/downloads.html#utilities_downloads" target="_blank">here</a>.
 The tool
 can also be used to obtain only features within a given range, e.g. 
 <tt>bigWigToBedGraph http://hgdownload.soe.ucsc.edu/gbdb/hg19/mcap/mcapA.bw -chrom=chr21 -start=0 -end=100000000 stdout</tt></p>
@@ -228,7 +253,7 @@ can also be used to obtain only features within a given range, e.g.
 <p>The original BayesDel files are available at the
 <a target="_blank" href="https://fenglab.chpc.utah.edu/BayesDel/BayesDel.html">BayesDel website</a>.
 <p>The other algorithms also have their own download formats, on the
-<a target="_blank" href="http://bejerano.stanford.edu/mcap/">M-CAP website</a> and the <a href="https://mutscore.iob.ch/" target=_blank>MutScore Website</a>.
+<a target="_blank" href="http://bejerano.stanford.edu/mcap/">M-CAP website</a> and the <a href="https://mutscore.iob.ch/" target="_blank">MutScore Website</a>.
 
 <h2>Methods</h2>
 <p>BayesDel data was converted from the files provided on the

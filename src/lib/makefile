@@ -26,7 +26,8 @@ O = aliType.o annoAssembly.o annoFilter.o annoFormatter.o annoFormatTab.o \
     fq.o freeType.o fuzzyShow.o \
     gapCalc.o gdf.o gemfont.o genomeRangeTree.o \
     gfNet.o gff.o gff3.o gfxPoly.o gifLabel.o \
-    hacTree.o hash.o hex.o hfileUdc.o histogram.o hmmPfamParse.o hmmstats.o htmlColor.o htmlPage.o htmshell.o \
+    hacTree.o hash.o hex.o hfileUdc.o histogram.o hmmPfamParse.o hmmstats.o htmlColor.o htmlPage.o \
+    htmlSanitize.o htmshell.o \
     hmac.o https.o intExp.o intValTree.o internet.o itsa.o iupac.o \
     jointalign.o jpegSize.o jsonParse.o jsonQuery.o jsonWrite.o \
     keys.o knetUdc.o kxTok.o linefile.o lineFileOnBigBed.o localmem.o log.o longTabix.o longToList.o \
@@ -34,7 +35,7 @@ O = aliType.o annoAssembly.o annoFilter.o annoFormatter.o annoFormatTab.o \
     matrixMarket.o memalloc.o memgfx.o meta.o metaWig.o mgCircle.o \
     mgPolygon.o mime.o mmHash.o net.o nib.o nibTwo.o nt4.o numObscure.o \
     obscure.o oldGff.o oligoTm.o options.o osunix.o pairHmm.o pairDistance.o \
-    paraFetch.o peakCluster.o \
+    paraFetch.o peakCluster.o perfTimer.o \
     phyloTree.o pipeline.o portimpl.o pngwrite.o psGfx.o psPoly.o pscmGfx.o \
     psl.o pslGenoShow.o pslShow.o pslTbl.o pslTransMap.o pthreadDoList.o pthreadWrap.o \
     qa.o quickHeap.o quotedP.o \
@@ -69,3 +70,9 @@ clean:
 
 tags:
 	etags ../inc/*.h ../lib/*.h ../lib/*.c  ../hg/inc/*.h ../hg/lib/*.h ../hg/lib/*.c ../hg/hgTracks/*.c ../hg/hgc/*.c ../hg/hgTrackUi/*.c
+
+# The objects in the subdirectories need their generated header dependencies
+# too, and common.mk only looks in the current directory.  This sits at the foot
+# of the file so the rules it brings in cannot become the default goal.
+# refs #36621
+-include $(wildcard font/*.d)

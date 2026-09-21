@@ -1,0 +1,327 @@
+# mm10 singleCellSignalsPeaks track  -  2026-07-22  Claude (mspeir)  refs #37914
+
+# The native mm10 "singleCellSignalsPeaks" faceted composite is the Genome
+# Browser version of the mm10 signal-&-peaks composite (cellBrowserMm10) of the
+# UCSC Cell Browser all-tracks super hub, whose build lives in the cellBrowser
+# repo, ucsc/allTracksHub:
+#   https://github.com/ucscGenomeBrowser/cellBrowser/tree/develop/ucsc/allTracksHub
+#
+# It gathers the per-cell-type ATAC-seq signal (bigWig) and peak (bigNarrowPeak) tracks from the
+# single-cell ATAC datasets in the Cell Browser and re-parents them under one
+# faceted composite. It is the mm10 counterpart of the hg38 track of the same
+# name (see doc/hg38/singleCellSignalsPeaks.txt, Redmine #37820). Histone marks,
+# cCREs, RNA/expression, interactions, and the separately-faceted motor-neuron
+# and brain-spatial sets each live in their own hub composites and are NOT part
+# of this track.
+
+##############################################################################
+# 1. Source data
+##############################################################################
+# The track mirrors the hub's main mm10 signal-&-peaks faceted composite
+# (cellBrowserMm10): 647 subtracks (641 bigWig, 6 bigNarrowPeak) from 9 datasets
+# - catlas-mouse-aging (234), catlas-mouse-brain (160), allen-basal-ganglia-atac
+# (131), olg-dyn-eae-multiome (28), mouse-lvcp-multiome (23, incl. the 6 peaks),
+# catlas-paired-tag (21), mouse-kidney-atac (19), olg-eae-ms (16) and
+# mouse-epi-juv-brain (15). That composite and its facet metadata are produced by
+# the hub build from the Cell Browser dataset tree:
+#
+#   cd $HOME/cellBrowser/ucsc/allTracksHub
+#   python3 build_manifest.py            # scan datasets -> manifest.tsv
+#   python3 build_stanzas.py             # manifest -> stanzas/mm10.trackDb.txt
+#                                        #            + meta/mm10.metadata.tsv
+#
+# The build writes its output to $CBHUB_OUT, NOT next to the scripts (that dir is
+# git-controlled). Default: /hive/data/inside/cells/all-tracks-hub-build
+#
+# The per-track source files (abs_path column of manifest.tsv) are the files the
+# Cell Browser datasets already serve; nothing is regenerated here, only copied.
+
+##############################################################################
+# 2. Copy the data files into place  (bed dir, served via a /gbdb symlink)
+##############################################################################
+# copySingleCellSignalsPeaksFiles.py copies every cellBrowserMm10 subtrack file
+# into /hive/data/genomes/mm10/bed/singleCellSignalsPeaks/<served-relpath>,
+# keeping each file's served relative path, and copies the composite's facet
+# metadata to <bed>/singleCellSignalsPeaks_metadata.tsv. The served subpath is
+# preserved on purpose: some coverage/peak basenames (e.g. MOL.bw, OPC.bw) repeat
+# across datasets, so a flat directory would clobber them.  89.6 GB, 647 files.
+#
+# The same script also writes <bed>/singleCellSignalsPeaks_colors.json, the track's
+# colorSettingsUrl target: {"Cell_class": {<class>: "#RRGGBB"}}, rendered straight from
+# celltype-palette.tsv. The faceted UI draws a color swatch beside each checkbox of any
+# facet named in that file, so the Cell class checkboxes carry the same colors the
+# subtracks are drawn in. Keys must match the metadata column value verbatim -- the
+# lookup in facetedComposite.js is an exact string match, and an unmatched key just
+# leaves that swatch blank. The whole palette is written for both assemblies, so classes
+# an assembly does not use (mm10 uses all 23; hg38 has no Ependymal or Choroid plexus)
+# are simply unused keys.
+#
+#   scriptDir=$HOME/kent/src/hg/makeDb/scripts/singleCellSignalsPeaks
+#   python3 $scriptDir/copySingleCellSignalsPeaksFiles.py --assembly mm10 --dry-run
+#   python3 $scriptDir/copySingleCellSignalsPeaksFiles.py --assembly mm10
+
+##############################################################################
+# 3. Generate the trackDb .ra
+##############################################################################
+# makeSingleCellSignalsPeaksRa.py reads the hub's mm10 stanzas, keeps the
+# cellBrowserMm10 subtracks, renames the composite to singleCellSignalsPeaks,
+# repoints every bigDataUrl at the local /gbdb copy, and writes the .ra with
+# group=regulation (ATAC signal/peaks sit with the ENCODE regulatory tracks).
+# The generator also: drops any subtrack whose source path is under a deprecated
+# "*.old/" dir, sets every subtrack "off" by default (users pick tracks from the
+# faceted selector), and assigns "priority" by cell class so same-class tracks
+# group together in the display. Labels/colors/facets are already resolved by
+# build_stanzas (see section 4); the generator carries them through unchanged.
+#
+#   python3 $scriptDir/makeSingleCellSignalsPeaksRa.py --assembly mm10
+#
+# https://github.com/ucscGenomeBrowser/kent/tree/master/src/hg/makeDb/scripts/singleCellSignalsPeaks
+
+##############################################################################
+# 4. Labels, colors, and facets  (build_stanzas.py)
+##############################################################################
+# build_stanzas.py derives the display metadata rather than copying the source
+# hub's cryptic cluster labels. The same logic runs for hg38 (see
+# doc/hg38/singleCellSignalsPeaks.txt).
+#
+# Cell type: the source cluster label is cleaned and, for datasets with coded
+#   cluster names, mapped to a canonical name via a paper-curated crosswalk
+#   (celltype-crosswalks/<collection>.tsv; codes decoded from Li 2021 PMID 34616068,
+#   Zhang 2022 PMID 36207411, Zhu 2021 PMID 33589836, and the Allen whole-brain
+#   taxonomy). Redundant synonyms are merged, QC clusters (doublet / low-quality /
+#   batch) are dropped, and commas become ';' (the faceted UI tokenizes cell
+#   values on commas). The full cell type is a searchable table column (_Cell_type),
+#   not a facet -- there are too many values.
+#
+# Cell class: each cell type is assigned one of 23 broad classes
+#   (celltype-crosswalks/celltype-class.tsv, hand-curated -- NOT written by
+#   build_celltype_crosswalks.py; see the Cell classes note below).
+#   The class drives BOTH the track color (one colorblind-conscious palette,
+#   celltype-palette.tsv, shared by hg38 and mm10 so a class is the same color on
+#   both assemblies) and the subtrack priority. Cell class is the primary cell facet,
+#   and the same palette is published as the facet swatch colors (section 2).
+#
+#   "Other glia" (88,160,88) was added because "Other" was doing four unrelated
+#   jobs. Of 40 tracks corpus-wide sitting in it: 14 real glia with nowhere else to
+#   go, 14 peripheral glia deliberately placed there (Schwann / enteric -- left
+#   alone), 5 that are not cell types at all (All cell types / All cells /
+#   Neuronal and glial -- aggregate peak calls, a separate defect NOT addressed),
+#   and 6 genuinely other. The new class takes the glial aggregate labels (Glia,
+#   Glial), olfactory ensheathing cells, and the five fly glia subtypes; Schwann and
+#   enteric glia stay under "Other". Named for symmetry with the existing
+#   "Other neuron". The color came from a grid search maximizing minimum dE against
+#   the 22 existing entries under normal, deuteranope and protanope simulation,
+#   restricted to the widest free hue band; nearest neighbours are Epithelial
+#   (dE 17) and Astrocyte (dE 20), both above the palette's own closest pair
+#   (Other vs Unknown, 12.7). Before this, Glia and Non-Neuronal were both grey.
+#
+# Tissue / Life stage / Condition: filled per collection from hub_config.json
+#   (tissue_from_path, collection_lifestage, collection_condition) plus dataset-
+#   specific parsing in build_stanzas.py. SEA-AD, for example, gets its region
+#   (seaad_MTG/PFC -> middle temporal gyrus / dorsolateral prefrontal cortex),
+#   Aged life stage (donors 65-102), and ADNC neuropathology level (no AD / low /
+#   intermediate / high) from the path + "ADNC<n>" filename prefix; regions and
+#   ADNC categories per Gabitto 2024 (PMID 39402379) and Hawrylycz 2024 (PMID
+#   39402332).
+#
+# longLabel: rebuilt from the harmonized facets as
+#     <cell type>[, <condition if not healthy>][, <tissue if a specific region>]
+#     [, <extra>][, <variant>] (<dataset>)
+#   so the cryptic source short labels decode, e.g. "ADNC0 Astro" ->
+#   "Astrocyte, ADNC 0 (no AD), middle temporal gyrus (SEA-AD Brain ATAC)", and
+#   "LM.Macg.03" -> "Macrophage, muscle, 3 months (CATLAS Mouse Aging Brain)". The
+#   CATLAS aging age-in-months (the ".NN" filename suffix) is the <extra> descriptor
+#   -- kept in the label, not made a facet, so Life stage stays coarse (Adult/Aged)
+#   and consistent across datasets.
+#
+# Variant descriptors (track_variant): the cell-type harmonization above drops
+#   detail on purpose to keep the facets compact -- collapse_celltype strips trailing
+#   cluster numbers, rollup_celltype strips parenthetical qualifiers, and
+#   celltype_strip_suffix_regex strips peak-method suffixes. That detail is real, and
+#   without it hundreds of genuinely different subtracks collapsed onto one label
+#   (before this was added, hg38 had 925 subtracks sharing only 401 distinct
+#   longLabels, mm10 629 sharing 359). The variant descriptors put the meaningful
+#   distinctions back: how the peaks were called, which grouping level the track
+#   belongs to, which cohort, and signal vs peaks. They compose, since a peak file
+#   from one cohort needs both markers.
+#
+# Cluster identity (disambiguate_labels): any label still shared after the variant
+#   descriptors is qualified with its source cluster code, which is unique and is
+#   what the source paper calls the cluster. CATLAS mouse brain alone rolls
+#   MSGA1..MSGA13 into one "Medial septum GABAergic neuron", and ITL4GL1/ITL5GL2 into
+#   one "Cortical IT excitatory neuron" even though those encode different cortical
+#   layers -- right for a facet, wrong for a label. Every longLabel is now unique on
+#   both assemblies.
+#
+# shortLabel: rebuilt too (the source shortLabels were not in fact length-limited --
+#   they ran to 50 chars, carried underscores, ArchR filename tails and R-mangled
+#   names like X1126_HY_PAL_STR_Folh1_1). Built from the harmonized cell type,
+#   abbreviated word-by-word through a curated table (CT_ABBREV) only when it does
+#   not fit, plus the variant token and, where the longLabel distinction would
+#   otherwise be invisible, a compact facet token (SEA-AD region + ADNC level,
+#   CATLAS aging age: "Astrocyte MTG A0", "Basophil 3mo"). Budget is 22 chars: there
+#   is no hard limit in the tree (excluding this track, hg38's trackDb runs a median
+#   of 18 and 54% of tracks exceed the classic 17), but the left label area crowds
+#   past that and 22 leaves room for the distinguishing token.
+#
+# Spelling: known source misspellings are corrected before the plural/case merge so
+#   a typo'd variant lands in the same group as its correctly-spelled twin instead of
+#   becoming a second facet value ("Ventricular cardioyocyte" vs "Ventricular
+#   cardiomyocyte" were two separate Cell_type values). See CELLTYPE_SPELLING.
+#   The plural/case merge picks the singular form first and only then the most
+#   frequent -- frequency alone made the facet inconsistent, choosing the singular
+#   for 15 of 17 merged groups but the plural for Megakaryocytes/Oligodendrocytes.
+#
+#   IMPORTANT, if you add to CELLTYPE_SPELLING: the misspelled strings are load-bearing
+#   *keys* in the curated tables (celltype-class.tsv, and hub_config.json's
+#   celltype_rollup_overrides / celltype_expansions / celltype_expansions_global /
+#   celltype_tissue). Correcting a cell type without correcting those keys makes the
+#   lookup miss silently, and the track loses its rollup, tissue, broad class and color.
+#   That happened: correcting Broncial / Hematopoeitic / Syncitio / Glutaminergic, plus
+#   canonicalizing Megakaryocytes to the singular, quietly cost 16 hg38 tracks their
+#   Cell_class and color. The tables now normalize their keys on load (class_key,
+#   _ct_lower_key, _ct_matchkey) so either spelling matches, and any cell type with no
+#   broad class is reported in unclassified-celltypes.log plus counted in
+#   facet-coverage.md rather than silently becoming "unknown".
+#
+# Cell classes: Nephron progenitor used to come out as class "Neural progenitor". The
+#   decode tables carry a bare broad class of "Progenitor", and build_celltype_crosswalks
+#   mapped that to "Neural progenitor" -- right for the radial glia and neuroblasts that
+#   make up the rest of the class, wrong for kidney. Nephron progenitors are Six2+ cap
+#   mesenchyme, so they are now classed Stromal (NON_NEURAL_PROGENITOR); the HTML legend
+#   no longer lists them under Neural progenitor. Note celltype-class.tsv is hand-curated
+#   (the union of the mm10 crosswalk classes with paper-decodes/hg38_ct_class.tsv), NOT
+#   generated -- build_celltype_crosswalks.py does not write it, so a class change has to
+#   be made there too.
+#
+# The bare "Progenitor" row in celltype-class.tsv is live, not leftover -- do not
+#   retire it. build_stanzas' class_key() collapses plurals, so BrainVar's cell type
+#   "Progenitors" (hg38, prenatal only) looks up under the singular key and gets its
+#   Neural progenitor class and indigo color from that one row. Nothing in the row says
+#   so, and no track's label matches it literally, so it reads as dead.
+#   It is also genuinely ambiguous: a bare "Progenitor" is not evidence of a neural
+#   lineage, and the corpus now spans kidney, heart and blood. Remapping the row is the
+#   wrong fix (it would grey out BrainVar's progenitor track). When a non-neural dataset
+#   arrives with such a label, add the specific cell type instead -- a specific entry
+#   beats its own prefix in lookup_class(), which is how "Nephron progenitors" comes out
+#   Stromal while the bare row stays neural.
+#
+# One copy of the crosswalks: build_stanzas reads celltype-crosswalks/ out of the kent
+#   tree (XWALK_ROOT, overridable), not the copy in the hub-build dir. There used to be
+#   two independent copies and they drifted -- a stale local copy silently reverted the
+#   cell-class fix above while the kent copy looked correct.
+#
+# The curation of record is archived with the scripts:
+#   scripts/singleCellSignalsPeaks/build_celltype_crosswalks.py
+#   scripts/singleCellSignalsPeaks/celltype-crosswalks/       (per-collection crosswalks,
+#       celltype-palette.tsv, celltype-class.tsv, sea-ad-celltype-crosswalk.tsv)
+#   scripts/singleCellSignalsPeaks/celltype-crosswalks/paper-decodes/  (the paper-curated
+#       decode tables, each row's `note` giving its source justification)
+# build_celltype_crosswalks.py rebuilds the crosswalks + palette from paper-decodes/.
+# The general hub machinery that consumes them (build_manifest.py, build_stanzas.py,
+# build_hub.py, hub_config.json) lives in the cellBrowser repo, not in the kent tree --
+# it builds the whole super hub, not just this track:
+#   https://github.com/ucscGenomeBrowser/cellBrowser/tree/develop/ucsc/allTracksHub
+# build_stanzas finds the crosswalks archived here via XWALK_ROOT, so the hub and these
+# native tracks always color a cell class the same.
+
+##############################################################################
+# 4b. Two collections whose source hub stanzas are ignored
+##############################################################################
+# hub_config.json "collection_ignore_hub_stanzas" lists collections built as if they
+# had no curated hub at all: the cell type comes from the manifest original_track_name
+# (the source FILENAME) and the stanza is generated rather than copied. Normally the
+# wrangler-written hub stanza is the better source and is preferred everywhere --
+# corpus-wide its shortLabel classifies 1245 tracks that the filename cannot -- so this
+# is per-collection and must stay that way.
+#
+# Currently sea-ad-brain-atac and allen-basal-ganglia-atac. Both name their subtracks in
+# a DIFFERENT scheme than every piece of curation written for them, and both failed in
+# two independent ways:
+#
+#   Labels. SEA-AD files are ADNC0L2-3IT.bw -> original_track_name "ADNC0 L2-3IT", but
+#   its hub stanzas are named "L2/3IT_ADNC:0" -- the ADNC token moves from the front to
+#   the back and the layer name loses its hyphen. So label_sub (^ADNC(\d+)),
+#   celltype_leading_strip_regex (which strips a LEADING ADNC token) and the keys of
+#   sea-ad-celltype-crosswalk.tsv (L2-3IT, L5-6NP, Lamp5-Lhx6, Sst-Chodl) ALL miss, and
+#   72 hg38 cortical-layer tracks plus 89 mm10 allen-basal-ganglia tracks lost their
+#   broad cell class and their shared-palette color. Note the trailing " ADNC:0" is NOT
+#   what breaks it: lookup_class shortens by whitespace prefix, so "Lamp5 ADNC:0" ->
+#   "Lamp5" still resolves. The failures are the 9 spellings that differ between the two
+#   schemes (lookup_class("L2/3IT") is None; lookup_class("L2/3 IT") is Excitatory neuron).
+#
+#   Scaling. Both hubs declare a bare "type bigWig" with no data range, so 184 hg38 and
+#   89 mm10 tracks silently lost the default viewLimits bigWigInfo would have supplied.
+#
+# Add a collection here only when its hub stanzas are genuinely a different naming scheme
+# from its curation. The fix for a merely MISSING crosswalk row is to add the row.
+
+##############################################################################
+# 4c. Vertical scaling: autoScale group on the composite
+##############################################################################
+# The composite parent carries "autoScale group", and NO subtrack sets autoScale of its
+# own. Every selected subtrack then shares one vertical scale, so two tracks drawn at the
+# same locus can be compared directly; with per-track autoScale, tracks whose values
+# differ by orders of magnitude both drew full height and looked equally strong.
+#
+# It has to sit on the parent. hgTracks groups by tdb->parent (wigTrack.c setMinMax
+# accumulates each drawn track's limits into the shared parent tdb, and wigDrawPredraw
+# reads them back), and hubCheck errAborts on an individual bigWig that declares
+# "autoScale group" -- it "belongs in the parent composite stanza instead". 475 subtracks
+# corpus-wide (402 hg38, 73 mm10) had inherited exactly that verbatim from their source
+# hubs, and a further 677 (184 hg38, 493 mm10) carried "autoScale on", so build_stanzas
+# now drops autoScale via DROP_KEYS for all 1152. A per-subtrack autoScale would also
+# override the inherited parent setting.
+#
+# Limits come from preDrawAutoScale scanning the preDraw array, i.e. the data in the
+# CURRENT WINDOW, not genome-wide -- so an outlying region elsewhere cannot flatten the
+# view. That is why grouping beats fixed per-dataset viewLimits, which was considered and
+# rejected: the spread of per-track maxima WITHIN one dataset reaches 20,117x (retina,
+# 0.80 to 16,092) and the maxima are outlier-dominated (a cortex-dev coverage track peaks
+# at 908,985), so a per-dataset ceiling would draw many real tracks flat.
+#
+# Grouping PER DATASET is not expressible here. autoScale group groups by tdb->parent and
+# a subtrack inside a view has the view as its parent, but a faceted composite cannot have
+# views: facetedCompositeUi walks tdb->subtracks exactly one level and builds <track>_sel
+# cart vars from the immediate children (hgTrackUi.c), so with a view level the leaf
+# bigWigs are never enumerated. None of the faceted composites in the tree use views.
+# Accepted cost: selecting across datasets with different normalizations (BrainVar
+# gene-activity maxing near 6 next to SEA-AD coverage near 72) draws the smaller tracks
+# small. The description page says comparisons are most meaningful within a dataset.
+#
+# Separately, a bigWig whose type line carries no data range gets one from bigWigInfo, so
+# the browser always has default viewLimits. Source hubs often set autoScale on the
+# COMPOSITE PARENT and this build flattens subtracks into one composite without copying
+# the parent, so the intent was lost in transit -- 232 subtracks corpus-wide had no range,
+# no autoScale and no viewLimits, and BrainVar (max ~6) drew as a flat line against
+# hgTracks' built-in 0:127.
+
+##############################################################################
+# 5. Redundant allen-brain-science copies removed
+##############################################################################
+# The Allen basal-ganglia dataset serves each unchanged per-cluster bigWig from all
+# four of its grouping directories (bg_regrouping_cl, bg_merge_D1_D2,
+# bg_merge_dorsal_ventral, bg_merge_D1_D2_dorsal_ventral). For 14 basenames those
+# four copies are byte-identical (md5-verified), so they rendered as four
+# indistinguishable subtracks and cost 4.4 GB of duplicated storage. build_stanzas
+# keeps the bg_regrouping_cl copy -- the cluster-level source the merges are built
+# from -- and skips the other three (allen_duplicate_skip; see
+# $CBHUB_OUT/allen-duplicates.log for the list). Where the four copies
+# genuinely differ (14 other basenames, different aggregations and different file
+# sizes) all four are kept and told apart by the grouping-level variant descriptor.
+# The 42 redundant files were deleted from the bed dir; the list is kept alongside
+# them in deleted-redundant-allen-copies.txt. Only the one directory-level /gbdb
+# symlink exists, so nothing needed cleaning up there.
+#
+#   xargs -a deleted-redundant-allen-copies.txt rm
+
+##############################################################################
+# Counts
+##############################################################################
+# 647 files resolved from the hub manifest (0 missing) and copied to the bed dir.
+# 42 byte-identical Allen copies were then removed, leaving 605 data files. 18
+# QC-cluster tracks (doublet / low-quality / batch) are dropped when the .ra is
+# generated, leaving 587 subtracks in the track (581 signal + 6 peak). Facet
+# metadata rows match the subtracks 1:1, and all 587 longLabels are unique.
+# Every subtrack has a broad cell class and a palette color (0 unclassified);
+# the 89 allen-basal-ganglia-atac tracks were the ones fixed by section 4b.

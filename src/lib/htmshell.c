@@ -720,8 +720,7 @@ void htmlVaBadRequestAbort(char *format, va_list args)
  * the error message will be printed out by defaultVaWarn before this prints out the header. */
 {
 puts("Status: 400\r");
-puts("Content-Type: text/plain; charset=UTF-8\r");
-puts("\r");
+cgiPrintContentType("text/plain; charset=UTF-8");
 if (format != NULL)
     {
     vfprintf(stdout, format, args);
@@ -1050,6 +1049,8 @@ dyStringAppend(policy, " cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js")
 // shephered js for tutorial overlay
 dyStringAppend(policy, " cdn.jsdelivr.net/npm/shepherd.js@11.0.1/dist/js/shepherd.min.js");
 dyStringAppend(policy, " www.google.com/recaptcha/api.js");
+// used by the captcha in hg/lib/cart.c printCaptcha
+dyStringAppend(policy, " challenges.cloudflare.com/turnstile/v0/api.js");
 
 // uppy for hubSpace uploads
 dyStringAppend(policy, " releases.transloadit.com/uppy/v4.5.0/uppy.min.js");
@@ -1108,14 +1109,6 @@ safef(meta, sizeof meta, "<meta http-equiv='Content-Security-Policy' content=\"%
 return cloneString(meta);
 }
 
-char *getCspMetaResponseHeader(char *policy)
-/* get the policy string as an http response header */
-{
-char response[4096];
-safef(response, sizeof response, "Content-Security-Policy: %s\n", policy); 
-return cloneString(response);
-}
-
 char *getCspMetaHeader()
 /* return meta CSP header string */
 {
@@ -1132,6 +1125,7 @@ char *meta = getCspMetaHeader();
 fputs(meta, f);
 freeMem(meta);
 }
+
 
 
 void _htmStartWithHead(FILE *f, char *head, char *title, boolean printDocType, int dirDepth)
@@ -1179,8 +1173,7 @@ htmlWarnBoxSetup(f);
 void htmlStart(char *title)
 /* Write the start of an html from CGI */
 {
-puts("Content-Type:text/html");
-puts("\n");
+cgiPrintContentType("text/html");
 _htmStartWithHead(stdout, "", title, TRUE, 1);
 }
 
@@ -1298,8 +1291,7 @@ void htmShellWithHead( char *title, char *head, void (*doMiddle)(), char *method
 /* Preamble. */
 dnaUtilOpen();
 
-puts("Content-Type:text/html");
-puts("\n");
+cgiPrintContentType("text/html");
 
 puts("<HTML>");
 printf("<HEAD>%s<TITLE>%s</TITLE>\n</HEAD>\n\n", head, title);
@@ -1598,6 +1590,21 @@ if (escStringsCount > 0)
     /* note that some versions return -1 if too small */
     if (sz != -1 && sz + 1 <= tempSize)
 	{
+	/* SECURITY (refs #38051): we inserted exactly two htmlSafefPunc markers per
+	 * escaped string, so any extra one came from a value and would forge a
+	 * delimiter pair.  htmlEscapeAllStrings copies text outside a pair raw, so a
+	 * forged pair smuggles unescaped user data into the output.  Abort hard: a raw
+	 * 0x01 is never legitimate here, and callers such as vaHtmlDyStringPrintf read
+	 * a negative return as "buffer too small" and would retry forever. */
+	int puncCount = 0;
+	char *p = tempBuf;
+	while ((p = memchr(p, htmlSafefPunc, (tempBuf + sz) - p)) != NULL)
+	    {
+	    ++puncCount;
+	    ++p;
+	    }
+	if (puncCount != 2*escStringsCount)
+	    errAbort("Illegal control character in htmlSafef string value.");
 	sz = htmlEscapeAllStrings(buffer, tempBuf, bufSize, noAbort, noWarnOverflow);
 	}
     else

@@ -13,6 +13,7 @@
 #include "encode/encodeRna.h"
 #include "encode/encodePeak.h"
 #include "bigBedFilter.h"
+#include "mouseOver.h"
 #include "quickLift.h"
 
 extern struct trackLayout tl;
@@ -205,6 +206,11 @@ if ((filter = bigBedMakeNumberFilter(cart, bbi, tg->tdb, QVALUE_FILTER, NULL, "q
 if (compositeChildHideEmptySubtracks(cart, tg->tdb, NULL, NULL))
    labelTrackAsFiltered(tg);
 
+// Support the mouseOver and mouseOverField settings, the way the bigBed-like
+// tracks do.  Both forms are handled by mouseOverSetupForBbi(), which returns a
+// scheme with nothing set when neither setting is present.
+struct mouseOverScheme *mouseScheme = mouseOverSetupForBbi(tg->tdb, bbi);
+
 unsigned filtered = 0;
 for (bb = bbList; bb != NULL; bb = bb->next)
     {
@@ -215,8 +221,12 @@ for (bb = bbList; bb != NULL; bb = bb->next)
         struct linkedFeatures *lf = lfFromEncodePeak((struct slList *)peak, tg->tdb, scoreMin, scoreMax);
 
         if (lf)
+            {
+            if (mouseScheme->mouseOverIdx > 0 || mouseScheme->mouseOverPattern)
+                lf->mouseOver = mouseOverGetBbiText(mouseScheme, bb, chromName);
             slAddHead(&lfList, lf);
-        else 
+            }
+        else
             filtered++;
         }
     else
@@ -300,7 +310,7 @@ else
     }
 
     struct encodePeak *peakList = (struct encodePeak *)quickLiftSql(conn, quickLiftFile, table, chromName, winStart, winEnd,  NULL, NULL, (ItemLoader2)loader, 0, chainHash);
-    struct encodePeak *liftedPeaks = (struct encodePeak *)quickLiftBeds((struct bed *)peakList, chainHash, FALSE);
+    struct encodePeak *liftedPeaks = quickLiftPeaks(peakList, chainHash);
 
     for(; liftedPeaks; liftedPeaks = liftedPeaks->next)
         {

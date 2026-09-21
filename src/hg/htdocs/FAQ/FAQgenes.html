@@ -25,6 +25,8 @@
 		    "GENCODE" and "All GENCODE" tracks?</a></li>
 <li><a href="#gencode">What is the difference between GENCODE comprehensive and basic?</a></li>
 <li><a href="#ncbiRefseq">What is the difference between "NCBI RefSeq" and "UCSC RefSeq"?</a></li>
+<li><a href="#txIndel">Why does the codon or amino acid number I see differ from the one in a paper
+                       or at NCBI?</a></li>
 <li><a href="#mito">What is the best gene track for mitochondrial gene annotations?</a></li>
 <li><a href="#report">How shall I report a gene transcript in a manuscript?</a></li>
 <li><a href="#ccds">What is CCDS?</a></li>
@@ -214,7 +216,7 @@ or the <a href="https://www.gencodegenes.org/pages/contact.html" target=_blank>G
 <a name="duplicates"></a>
 <h6>Why does the UCSC RefSeq track ("refGene") include duplicates, and some transcripts map to two loci?</h6>
 
-<p>This is related to the question <a href="#ncbiRefSeq">What is the difference between "NCBI RefSeq" and "UCSC RefSeq"?</a>
+<p>This is related to the question <a href="#ncbiRefseq">What is the difference between "NCBI RefSeq" and "UCSC RefSeq"?</a>
 below. Briefly, the UCSC refGene track aligns the RefSeq transcripts to the genome with BLAT, with no special filtering but a
 95% identity, the NCBI RefSeq track is NCBI's mapping and the NCBI alignments were filtered using manual annotations
 to make sure that a transcript is mapped only once, even if it is perfectly
@@ -437,6 +439,63 @@ SELECT matches,misMatches,repMatches,nCount,qNumInsert,qBaseInsert,tNumInsert,tB
 <p>A word of caution on the NCBI RefSeq track on hg19: NCBI is not fully supporting hg19 anymore. As a result, 
 some genes are not located on the main chromosomes anymore. An example is NM_001129826/CSAG3.
 For hg19, you may prefer UCSC RefSeq for now.</p>
+<a name="txIndel"></a>
+<h2>Why does the codon or amino acid number I see differ from the one in a paper or at NCBI?</h2>
+<p>
+Because a RefSeq transcript is its own independent sequence, not a slice of the genome, the
+transcript and the genome can differ in length. Where the transcript carries bases the genome
+does not, or the genome
+carries bases the transcript does not, there are two valid ways to number the codons of
+that transcript:
+</p>
+<p>
+<b>This affects RefSeq only.</b> GENCODE, Ensembl and UCSC Genes transcripts are derived from the
+genome, so their coordinates cannot disagree with it and this problem cannot arise. RefSeq
+transcripts are aligned to the genome instead, so it can, and it affects both the
+&quot;NCBI RefSeq&quot; and the &quot;UCSC RefSeq&quot; tracks, often by different amounts,
+because the two use different alignments (see
+<a href="#ncbiRefseq">the previous question</a>).
+</p>
+<ul>
+  <li>The <b>genomic codon number</b>, which is what the Genome Browser's gene tracks show by
+  default. Codons are counted off the exons as they are laid out on the chromosome, so bases
+  that exist only in the transcript are never counted. The RefSeq tracks warn you when this
+  happens: the affected codons are colored orange, an exclamation mark is added after the codon
+  number once you are zoomed in far enough for the numbers to be drawn, and the codon mouseover
+  gives both numbers.</li>
+  <li>The <b>transcript codon number</b>, which is what NCBI, LOVD, ClinVar and HGVS
+  <em>c.</em> and <em>p.</em> descriptions use. Codons are counted off the transcript sequence
+  itself, including any bases that are missing from the genome.</li>
+</ul>
+<p>
+Before a difference, the two numbers match. At each difference, the gap between them changes,
+then stays the same until the next one. A transcript with a single 21-base insertion, for
+example, has its two counts a constant seven codons apart for the rest of the coding sequence. A
+transcript with several separate differences can have the gap widen more than once along its
+length. Neither number is wrong. They answer different questions, but an
+HGVS description always means the transcript count, since HGVS <em>c.</em> and <em>p.</em>
+coordinates are defined on the reference transcript.
+</p>
+<p>
+It is rare in human, but much more common in other assemblies. The less complete the assembly,
+the more often it happens. In human it clusters in long repetitive coding genes:
+<a href="../cgi-bin/hgTracks?db=hg38&position=chr11:1098960-1099050&refSeqComposite=full"
+target="_blank">MUC2</a> carries about 2,900 coding bases that hg38 lacks, and FCGBP about
+3,500. Shirota <em>et al.</em> catalogued these discrepancies systematically
+(<a href="https://doi.org/10.1093/database/baw124" target="_blank">Database 2016, baw124</a>,
+PMID
+<a href="https://pubmed.ncbi.nlm.nih.gov/27589963/" target="_blank">27589963</a>), and the HGVS
+nomenclature pages discuss what it means for choosing a
+<a href="https://hgvs-nomenclature.org/stable/background/refseq/" target="_blank">reference
+sequence</a>.
+</p>
+<p>
+The underlying insertion or deletion is itself visible in the &quot;RefSeq Alignments&quot; and
+&quot;RefSeq Diffs&quot; subtracks of the RefSeq container. Searching the browser for an HGVS
+term such as <em>NM_002457.5:c.11671A&gt;G</em> uses the transcript numbering and maps it
+through the alignment, so it lands on the right base either way.
+</p>
+
 <a name="mito"></a>
 <h2>What is the best gene track for mitochondrial gene annotations</h2>
 <p>

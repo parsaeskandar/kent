@@ -9,7 +9,6 @@
     <LINK REL="STYLESHEET" HREF="trackDbDoc.css">
     <script type="text/javascript" src="/js/jquery.js"></script>
     <script type="text/javascript" src="/js/staticDoc.js"></script>
-    <script type="text/javascript" src="/js/utils.js"></script>
     <script type="text/javascript" src="trackDbDoc.js"></script>
     <script type="text/javascript">
         $(document).ready(function()
@@ -116,7 +115,7 @@ used as a ready reference.</P>
         <LI><A HREF="#vcfTabix">vcfTabix</A>: Variant Call Format</LI>
         <LI><A HREF="#vcfPhasedTrio">vcfPhasedTrio</A>: Variant Call Format Trios</LI>
         <LI><A HREF="#psl">psl/bigPsl</A>: Sequence alignments</LI>
-        <LI><A HREF="#chain">chain/bigChain and netAlign</A>: Paired sequence alignments</LI>
+        <LI><A HREF="#chain">chain/bigChain and netAlign/bigNet</A>: Paired sequence alignments</LI>
         <LI><A HREF="#wigMaf">wigMaf/bigMaf</A>: Multiple alignments</LI>
         <LI><A HREF="#expRatio">expRatio</A>: Microarray expression data</LI>
         <LI><A HREF="#snp">snp</A>: Short genetic variants from dbSNP</LI>
@@ -246,6 +245,9 @@ used as a ready reference.</P>
     <TR VALIGN=TOP><TD class="multiRegionsBedUrl"><A name="multiRegionsBedUrl"></A><IMG class='toggle detail'>
         <div class="format"><code class="level-new">multiRegionsBedUrl</code></div>
     </TD></TR>
+    <TR VALIGN=TOP><TD class="onlyVisibility"><A name="onlyVisibility"></A><IMG class='toggle detail'>
+        <div class="format"><code>onlyVisibility &lt;dense|squish|pack|full&gt;</code></div>
+    </TD></TR>
     <TR VALIGN=TOP><TD class="otherDb"><A name="otherDb"></A><IMG class='toggle detail'>
         <div class="format"><code>otherDb &lt;otherDb&gt;</code></div>
     </TD></TR>
@@ -365,6 +367,9 @@ are described below along with the settings specific to their types.</P>
         <IMG class='toggle detail'>
         <div class="format"><code>compareGenomeLinks &lt;db[.table[.column]]=label&gt;
                                     [db[.table[.column] =label &hellip;]</code></div>
+    </TD></TR>
+    <TR VALIGN=TOP><TD class="denseClick"><A name="denseClick"></A><IMG class='toggle detail'>
+        <div class="format"><code>denseClick &lt;on/off&gt;</code></div>
     </TD></TR>
     <TR VALIGN=TOP><TD class="denseCoverage"><A name="denseCoverage"></A><IMG class='toggle detail'>
         <div class="format"><code>denseCoverage &lt;maxVal&gt;</code></div>
@@ -1046,8 +1051,8 @@ are described below along with the settings specific to their types.</P>
     <div class="format"><code class="level-required">bigDataUrl &lt;url/relativePath&gt;</code>
     </div>
 </td></tr>
-<tr valign=top><td class="noStems"><img alt="" class='toggle detail'>
-    <div class="format"><code class="level-required">noStems &lt;on/off&gt;</code>
+<tr valign=top><td class="lollyNoStems"><img alt="" class='toggle detail'>
+    <div class="format"><code class="level-required">lollyNoStems &lt;on/off&gt;</code>
     </div>
 </td></tr>
 <tr valign=top><td class="lollySizeField"><img alt="" class='toggle detail'>
@@ -1179,6 +1184,9 @@ are described below along with the settings specific to their types.</P>
     <TR class="related" VALIGN=TOP><TD class="hapClusterMethod"><A NAME="hapClusterMethod"><IMG class='toggle detail setF'>
         <div class="format"><code class="level-full">hapClusterMethod &lt;centerWeighted|fileOrder|treeFile <em>url</em>&gt;</code></div>
     </TD></TR>
+    <TR class="related" VALIGN=TOP><TD class="sampleColorFile"><A NAME="sampleColorFile"><IMG class='toggle detail setF'>
+        <div class="format"><code class="level-new">sampleColorFile &lt;url&gt;</code></div>
+    </TD></TR>
     <TR class="related" VALIGN=TOP><TD class="hapClusterColorBy"><A NAME="hapClusterColorBy"><IMG class='toggle detail setF'>
         <div class="format"><code class="level-full"><code>hapClusterColorBy &lt;altOnly|function|refAlt|base&gt;</code></div>
     </TD></TR>
@@ -1203,17 +1211,26 @@ are described below along with the settings specific to their types.</P>
     <TR VALIGN=TOP><TD class="minFreq"><A NAME="minFreq"><IMG class='toggle detail'>
         <div class="format"><code>minFreq &lt;<EM>F</EM>&gt;</code></div>
     </TD></TR>
+    <TR VALIGN=TOP><TD class="minAc"><A NAME="minAc"><IMG class='toggle detail'>
+        <div class="format"><code class="level-new">minAc &lt;<EM>N</EM>&gt;</code></div>
+    </TD></TR>
     <TR VALIGN=TOP><TD class="vcfDoFilter"><A NAME="vcfDoFilter"><IMG class='toggle detail'>
         <div class="format"><code class="level-new">vcfDoFilter &lt;on/off&gt;</code></div>
     </TD></TR>
     <TR VALIGN=TOP><TD class="vcfDoQual"><A NAME="vcfDoQual"><IMG class='toggle detail'>
         <div class="format"><code class="level-new">vcfDoQual &lt;on/off&gt;</code></div>
     </TD></TR>
-    <TR VALIGN=TOP><TD class="vcfDoMaf"><A NAME="vcfDoQual"><IMG class='toggle detail'>
-        <div class="format"><code class="level-new">vcfDoQual &lt;on/off&gt;</code></div>
+    <TR VALIGN=TOP><TD class="vcfDoMaf"><A NAME="vcfDoMaf"><IMG class='toggle detail'>
+        <div class="format"><code class="level-new">vcfDoMaf &lt;on/off&gt;</code></div>
+    </TD></TR>
+    <TR VALIGN=TOP><TD class="vcfDoMinAc"><A NAME="vcfDoMinAc"><IMG class='toggle detail'>
+        <div class="format"><code class="level-new">vcfDoMinAc &lt;on/off&gt;</code></div>
     </TD></TR>
     <TR VALIGN=TOP><TD class="sampleMetadataFile"><A NAME="sampleMetadataFile"><IMG class='toggle detail'>
         <div class="format"><code class="level-new">sampleMetadataFile &lt;url&gt;</code></div>
+    </TD></TR>
+    <TR VALIGN=TOP><TD class="showHardyWeinberg"><A NAME="showHardyWeinberg"><IMG class='toggle detail'>
+        <div class="format"><code class="level-new">showHardyWeinberg &lt;on/off&gt;</code></div>
     </TD></TR>
     <TR VALIGN=TOP><TD>
             <P>Additional settings found in the "Item or
@@ -1255,6 +1272,9 @@ are described below along with the settings specific to their types.</P>
     <TR VALIGN=TOP><TD class="vcfUseAltSampleNames"><A NAME="vcfUseAltSampleNames"><IMG class='toggle detail'>
         <div class="format"><code class="level-full">vcfUseAltSampleNames &lt;on/off&gt;</code></div>
     </TD></TR>
+    <TR VALIGN=TOP><TD class="vcfPhasedColorBy"><A NAME="vcfPhasedColorBy"><IMG class='toggle detail'>
+        <div class="format"><code class="level-new">vcfPhasedColorBy &lt;noColor|function|deNovo|mendelDiff&gt;</code></div>
+    </TD></TR>
     <TR VALIGN=TOP><TD class="geneTrack"><A NAME="geneTrack"><IMG class='toggle detail'>
         <div class="format"><code class="level-new">geneTrack &lt;track&gt;</code></div>
     </TD></TR>
@@ -1264,8 +1284,11 @@ are described below along with the settings specific to their types.</P>
     <TR VALIGN=TOP><TD class="vcfDoQual"><A NAME="vcfDoQual"><IMG class='toggle detail'>
         <div class="format"><code class="level-new">vcfDoQual &lt;on/off&gt;</code></div>
     </TD></TR>
-    <TR VALIGN=TOP><TD class="vcfDoMaf"><A NAME="vcfDoQual"><IMG class='toggle detail'>
-        <div class="format"><code class="level-new">vcfDoQual &lt;on/off&gt;</code></div>
+    <TR VALIGN=TOP><TD class="vcfDoMaf"><A NAME="vcfDoMaf"><IMG class='toggle detail'>
+        <div class="format"><code class="level-new">vcfDoMaf &lt;on/off&gt;</code></div>
+    </TD></TR>
+    <TR VALIGN=TOP><TD class="vcfDoMinAc"><A NAME="vcfDoMinAc"><IMG class='toggle detail'>
+        <div class="format"><code class="level-new">vcfDoMinAc &lt;on/off&gt;</code></div>
     </TD></TR>
     <TR VALIGN=TOP><TD>
             <P>Additional settings found in the "Item or
@@ -1299,9 +1322,6 @@ are described below along with the settings specific to their types.</P>
     </TD></TR>
     <TR VALIGN=TOP><TD class="pred"><A name="pred"></A><IMG class='toggle detail'>
         <div class="format"><code>pred &lt;assembly.table&gt;</code></div>
-    </TD></TR>
-    <TR VALIGN=TOP><TD class="pslSequence"><A name="pslSequence"></A><IMG class='toggle detail'>
-        <div class="format"><code>pslSequence &lt;no/all/different&gt;</code></div>
     </TD></TR>
     <TR VALIGN=TOP><TD class="transMapGene">
             <A name="transMapGene"></A>
@@ -2013,8 +2033,9 @@ hierarchical containers:
         <A name="primaryKey"></A><IMG class='toggle detail'>
         <div class="format"><code>primaryKey &lt;field&gt;</code></div>
     </TD></TR>
-    <TR VALIGN=TOP><TD class="maxCheckBoxes"><IMG class='toggle detail'>
-        <div class="format"><code>maxCheckBoxes &lt;integer&gt;</code></div>
+    <TR VALIGN=TOP><TD class="maxCheckboxes">
+        <A name="maxCheckboxes"></A><IMG class='toggle detail'>
+        <div class="format"><code>maxCheckboxes &lt;integer&gt;</code></div>
     </TD></TR>
     <TR VALIGN=TOP><TD class="dataTypes">
         <A name="dataTypes"></A><IMG class='toggle detail'>
@@ -2201,10 +2222,10 @@ bigWig</P>
         <TD>ENCODE only; DEPRCATED (replaced with mdb )</TD>
     </TR>
     <TR VALIGN=TOP>
-        <TD class="canPack"><A name="canPack"></A><code>canPack &lt;off/on&gt;</code></div></TD>
+        <TD class="canPack"><A name="canPack"></A><code>canPack &lt;off/on&gt;</code></TD>
         <TD>all</TD>
-        <TD><I>NOT FOR HUBS.  Deprecated.</I>
-            <P>Almost tracks can be displayed in the five
+        <TD><I>Deprecated. The track type usually decides this.</I>
+            <P>Almost all tracks can be displayed in the five
             standard visibilities.  However on some track types such as
             wiggles, <code>squish</code> and <code>pack</code> offer no real advantage
             over <code>dense</code> and <code>full</code>. By default, these tracks will
@@ -2213,7 +2234,8 @@ bigWig</P>
             of composites will always offer all five choices.</P>
             <P><B>Example:</B></P>
             <pre>   canPack on</pre>
-    </TD></TR>
+        </TD>
+        </TR>
     <TR VALIGN=TOP>
         <TD class="cdsDrawDefault"><A name="cdsDrawDefault"></A>
             <code>cdsDrawDefault</code></TD><TD>genePred</TD>
@@ -2417,9 +2439,10 @@ bigWig</P>
     </TR>
     <TR VALIGN=TOP>
         <TD class="metadata"><A name="metadata"></A><code>metadata</code></TD>
-        <TD>all <I>ENCODE only</I></TD>
-        <TD>OBSOLETE: replaced by metaDb. <I>Currently only way for datHubs to have
-            metadata dropdowns.  Used by WashU hubs.</I>
+        <TD>all</TD>
+        <TD>OBSOLETE: replaced by <A onclick="return jumpTo(this);" HREF="#">meta</A>,
+            which names one metadata file for the whole hub. Still read, and still
+            used by some hubs.
         </TD>
     </TR>
     <TR VALIGN=TOP>
@@ -2468,13 +2491,13 @@ bigWig</P>
     </TR>
     <TR VALIGN=TOP>
         <TD class="noInherit"><A name="noInherit"></A><code>noInherit</code></TD><TD>all</TD>
-        <TD>This one should be
-            OBSOLETE but there continue to be edge cases where this setting
-            has some affect.  Currently only 2 places this is read this:</P>
+        <TD><P>This one should be OBSOLETE, but there are still edge cases where it
+            has an effect. It is read in a few places:</P>
             <OL>
-            <LI>in hdb to makesuperChildren inherit settings from their supertrack.  This is 
-            done by putting the super settings into the child's settings hash.</LI>
-            <LI>tdbQuery where it appears to have no affect.</LI>
+            <LI>in hdb, to stop a subtrack inheriting its parent's settings. Without
+            it the parent settings are copied into the child's settings hash.</LI>
+            <LI>in hgCollection, which removes it.</LI>
+            <LI>in tdbQuery and raSqlQuery, where it appears to have no effect.</LI>
             </OL>
         </TD>
     </TR>
@@ -2498,15 +2521,6 @@ bigWig</P>
     <TR VALIGN=TOP>
         <TD class="otherOrg"><A name="otherOrg"></A><code>otherOrg</code></TD><TD>chain, netAlign</TD>
         <TD>Typo: should be <A onclick="return jumpTo(this);" HREF="#">otherDb</A>.</TD>
-    </TR>
-    <TR VALIGN=TOP>
-        <TD class="onlyVisibility"><A name="onlyVisibility"></A><code>onlyVisibility</code></TD>
-        <TD>all</TD>
-        <TD>Not universally supported (rightClick/subtrack
-            cfg, etc.) so deprecate or else expand.  This setting restricts
-            the visibility options of a track to only one setting such as
-            "<code>full</code>".  (rare hg19.lincRNAsAllCellTypeTopView)
-        </TD>
     </TR>
     <TR VALIGN=TOP>
         <TD class="otherDbTable"><A name="otherDbTable"></A><code>otherDbTable</code></TD><TD>bed</TD>
@@ -2662,16 +2676,17 @@ bigWig</P>
     </TR>
     <TR VALIGN=TOP>
         <TD class="speciesUseFile"><A name="speciesUseFile"></A>
-            <code>speciesUseFile &lt;fileName&gt;</code></TD>
-        <TD>wigMaf</TD>
+            <code>speciesUseFile &lt;cartVariableName&gt;</code></TD>
+        <TD>wigMaf, bigMaf</TD>
         <TD>
             <P><I>Deprecated</I></P>
             <P>Much more rarely used, this setting can
             replace <code>speciesOrder</code> and <code>speciesGroups</code>.
-            Set the <code>speciesUseFile</code> to a path relative to the apache cgi-bin.
-            The file should contain a single species name as the first word of each line.</P>
+            The value is not a file name. It is the name of a cart variable, and the
+            Browser reads the species list from the file that variable points to.
+            The file holds one species name as the first word of each line.</P>
             <P><B>Example:</B></P>
-            <pre>    speciesUseFile speciesLists/conserved8Way.txt</pre>
+            <pre>    speciesUseFile myTrack.speciesList</pre>
         </TD>
     </TR>
     <TR VALIGN=TOP>
@@ -2718,9 +2733,9 @@ bigWig</P>
     </TR>
     <TR VALIGN=TOP>
         <TD class="useScore"><A name="useScore"></A>
-            <code>useScore</code></TD><TD>bed, factorSource, bed5FloatScore, broadPeak</TD>
-        <TD>Deprecate: replaced with <A onclick="return jumpTo(this);" HREF="#">spectrum</A>
-            as a slighly less obscurely named setting.
+            <code>useScore</code></TD><TD>bed, bigBed, bigGenePred, psl, bigPsl</TD>
+        <TD>Deprecated: replaced with <A onclick="return jumpTo(this);" HREF="#">spectrum</A>
+            as a slightly less obscurely named setting. Either name sets the same flag.
         </TD>
     </TR>
     <TR VALIGN=TOP>

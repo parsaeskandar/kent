@@ -33,9 +33,19 @@ end
 
 -- Helper function to convert an attributes table into
 -- a string that can be put into HTML tags.
+-- The keys are sorted first because pairs() has no defined order, so an element
+-- with more than one attribute would otherwise come out in a different order
+-- from one build to the next.  That renders the same, but it makes the output
+-- unreproducible and leaves the install rsync re-pushing files nobody edited.
 local function attributes(attr)
+  local keys = {}
+  for x in pairs(attr) do
+    table.insert(keys, x)
+  end
+  table.sort(keys)
   local attr_table = {}
-  for x,y in pairs(attr) do
+  for _,x in ipairs(keys) do
+    local y = attr[x]
     if y and y ~= "" then
       table.insert(attr_table, ' ' .. x .. '="' .. escape(y,true) .. '"')
     end
@@ -143,7 +153,8 @@ function Doc(body, metadata, variables)
   add('<nav class="docs-toc" id="docs-toc">')
   add('<ul>')
   for i, h in ipairs(headers) do
-    add("<li><a href='#" .. h.id .. "'>" .. h.text .. "</a></li>")
+    local cls = h.sub and " class='docs-toc-sub'" or ""
+    add("<li" .. cls .. "><a href='#" .. h.id .. "'>" .. h.text .. "</a></li>")
   end
   add('</ul>')
   add('</nav>')
@@ -312,7 +323,7 @@ function Header(lev, s, attr)
 
     idStr = simplifyId(s)
 
-    table.insert(headers, {text = s, id = idStr})
+    table.insert(headers, {text = s, id = idStr, sub = false})
 
     table.insert(lines, "<h2 id='" .. idStr .. "'>"  .. s .. "</h2>")
     headerOpen = true
@@ -320,7 +331,13 @@ function Header(lev, s, attr)
   elseif lev == 2 then
     -- Collect lev==2 headers for TOC (markdown ## headings)
     local idStr = attr.id or simplifyId(s)
-    table.insert(headers, {text = s, id = idStr})
+    table.insert(headers, {text = s, id = idStr, sub = false})
+    table.insert(lines, "<h" .. lev .. " id='" .. idStr .. "'" ..  ">" .. s .. "</h" .. lev .. ">")
+
+  elseif lev == 3 then
+    -- Collect lev==3 headers for TOC as indented sub-items (markdown ### headings)
+    local idStr = attr.id or simplifyId(s)
+    table.insert(headers, {text = s, id = idStr, sub = true})
     table.insert(lines, "<h" .. lev .. " id='" .. idStr .. "'" ..  ">" .. s .. "</h" .. lev .. ">")
 
   else

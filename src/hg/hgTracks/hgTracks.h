@@ -384,6 +384,11 @@ struct simpleFeature
                                          * (PSL, BAM, chain, snake); 0 for gene models (genePred). */
     int grayIx;                         /* Level of gray usually. */
     int codonIndex;                     /* 1-based codon index (ignored if 0) */
+    int txCodonIndex;                   /* 1-based codon index counted in the transcript's own
+                                         * coordinates rather than along the genome.  Only set
+                                         * when the transcript aligns with bases this assembly
+                                         * does not have, which is what makes the two disagree;
+                                         * 0 the rest of the time, and for non-codons. */
     char codonAa;                       /* For a codon, its display amino-acid letter:
                                          * AA letter, '*' stop, 'M' start, 'X' error/partial,
                                          * 0 if not a codon.  Set when grayIx is. */
@@ -599,6 +604,7 @@ extern boolean zoomedToBaseLevel; /* TRUE if zoomed so we can draw bases. */
 extern boolean zoomedToCodonLevel; /* TRUE if zoomed so we can print codon text in genePreds*/
 extern boolean zoomedToCodonNumberLevel; /* TRUE if zoomed so we can print codons and exon number text in genePreds*/
 extern boolean zoomedToCdsColorLevel; /* TRUE if zoomed so we cancolor each codon*/
+extern boolean baseColorDrawCodonArrows; /* Draw a strand chevron on each codon box? Off in squish. */
 
 extern char *ctFileName;	/* Custom track file. */
 extern struct customTrack *ctList;  /* Custom tracks. */
@@ -738,6 +744,10 @@ void genericMapItem(struct track *tg, struct hvGfx *hvg, void *item,
 		    int x, int y, int width, int height);
 /* This is meant to be used by genericDrawItems to set to tg->mapItem in */
 /* case tg->mapItem isn't set to anything already. */
+
+boolean denseClickEnabled(struct track *tg);
+/* Should a dense row of this track get one clickable map box per item, instead */
+/* of a single box that expands the track? */
 
 void mapStatusMessage(char *format, ...)
 /* Write out stuff that will cause a status message to
@@ -1513,7 +1523,7 @@ void bedMethods(struct track *tg);
 void bed9Methods(struct track *tg);
 /* Fill in methods for bed9 tracks. */
 
-void complexBedMethods(struct track *track, struct trackDb *tdb, boolean isBigBed,
+void complexBedMethods(struct track *track, struct trackDb *tdb,
                                 int wordCount, char *words[]);
 /* Fill in methods for more complex bed tracks. */
 
@@ -1638,6 +1648,15 @@ void linkedFeaturesLabelNextPrevItem(struct track *tg, boolean next);
 void createHgFindMatchHash();
 /* Read from the cart the string assocated with matches and
    put the matching items into a hash for highlighting later. */
+
+void createItemColorHash();
+/* Read the itemColors cart variable into a hash of per-item colors keyed by "track\titemName",
+ * keeping only records for the current database. Each color either recolors the whole item glyph
+ * or draws a background highlight, per the record's mode. */
+
+boolean itemColorOverride(struct track *tg, void *item, Color *retColor, boolean *retWholeItem);
+/* If the user set a per-item color for this item (via right-click), return TRUE and fill in the
+ * color and whether it recolors the whole item; otherwise return FALSE. */
 
 TrackHandler lookupTrackHandlerClosestToHome(struct trackDb *tdb);
 /* Lookup handler for track of give name.  Try parents if
@@ -1868,10 +1887,18 @@ void labelTrackAsHideEmpty(struct track *tg);
 /* add text to track long label to indicate empty subtracks are hidden */
 
 void labelTrackAsDensity(struct track *tg);
-/* Add text to track long label to indicate density mode */
+/* Add text to track long label to indicate the user asked for density mode */
 
 void labelTrackAsDensityWindowSize(struct track *tg);
 /* Add text to track long label to indicate density mode because window size exceeds some threshold */
+
+void labelTrackAsDensityTooManyItems(struct track *tg);
+/* Add text to track long label to indicate we switched to density mode because there were
+ * too many items to draw one by one */
+
+void labelTrackAsDensityIfActive(struct track *tg);
+/* If a track is showing item density instead of individual items, say so in the long label,
+ * distinguishing the density the user asked for from the density we had to impose. */
 
 void setupHotkeys(boolean gotExtTools);
 /* setup keyboard shortcuts and a help dialog for it */
@@ -1916,6 +1943,14 @@ Color colorFromSoTerm(enum soTerm term);
 
 void maybeNewFonts(struct hvGfx *hvg);
 /* Check to see if we want to use the alternate font engine (FreeType2). */
+
+void initFontEngine();
+/* Load the text engine the user has picked, before anything measures a string. */
+
+boolean freeTypeFontActive();
+/* TRUE when the FreeType font engine is the one maybeNewFonts() will actually switch to.  Callers
+ * that pick a font to match the live engine (e.g. squishCodonFont) must use this rather than a
+ * looser test, or they can hand the bitmap engine a cell height it cannot render. */
 
 Color colorFromCart(struct track *tg, Color color);
 /* Return the RGB color from the cart setting 'colorOverride' or just return color */

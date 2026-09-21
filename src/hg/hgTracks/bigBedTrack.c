@@ -24,6 +24,7 @@
 #include "trackHub.h"
 #include "net.h"
 #include "bigPsl.h"
+#include "bPlusTree.h"    // for the chrom-name key size of the bigBed we are reading
 #include "bigBedFilter.h"
 #include "bigBedLabel.h"
 #include "variation.h"
@@ -721,9 +722,13 @@ if (errCatch->gotError)
 errCatchFree(&errCatch);
 
 fieldCount = track->bedSize;
-boolean bigBedOnePath = cfgOptionBooleanDefault("bigBedOnePath", TRUE);
-if (bigBedOnePath  && (fieldCount == 0))
+if (fieldCount == 0)
     track->bedSize = fieldCount = bbi->definedFieldCount;
+else if (fieldCount > bbi->fieldCount)
+    /* The type line asks for more fields than the file holds, and bedRow below is sized by
+     * the file's own count.  Use that count:  it is the only one the file can answer for,
+     * and it is the one hubCheck already requires the type line to match. */
+    track->bedSize = fieldCount = bbi->fieldCount;
 
 struct bigBedInterval *bb, *bbList; 
 char *quickLiftFile = cloneString(trackDbSetting(track->tdb, "quickLiftUrl"));
@@ -797,24 +802,41 @@ if (!mouseOverIdx)
 // a fake item that is the union of the items that span the current  window
 struct linkedFeatures *spannedLf = NULL;
 unsigned filtered = 0;
+unsigned notLifted = 0;
 struct bed *bed = NULL, *bedCopy = NULL;
+struct hash *mapPsls = NULL;     // mapping alignments quickLift reuses across items
+int lastChromId = -1;
+char otherChrom[bbi->chromBpt->keySize+1];
+char startBuf[16], endBuf[16];
 for (bb = bbList; bb != NULL; bb = bb->next)
     {
     struct linkedFeatures *lf = NULL;
+    // an item that passed the filters but has no clean mapping through the chain was
+    // dropped by the lift, not by a filter, and needs to be reported in its own words
+    boolean liftFailed = FALSE;
     bedCopy = NULL;
     char *bedRow[bbi->fieldCount];
     if (sameString(track->tdb->type, "bigPsl"))
         {
         // fill out bedRow to support mouseOver pattern replacements
-        char startBuf[16], endBuf[16];
         bigBedIntervalToRow(bb, chromName, startBuf, endBuf, bedRow, ArraySize(bedRow));
         char *seq, *cds;
-        struct psl *psl = pslFromBigPsl(chromName, bb, seqTypeField,  &seq, &cds);
-        int sizeMul =  pslIsProtein(psl) ? 3 : 1;
+        // Under quickLift the interval came out of the other assembly's file, so the
+        // alignment has to carry that assembly's sequence name:  chromName is the name on
+        // the reference, and the chains are looked up by the name on the other side.
+        char *pslChrom = chromName;
+        if (quickLiftFile)
+            {
+            bbiCachedChromLookup(bbi, bb->chromId, lastChromId, otherChrom, sizeof otherChrom);
+            lastChromId = bb->chromId;
+            pslChrom = otherChrom;
+            }
+        struct psl *psl = pslFromBigPsl(pslChrom, bb, seqTypeField,  &seq, &cds);
+        boolean isProt = pslIsProtein(psl);
         boolean isXeno = 0;  // just affects grayIx
         boolean nameGetsPos = FALSE; // we want the name to stay the name
 
-        if (sizeMul == 3)
+        if (isProt)
             {
             // these tags are not currently supported by the drawing engine for protein psl
             hashRemove(track->tdb->settingsHash, "showDiffBasesAllScales");
@@ -822,15 +844,41 @@ for (bb = bbList; bb != NULL; bb = bb->next)
             hashRemove(track->tdb->settingsHash, "baseColorDefault");
             }
 
-        lf = lfFromPslx(psl, sizeMul, isXeno, nameGetsPos, track);
-        lf->original = psl;
-        if ((seq != NULL) && (lf->orientation == -1))
-            reverseComplement(seq, strlen(seq));
-        lf->extra = seq;
-        lf->cds = cds;
-        lf->useItemRgb = useItemRgb;
-        if ( lf->useItemRgb )
-            lf->filterColor = itemRgbColumn(bedRow[8]);
+        if (quickLiftFile)
+            {
+            // Move the alignment's target side onto the reference.  Ask the lifted
+            // alignment about its own block sizes rather than reusing isProt:  the lift
+            // puts a protein alignment into nucleotide space on the way through.
+            struct psl *lifted = quickLiftPsl(chainHash, &mapPsls, psl);
+            pslFree(&psl);
+            psl = lifted;
+            }
+
+        if (psl == NULL)
+            liftFailed = TRUE;
+        else
+            {
+            if (quickLiftFile)
+                {
+                // bedRow still holds the pre-lift position, and a $chrom or $chromStart in
+                // a mouseOver has to report where the item is drawn.
+                safef(startBuf, sizeof startBuf, "%d", psl->tStart);
+                safef(endBuf, sizeof endBuf, "%d", psl->tEnd);
+                bedRow[0] = psl->tName;
+                bedRow[1] = startBuf;
+                bedRow[2] = endBuf;
+                }
+            int sizeMul = pslIsProtein(psl) ? 3 : 1;
+            lf = lfFromPslx(psl, sizeMul, isXeno, nameGetsPos, track);
+            lf->original = psl;
+            if ((seq != NULL) && (lf->orientation == -1))
+                reverseComplement(seq, strlen(seq));
+            lf->extra = seq;
+            lf->cds = cds;
+            lf->useItemRgb = useItemRgb;
+            if ( lf->useItemRgb )
+                lf->filterColor = itemRgbColumn(bedRow[8]);
+            }
         }
     else if (sameString(tdb->type, "bigDbSnp"))
         {
@@ -847,12 +895,14 @@ for (bb = bbList; bb != NULL; bb = bb->next)
             {
             if (quickLiftFile)
                 {
-                if ((bed = quickLiftIntervalsToBed(bbi, chainHash, bb)) != NULL)
+                if ((bed = quickLiftIntervalsToBedClip(bbi, chainHash, bb)) != NULL)
                     {
                     bedCopy = cloneBed(bed);
                     lf = bedMungToLinkedFeatures(&bed, tdb, fieldCount,
                         scoreMin, scoreMax, useItemRgb);
                     }
+                else
+                    liftFailed = TRUE;
                 }
             else
                 {
@@ -933,7 +983,10 @@ for (bb = bbList; bb != NULL; bb = bb->next)
 
     if (lf == NULL)
         {
-        filtered++;
+        if (liftFailed)
+            notLifted++;
+        else
+            filtered++;
         continue;
         }
 
@@ -979,6 +1032,9 @@ for (bb = bbList; bb != NULL; bb = bb->next)
 
 if (filtered)
    labelTrackAsFilteredNumber(track, filtered);
+
+if (notLifted)
+   track->longLabel = labelAsNotLiftedNumber(track->longLabel, notLifted);
 
 if (doWindowSizeFilter)
     // add the number of merged items to the track longLabel
@@ -1084,70 +1140,22 @@ struct linkedFeatures *lf = (struct linkedFeatures *)item;
 return lf->label;
 }
 
-#ifdef NOTNOW
-static int getFieldCount(struct track *track)
-// return the definedFieldCount of the passed track with is assumed to be a bigBed
-{
-struct bbiFile *bbi = NULL;
-struct errCatch *errCatch = errCatchNew();
-if (errCatchStart(errCatch))
-    {
-    bbi = fetchBbiForTrack(track);
-    }
-errCatchEnd(errCatch);
-
-if (bbi)
-    return bbi->definedFieldCount;
-
-return 3; // if we can't get the bbi, use the minimum
-}
-#endif
-
 void commonBigBedMethods(struct track *track, struct trackDb *tdb, 
                                 int wordCount, char *words[])
 /* Set up common bigBed methods used by several track types that depend on the bigBed format. */
 {
-boolean bigBedOnePath = cfgOptionBooleanDefault("bigBedOnePath", TRUE);
+track->isBigBed = TRUE;
+linkedFeaturesMethods(track);
+track->extraUiData = newBedUiData(track->track);
+track->loadItems = loadGappedBed;
 
-if (bigBedOnePath)
+if (wordCount > 1)
+    track->bedSize = atoi(words[1]);
+
+if (trackDbSetting(tdb, "colorByStrand"))
     {
-    track->isBigBed = TRUE;
-    linkedFeaturesMethods(track);
-    track->extraUiData = newBedUiData(track->track);
-    track->loadItems = loadGappedBed;
-
-    if (wordCount > 1)
-        track->bedSize = atoi(words[1]);
-
-    if (trackDbSetting(tdb, "colorByStrand"))
-        {
-        Color lfItemColorByStrand(struct track *tg, void *item, struct hvGfx *hvg);
-        track->itemColor = lfItemColorByStrand;
-        }
-    }
-else 
-    {
-    char *newWords[wordCount];
-
-    int ii;
-    for(ii=0; ii < wordCount; ii++)
-        newWords[ii] = words[ii];
-
-    #ifdef NOTNOW
-    // let's help the user out and get the definedFieldCount if they didn't specify it on the type line
-    if (!tdbIsSuper(track->tdb) && (track->tdb->subtracks == NULL) && (wordCount == 1) && sameString(words[0], "bigBed"))
-        {
-        int fieldCount = getFieldCount(track);
-        if (fieldCount > 3) 
-            {
-            char buffer[1024];
-            safef(buffer, sizeof buffer, "%d", fieldCount);
-            newWords[1] = cloneString(buffer);
-            wordCount = 2;
-            }
-        }
-    #endif
-    complexBedMethods(track, tdb, TRUE, wordCount, newWords);
+    Color lfItemColorByStrand(struct track *tg, void *item, struct hvGfx *hvg);
+    track->itemColor = lfItemColorByStrand;
     }
 track->loadSummary = loadBigBedSummary;
 }

@@ -1,3 +1,17 @@
+/* The browser UI is designed for a light background only. Declare that, so iOS
+ * Safari (and macOS Safari / Chrome) do not auto-darken native form controls in
+ * Dark Mode - which otherwise turns button text white on the light-grey button
+ * background, making the nav/zoom buttons unreadable on iPhones. */
+:root {
+    color-scheme: light;
+    /* Stop iOS Safari from auto-inflating "body" text (blue-bar group labels,
+     * the tutorial notice, "Zoom out", #size, ...) to a larger size than the
+     * form controls next to it, which leaves the page with wildly uneven text.
+     * 100% (not none) still lets the user pinch-zoom. */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+}
+
 body {
     font-family: Arial, Helvetica, sans-serif;
     background: #fff9d2;
@@ -50,6 +64,7 @@ input[type="submit"], input[type="button"], button {
     padding-top: 3px;
     padding-bottom: 3px;
     background-color: #EEE;
+    color: #000;
 }
 
 input[type="submit"]:hover, input[type="button"]:hover, button:hover {
@@ -944,9 +959,20 @@ body.oldStaticPage .sectionContent {
 .notifBox {
     background-color: beige;
     border: 1px solid grey;
-    padding: 5px; 
+    padding: 5px;
     margin: 5px;
     text-align: center;
+}
+
+/* a notifBox that is only shown on the page where something happened, e.g. after a session
+ * was loaded. Card grey of the Sessions page, and left-aligned, as the text is a paragraph */
+.notifBoxOnce {
+    background-color: #f6f8fa;
+    border: 1px solid #d0d0d0;
+    padding: 10px 14px;
+    /* the width is not set, so that the box cannot stick out to the right of the window */
+    margin: 5px 10px 5px 100px;
+    text-align: left;
 }
 
 /* For jquery-ui dialog box */

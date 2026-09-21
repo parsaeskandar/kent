@@ -1,5 +1,15 @@
-# A space delimited file of track relatedness. All entries must be reciprocal. Format:
+# A space delimited file of track relatedness. Format:
 # ucscDb track trackLinkingTo reason
+#
+# By default entries are reciprocal, so each relationship needs a line in each
+# direction. Prefix the first track with '>' for a relationship that only goes one
+# way, or with '~' to get both directions out of a single line when the reason is
+# the same either way. Neither form needs a reciprocal line. Format:
+# ucscDb >track trackLinkingTo reason
+# ucscDb ~track trackLinkingTo reason
+#
+# The reason is displayed after the linked track's short label, as
+# "Short Label: reason", so do not begin the reason with the track's own name.
 
 # hg38:
 hg38 knownGene knownGeneArchive View previous versions of GENCODE Genes
@@ -8,86 +18,84 @@ hg38 knownGeneArchive knownGene View the latest GENCODE Genes version
 hg38 miRnaAtlas nonCodingRNAs View associated precursor miRnas
 hg38 nonCodingRNAs miRnaAtlas View expression of cleaved miRnas
 
-hg38 caddSuper gnomad View associated variants
-hg38 gnomad caddSuper View CADD scores for this variant and region
+hg38 caddSuper gnomadVariants View associated variants
+hg38 gnomadVariants caddSuper View CADD scores for this variant and region
 
 hg38 constraintSuper gnomadPLI Predicted constraint metrics from gnomAD
 hg38 gnomadPLI constraintSuper Container track of various constraint scores
 
-hg38 gnomadStr strVar A collection of population-level STR variation tracks across the genome
-hg38 strVar gnomadStr Population-level STR variation across disease-associated loci from gnomAD v3.1.3
+hg38 >imprinting humanMethylationAtlasSummary Methylation of purified cell types, from the Kaplan lab
+hg38 >humanMethylationAtlasSummary imprinting Imprinted genes and allele-specific methylation
 
-hg38 varFreqs gnomadVariants Harmonized allele frequencies from ~800,000 exomes and genomes (gnomAD)
+hg38 gnomadStr strVar Population-level short tandem repeat and VNTR variation from multiple projects
+hg38 strVar gnomadStr Short tandem repeat genotypes at disease-associated loci, from gnomAD v3.1.3
+
+hg38 varFreqs gnomadVariants Harmonized allele frequencies from ~800,000 exomes and genomes
 hg38 gnomadVariants varFreqs Allele frequencies from population-scale projects worldwide, not reprocessed by gnomAD
 
-hg38 varFreqs strVar Population-level tandem repeat (STR) variation across disease-associated loci
+hg38 varFreqs strVar Population-level short tandem repeat and VNTR variation from multiple projects
 hg38 strVar varFreqs SNV and indel allele frequencies from population-scale sequencing and array projects
 
-hg38 revel liftHg38 Revel is based on hg19 and lifted to hg38. liftOver "chain" alignment from hg19 to hg38
-hg38 liftHg38 revel Revel scores were lifted using UCSC liftOver chains from hg38
+hg38 >revel liftHg19 REVEL is based on hg19 and lifted to hg38 with these liftOver chain alignments
 
-hg38 revel caddSuper CADD, a similar deleteriousness score, and not used as an input by REVEL
-hg38 caddSuper revel REVEL, a similar deleteriousness score
+hg38 revel caddSuper A similar deleteriousness score, not used as an input by REVEL
+hg38 caddSuper revel A similar deleteriousness score
 
-hg38 liftHg19 grcIncidentDb GRC Incident database, to explore reasons why the assembly was changed
-hg38 grcIncidentDb liftHg19 LiftOver for hg38, explores how incident regions aligned between human assemblies
+hg38 liftHg19 grcIncidentDb Reasons why the assembly was changed in this region
+hg38 grcIncidentDb liftHg19 Explore how incident regions aligned between the human assemblies
 
 hg38 ReMap liftHg19 NCBI ReMap, even though it has the same name, is a liftOver-like hg19/hg38 alignment, and unrelated to the ReMap database
-hg38 liftHg19 ReMap ReMap, even though it has the same name, is a database of transcription factor binding sites, unrelated to NCBI ReMap
+hg38 liftHg19 ReMap Even though it has the same name, this is a database of transcription factor binding sites, unrelated to NCBI ReMap
 
-hg38 ReMap jaspar JASPAR is a database of predicted TF binding sites, based on short DNA matches. Unlike ReMap, the data is purely computational.
+hg38 ReMap jaspar A database of predicted TF binding sites, based on short DNA matches. Unlike ReMap, the data is purely computational.
 
-hg38 jaspar ReMap ReMap is a database of TF binding sites inferred from ChIP-Seq Data. Unlike JASPAR predictions, these sites are supported by functional assay
+hg38 jaspar ReMap A database of TF binding sites inferred from ChIP-Seq data. Unlike JASPAR predictions, these sites are supported by functional assay
 
-hg38 problematic mappability The mappability track contains regions where short sequencing reads are hard to align
-hg38 mappability problematic The problematic regions track contains various gene clusters and the ENCODE blacklist
-hg38 problematic grcIncidentDb The GRC (Genome Reference Consortium) incidents track contains regions that were flagged by the group that puts together the genome 
-hg38 grcIncidentDb problematic The problematic regions track lists unusual regions and the ones that often lead to artefacts when aligning reads to the reference genome
+hg38 problematic mappability Regions where short sequencing reads are hard to align
+hg38 mappability problematic Various gene clusters and the ENCODE blacklist
+hg38 problematic grcIncidentDb Regions flagged by the Genome Reference Consortium, the group that puts together the genome
+hg38 grcIncidentDb problematic Unusual regions, and the ones that often lead to artefacts when aligning reads to the reference genome
 
-hg38 phasedVars varFreqs The variant frequencies track contains projects where variant frequencies, aka allele frequencies, are publicly available.
-hg38 varFreqs phasedVars The phased variants track contains projects that provide haplotype-phased genotypes/variants.
+hg38 phasedVars varFreqs Projects where variant frequencies, aka allele frequencies, are publicly available
+hg38 varFreqs phasedVars Projects that provide haplotype-phased genotypes and variants
 
-hg38 wgEncodeReg4 wgEncodeReg Previous ENCODE3 Regulation track
-hg38 wgEncodeReg wgEncodeReg4 New ENCODE4 Regulation track
-hg38 wgEncodeReg4 cCREs Related ENCODE4 cCRE annotations
-hg38 cCREs wgEncodeReg4 Related ENCODE4 regulation data
+hg38 wgEncodeReg4 wgEncodeReg The previous version of this track
+hg38 wgEncodeReg wgEncodeReg4 The newer version of this track
+hg38 ~wgEncodeReg4 cCREs Related ENCODE4 data
 
-hg38 avada varaico The AVADA track is no longer updated. See VARAICO for the latest variants mined from papers.
-hg38 varaico avada Previous literature mining track for variants extracted from publications. No longer updated.
+hg38 >avada varaico The latest variants mined from published papers. The AVADA track is no longer updated.
 
 # hg19:
-hg19 caddSuper gnomad View associated variants
-hg19 gnomad caddSuper View CADD scores for this variant and region
+hg19 caddSuper gnomadSuper View associated variants
+hg19 gnomadSuper caddSuper View CADD scores for this variant and region
 
 hg19 decipherHaploIns gnomadPLI Compare haploinsufficiency metrics as defined by gnomAD
 hg19 gnomadPLI decipherHaploIns Compare constraint metrics as defined by DECIPHER
 
-hg19 revel caddSuper CADD, a similar deleteriousness score, and not used as an input by REVEL
-hg19 caddSuper revel REVEL, a similar deleteriousness score
+hg19 revel caddSuper A similar deleteriousness score, not used as an input by REVEL
+hg19 caddSuper revel A similar deleteriousness score
 
-hg19 liftHg38 grcIncidentDb GRC Incident database, to explore reasons why the assembly was changed
-hg19 grcIncidentDb liftHg38 LiftOver alignments between hg38 and hg38 to explore how the GRC incident assembly changes affect whole-genome alignments between hg19 and hg38 used for lifting data from hg19
+hg19 liftHg38 grcIncidentDb Reasons why the assembly was changed in this region
+hg19 grcIncidentDb liftHg38 Alignments between hg19 and hg38, to explore how GRC incident assembly changes affect the whole-genome alignments used for lifting data from hg19
 
 hg19 fixSeqLiftOverPsl liftHg38 Investigate how patches affect the whole-genome alignment used for liftOver
 hg19 liftHg38 fixSeqLiftOverPsl Investigate how assembly patches affect the liftOver alignment
 
-hg19 liftHg38 hg38ContigDiff Hg38 Diff shows contigs that were changed from hg19 to hg38
+hg19 liftHg38 hg38ContigDiff Contigs that were changed from hg19 to hg38
 hg19 hg38ContigDiff liftHg38 Investigate how contig changes affect the liftOver alignments
 
-hg19 jaspar ReMap ReMap is a database of TF binding sites inferred from ChIP-Seq Data. Unlike JASPAR predictions, these sites are supported by functional assay
-hg19 ReMap jaspar JASPAR is a database of predicted TF binding sites, based on short DNA matches. Unlike ReMap, the data is purely computational.
+hg19 jaspar ReMap A database of TF binding sites inferred from ChIP-Seq data. Unlike JASPAR predictions, these sites are supported by functional assay
+hg19 ReMap jaspar A database of predicted TF binding sites, based on short DNA matches. Unlike ReMap, the data is purely computational.
 
 hg19 ReMap liftHg38 NCBI ReMap, even though it has the same name, is a liftOver-like hg19/hg38 alignment, and unrelated to the ReMap database
-hg19 liftHg38 ReMap ReMap, even though it has the same name, is a database of transcription factor binding sites, unrelated to NCBI ReMap
+hg19 liftHg38 ReMap Even though it has the same name, this is a database of transcription factor binding sites, unrelated to NCBI ReMap
 
-hg19 refSeqComposite pseudoYale60 NCBI RefSeq Curated and RefSeq Other contains pseudogenes, but the Yale annotation should be more comprehensive for this transcript type
-hg19 pseudoYale60 refSeqComposite NCBI RefSeq Curated and RefSeq Other also contain some transcribed and untranscribed pseudogenes, respectively.
+hg19 >pseudoYale60 refSeqComposite The Curated and Other subtracks also contain some transcribed and untranscribed pseudogenes, respectively
 
 hg19 constraintSuper gnomadPLI Predicted constraint metrics from gnomAD
 hg19 gnomadPLI constraintSuper Container track of various constraint scores
 
-hg19 avada varaico The AVADA track is no longer updated. See VARAICO for the latest variants mined from papers.
-hg19 varaico avada Previous literature mining track for variants extracted from publications. No longer updated.
+hg19 >avada varaico The latest variants mined from published papers. The AVADA track is no longer updated.
 
 # mm39:
 
@@ -95,14 +103,15 @@ mm39 knownGene knownGeneArchive View previous versions of GENCODE Genes
 mm39 knownGeneArchive knownGene View the latest GENCODE Genes version
 
 # mm10 ENCODE4 Regulation:
-mm10 encode4Reg encode3Reg Previous ENCODE3 Regulation track
-mm10 encode3Reg encode4Reg New ENCODE4 Regulation track
-mm10 encode4Reg cCREs Related ENCODE4 cCRE annotations
-mm10 cCREs encode4Reg Related ENCODE4 regulation data
-mm10 mouseDevTimecourse encode3Reg Related ENCODE3 Regulation tracks
-mm10 encode3Reg mouseDevTimecourse Related ENCODE Expression track
-mm10 mouseDevTimecourse encode4Reg Related ENCODE4 Regulation tracks
-mm10 encode4Reg mouseDevTimecourse Related ENCODE Expression track
+mm10 encode4Reg encode3Reg The previous version of this track
+mm10 encode3Reg encode4Reg The newer version of this track
+mm10 ~encode4Reg cCREs Related ENCODE4 data
+mm10 ~mouseDevTimecourse encode3Reg Related ENCODE track
+mm10 ~mouseDevTimecourse encode4Reg Related ENCODE track
+
+# mm10 mouse gene expression cross-links:
+mm10 mouseDevTimecourse tabulaMuris Single-cell gene expression across adult mouse organs
+mm10 tabulaMuris mouseDevTimecourse Bulk RNA-seq gene expression across mouse development
 
 # hg38 long-read SV supertrack cross-links to other SV resources:
 hg38 longReadVariants gnomadStructuralVariants Short-read structural variants from gnomAD v4.1
@@ -119,66 +128,63 @@ hs1 longReadVariants mei Polymorphic Mobile Element Insertions (Alu, L1, SVA, HE
 hs1 mei longReadVariants Long-read structural variants across multiple cohorts (parent SV callsets for the HGSVC3 MEI track)
 
 # EVE cross-links:
-hg38 eve alphaMissense AlphaMissense, a similar deep-learning missense pathogenicity predictor
-hg38 alphaMissense eve EVE, a missense pathogenicity predictor trained on evolutionary sequence variation
-hg38 eve primateAi PrimateAI-3D, a similar deep-learning missense pathogenicity predictor using primate variation
-hg38 primateAi eve EVE, a missense pathogenicity predictor trained on evolutionary sequence variation
-hg38 eve revel REVEL, an ensemble missense pathogenicity score built from multiple predictors
-hg38 revel eve EVE, a missense pathogenicity predictor trained on evolutionary sequence variation
-hg38 eve clinPred ClinPred, an ensemble missense pathogenicity predictor that incorporates gnomAD allele frequency
-hg38 clinPred eve EVE, a missense pathogenicity predictor trained on evolutionary sequence variation
+hg38 eve alphaMissense A similar deep-learning missense pathogenicity predictor
+hg38 alphaMissense eve A missense pathogenicity predictor trained on evolutionary sequence variation
+hg38 eve primateAi A similar deep-learning missense pathogenicity predictor using primate variation
+hg38 primateAi eve A missense pathogenicity predictor trained on evolutionary sequence variation
+hg38 eve revel An ensemble missense pathogenicity score built from multiple predictors
+hg38 revel eve A missense pathogenicity predictor trained on evolutionary sequence variation
+hg38 eve clinPred An ensemble missense pathogenicity predictor that incorporates gnomAD allele frequency
+hg38 clinPred eve A missense pathogenicity predictor trained on evolutionary sequence variation
 
 # PrimateAI-3D cross-links:
-hg38 primateAi alphaMissense AlphaMissense, a similar deep-learning missense pathogenicity predictor
-hg38 alphaMissense primateAi PrimateAI-3D, a similar deep-learning missense pathogenicity predictor using primate variation
-hg38 primateAi revel REVEL, an ensemble missense pathogenicity score built from multiple predictors
-hg38 revel primateAi PrimateAI-3D, a missense pathogenicity predictor using primate variation and 3D protein structure
+hg38 ~primateAi alphaMissense A similar deep-learning missense pathogenicity predictor
+hg38 primateAi revel An ensemble missense pathogenicity score built from multiple predictors
+hg38 revel primateAi A missense pathogenicity predictor using primate variation and 3D protein structure
 
-hg19 primateAi revel REVEL, an ensemble missense pathogenicity score built from multiple predictors
-hg19 revel primateAi PrimateAI-3D, a missense pathogenicity predictor using primate variation and 3D protein structure
+hg19 primateAi revel An ensemble missense pathogenicity score built from multiple predictors
+hg19 revel primateAi A missense pathogenicity predictor using primate variation and 3D protein structure
 
 # ClinPred cross-links:
-hg38 clinPred revel REVEL, an ensemble missense pathogenicity score using a similar machine-learning approach
-hg38 revel clinPred ClinPred, an ensemble missense pathogenicity predictor that incorporates gnomAD allele frequency
-hg38 clinPred caddSuper CADD, a similar deleteriousness score
-hg38 caddSuper clinPred ClinPred, a missense-only pathogenicity predictor
-hg38 clinPred primateAi PrimateAI-3D, a missense pathogenicity predictor using primate variation
-hg38 primateAi clinPred ClinPred, an ensemble missense predictor incorporating gnomAD allele frequency
-hg38 clinPred alphaMissense AlphaMissense, a deep-learning missense pathogenicity predictor
-hg38 alphaMissense clinPred ClinPred, an ensemble missense predictor incorporating gnomAD allele frequency
+hg38 clinPred revel An ensemble missense pathogenicity score using a similar machine-learning approach
+hg38 revel clinPred An ensemble missense pathogenicity predictor that incorporates gnomAD allele frequency
+hg38 clinPred caddSuper A similar deleteriousness score
+hg38 caddSuper clinPred A missense-only pathogenicity predictor
+hg38 clinPred primateAi A missense pathogenicity predictor using primate variation
+hg38 primateAi clinPred An ensemble missense predictor incorporating gnomAD allele frequency
+hg38 clinPred alphaMissense A deep-learning missense pathogenicity predictor
+hg38 alphaMissense clinPred An ensemble missense predictor incorporating gnomAD allele frequency
 
 # popEVE cross-links:
-hg38 popEve eve EVE, a missense pathogenicity predictor trained on evolutionary sequence variation, and an input to popEVE
-hg38 eve popEve popEVE, a proteome-wide missense deleteriousness model built on EVE and calibrated with human population data
-hg38 popEve alphaMissense AlphaMissense, a similar deep-learning missense pathogenicity predictor
-hg38 alphaMissense popEve popEVE, a proteome-wide missense deleteriousness model combining evolutionary and human population data
-hg38 popEve primateAi PrimateAI-3D, a similar deep-learning missense pathogenicity predictor using primate variation
-hg38 primateAi popEve popEVE, a proteome-wide missense deleteriousness model combining evolutionary and human population data
-hg38 popEve clinPred ClinPred, an ensemble missense pathogenicity predictor that incorporates gnomAD allele frequency
-hg38 clinPred popEve popEVE, a proteome-wide missense deleteriousness model combining evolutionary and human population data
-hg38 popEve revel REVEL, an ensemble missense pathogenicity score built from multiple predictors
-hg38 revel popEve popEVE, a proteome-wide missense deleteriousness model combining evolutionary and human population data
+hg38 popEve eve A missense pathogenicity predictor trained on evolutionary sequence variation, and an input to popEVE
+hg38 eve popEve A proteome-wide missense deleteriousness model built on EVE and calibrated with human population data
+hg38 popEve alphaMissense A similar deep-learning missense pathogenicity predictor
+hg38 alphaMissense popEve A proteome-wide missense deleteriousness model combining evolutionary and human population data
+hg38 popEve primateAi A similar deep-learning missense pathogenicity predictor using primate variation
+hg38 primateAi popEve A proteome-wide missense deleteriousness model combining evolutionary and human population data
+hg38 popEve clinPred An ensemble missense pathogenicity predictor that incorporates gnomAD allele frequency
+hg38 clinPred popEve A proteome-wide missense deleteriousness model combining evolutionary and human population data
+hg38 popEve revel An ensemble missense pathogenicity score built from multiple predictors
+hg38 revel popEve A proteome-wide missense deleteriousness model combining evolutionary and human population data
 
-hg19 clinPred revel REVEL, an ensemble missense pathogenicity score using a similar machine-learning approach
-hg19 revel clinPred ClinPred, an ensemble missense pathogenicity predictor that incorporates gnomAD allele frequency
-hg19 clinPred caddSuper CADD, a similar deleteriousness score
-hg19 caddSuper clinPred ClinPred, a missense-only pathogenicity predictor
-hg19 clinPred primateAi PrimateAI-3D, a missense pathogenicity predictor using primate variation
-hg19 primateAi clinPred ClinPred, an ensemble missense predictor incorporating gnomAD allele frequency
-hg19 clinPred alphaMissense AlphaMissense, a deep-learning missense pathogenicity predictor
-hg19 alphaMissense clinPred ClinPred, an ensemble missense predictor incorporating gnomAD allele frequency
+hg19 clinPred revel An ensemble missense pathogenicity score using a similar machine-learning approach
+hg19 revel clinPred An ensemble missense pathogenicity predictor that incorporates gnomAD allele frequency
+hg19 clinPred caddSuper A similar deleteriousness score
+hg19 caddSuper clinPred A missense-only pathogenicity predictor
+hg19 clinPred primateAi A missense pathogenicity predictor using primate variation
+hg19 primateAi clinPred An ensemble missense predictor incorporating gnomAD allele frequency
+hg19 clinPred alphaMissense A deep-learning missense pathogenicity predictor
+hg19 alphaMissense clinPred An ensemble missense predictor incorporating gnomAD allele frequency
 
 # PromoterAI cross-links:
-hg38 promoterAi primateAi PrimateAI-3D, a companion deep-learning model from Illumina for coding (missense) variants
-hg38 primateAi promoterAi PromoterAI, a companion deep-learning model from Illumina for non-coding promoter variants
-hg38 promoterAi alphaMissense AlphaMissense, a deep-learning predictor of missense (coding) variant pathogenicity
-hg38 alphaMissense promoterAi PromoterAI, a deep-learning predictor of expression-altering variants in promoter regions
+hg38 promoterAi primateAi A companion deep-learning model from Illumina for coding (missense) variants
+hg38 primateAi promoterAi A companion deep-learning model from Illumina for non-coding promoter variants
+hg38 promoterAi alphaMissense A deep-learning predictor of missense (coding) variant pathogenicity
+hg38 alphaMissense promoterAi A deep-learning predictor of expression-altering variants in promoter regions
 
 # NMD Escape cross-links:
-hg38 nmd mane MANE Select transcripts from NCBI/EBI, a curated subset of RefSeq/Ensembl transcripts used as clinical reference
-hg38 mane nmd NMD Escape: predicted regions where premature termination codons escape nonsense-mediated decay
-hg38 nmd ncbiRefSeq NCBI RefSeq transcripts, the source annotation set for the NMD Escape RefSeq subtrack
-hg38 ncbiRefSeq nmd NMD Escape: predicted regions where premature termination codons escape nonsense-mediated decay
+hg38 >nmd mane Select transcripts from NCBI and EBI, a curated subset of RefSeq and Ensembl transcripts used as a clinical reference
+hg38 >nmd ncbiRefSeq NCBI RefSeq transcripts, the source annotation set for the NMD Escape RefSeq subtrack
 
 # MPRA cross-links:
 hg38 mpra wgEncodeReg4 ENCODE regulatory region annotations, many of which are tested by MPRA assays
@@ -204,3 +210,439 @@ hg19 cnvDevDelay dosageSensitivity Predicted gene-level haploinsufficiency (pHap
 # danRer11 BAC clone tracks:
 danRer11 bacEndPairsLift choriCloneEnds CHORI zebrafish BAC clone end placements (CH73, CH211, CH1073) from NCBI Clone DB on GRCz11
 danRer11 choriCloneEnds bacEndPairsLift Zebrafish BAC end pairs lifted from danRer4 (older UCSC BLAT placements)
+
+# Relationships added from the #38016 audit. Version successions run one way,
+# from the older track to the newer one; archives are reciprocal.
+
+# Version successions, from the older track to the newer one:
+hg38 >caddSuper caddSuper1_7 The newer CADD release, with an updated model and training set
+hg38 >cosmicRegions cosmicMuts Individual somatic mutations from the current COSMIC release (V101)
+hg38 dbSnp155Composite dbSnpArchive Older dbSNP builds, kept for reproducing earlier analyses
+hg38 dbSnpArchive dbSnp155Composite The dbSNP release currently used by the Browser
+hg38 >gtexGene gtexGeneV8 The newer GTEx release, 54 tissues from 948 donors
+hg38 >covidHgiGwas covidHgiGwasR4Pval A later release of the same COVID-19 Host Genetics Initiative meta-analysis
+hg38 >colorsDbLegacy longReadVariants Current long-read structural variant callsets, including the up-to-date CoLoRSdb release
+hg38 >transMapV5 transMapV6 The current version of the TransMap alignments
+hg38 knownGeneArchive wgEncodeGencodeSuper All transcripts from each GENCODE release, including sets never used as the default gene track
+hg38 wgEncodeGencodeSuper knownGeneArchive Previous default gene tracks, one per GENCODE release
+hg38 >genePredArchive knownGene The current default gene set
+
+hg19 >caddSuper caddSuper1_7 The newer CADD release, with an updated model and training set
+hg19 >cosmicRegions cosmicMuts Individual somatic mutations from the current COSMIC release (V101)
+hg19 dbSnp155Composite dbSnpArchive Older dbSNP builds, kept for reproducing earlier analyses
+hg19 dbSnpArchive dbSnp155Composite The dbSNP release currently used by the Browser
+hg19 >gtexGene gtexGeneV8 The newer GTEx release, 54 tissues from 948 donors
+hg19 >covidHgiGwas covidHgiGwasR4Pval A later release of the same COVID-19 Host Genetics Initiative meta-analysis
+hg19 >transMapV5 transMapV6 The current version of the TransMap alignments
+hg19 knownGeneArchive wgEncodeGencodeSuper All transcripts from each GENCODE release, including sets never used as the default gene track
+hg19 wgEncodeGencodeSuper knownGeneArchive Previous default gene tracks, one per GENCODE release
+hg19 >genePredArchive knownGene The current default gene set
+hg19 >ensGene knownGene The current GENCODE gene set, which shares its annotation with Ensembl
+
+mm39 knownGeneArchive wgEncodeGencodeSuper All transcripts from each GENCODE release, including sets never used as the default gene track
+mm39 wgEncodeGencodeSuper knownGeneArchive Previous default gene tracks, one per GENCODE release
+
+mm10 >transMapV5 transMapV6 The current version of the TransMap alignments
+
+# Clinical variant database cross-links:
+hg38 clinvar hgmd Disease-causing mutations curated from the literature by HGMD; the public release lags the licensed version
+hg38 hgmd clinvar Variant interpretations submitted by clinical laboratories, with review status and conflicts
+hg38 clinvar lovdComp Variants collected in the gene-specific Leiden Open Variation Database instances
+hg38 lovdComp clinvar Variant interpretations submitted by clinical laboratories worldwide
+hg38 clinvar decipherContainer Patient variants and CNVs from the DECIPHER developmental disorder database
+hg38 decipherContainer clinvar Variant interpretations submitted by clinical laboratories, with review status
+hg38 clinvarMapped clinvar The original, directly submitted ClinVar variant records
+hg38 clinvar clinvarMapped Coding variants projected onto paralogous loci by sequence homology
+hg38 mitoMap nuMtSeq Mitochondrial segments inserted into the nuclear genome, a common source of false-positive chrM variant calls
+hg38 nuMtSeq mitoMap Variants and annotations on the mitochondrial genome itself
+
+hg19 clinvar hgmd Disease-causing mutations curated from the literature by HGMD; the public release lags the licensed version
+hg19 hgmd clinvar Variant interpretations submitted by clinical laboratories, with review status and conflicts
+hg19 clinvar lovdComp Variants collected in the gene-specific Leiden Open Variation Database instances
+hg19 lovdComp clinvar Variant interpretations submitted by clinical laboratories worldwide
+hg19 clinvar decipherContainer Patient variants and CNVs from the DECIPHER developmental disorder database
+hg19 decipherContainer clinvar Variant interpretations submitted by clinical laboratories, with review status
+
+# Gene-disease curation cross-links:
+hg38 genCC g2p Gene-disease pairs curated by the Gene2Phenotype project, one of the sources GenCC aggregates
+hg38 g2p genCC Gene-disease assertions from several curation groups, harmonized into one set
+hg38 genCC panelApp Diagnostic gene panels from Genomics England and Australia, one of the sources GenCC aggregates
+hg38 panelApp genCC Gene-disease assertions from several curation groups, harmonized into one set
+hg38 genCC orphadata Rare disease gene annotations from Orphanet, one of the sources GenCC aggregates
+hg38 orphadata genCC Gene-disease assertions from several curation groups, harmonized into one set
+hg38 genCC clinGenComp Expert-panel gene-disease validity and dosage sensitivity curation, one of the sources GenCC aggregates
+hg38 clinGenComp genCC Gene-disease assertions from several curation groups, harmonized into one set
+hg38 geneReviews omimContainer Gene and phenotype records from OMIM, the standard reference for Mendelian disease genes
+hg38 omimContainer geneReviews Expert-authored clinical summaries for genetic conditions, with diagnosis and management guidance
+hg38 genCC omimContainer Gene and phenotype records from OMIM, the reference these curation efforts cite
+hg38 omimContainer genCC Gene-disease assertions from several curation groups, harmonized into one set
+hg38 orphadata omimContainer Gene and phenotype records from OMIM, cross-referenced throughout Orphanet
+hg38 omimContainer orphadata Rare disease gene annotations from Orphanet
+hg38 g2p omimContainer Gene and phenotype records from OMIM, the reference these curation efforts cite
+hg38 omimContainer g2p Gene-disease pairs curated by the Gene2Phenotype project
+
+hg19 genCC g2p Gene-disease pairs curated by the Gene2Phenotype project, one of the sources GenCC aggregates
+hg19 g2p genCC Gene-disease assertions from several curation groups, harmonized into one set
+hg19 genCC panelApp Diagnostic gene panels from Genomics England and Australia, one of the sources GenCC aggregates
+hg19 panelApp genCC Gene-disease assertions from several curation groups, harmonized into one set
+hg19 genCC orphadata Rare disease gene annotations from Orphanet, one of the sources GenCC aggregates
+hg19 orphadata genCC Gene-disease assertions from several curation groups, harmonized into one set
+hg19 genCC clinGenComp Expert-panel gene-disease validity and dosage sensitivity curation, one of the sources GenCC aggregates
+hg19 clinGenComp genCC Gene-disease assertions from several curation groups, harmonized into one set
+hg19 geneReviews omimContainer Gene and phenotype records from OMIM, the standard reference for Mendelian disease genes
+hg19 omimContainer geneReviews Expert-authored clinical summaries for genetic conditions, with diagnosis and management guidance
+hg19 genCC omimContainer Gene and phenotype records from OMIM, the reference these curation efforts cite
+hg19 omimContainer genCC Gene-disease assertions from several curation groups, harmonized into one set
+hg19 orphadata omimContainer Gene and phenotype records from OMIM, cross-referenced throughout Orphanet
+hg19 omimContainer orphadata Rare disease gene annotations from Orphanet
+hg19 g2p omimContainer Gene and phenotype records from OMIM, the reference these curation efforts cite
+hg19 omimContainer g2p Gene-disease pairs curated by the Gene2Phenotype project
+
+# Cancer somatic variant cross-links:
+hg38 cancerMutations gdcCancer The same TCGA somatic mutations, summarized across all 33 Pan-Cancer projects
+hg38 gdcCancer cancerMutations TCGA somatic mutations shown separately for each cancer study
+hg38 cosmicMuts civic Clinically interpreted cancer variants, with evidence for diagnosis, prognosis and drug response
+hg38 civic cosmicMuts A broad catalog of somatic mutations reported in cancer, without clinical interpretation
+hg38 gdcCancer cancerExpr Gene expression measured in the same 33 TCGA cancer projects
+hg38 cancerExpr gdcCancer Somatic mutations called in the same 33 TCGA cancer projects
+hg38 >dbVar_somatic cosmicMuts A much larger catalog of somatic point mutations in cancer
+
+hg19 cosmicMuts civic Clinically interpreted cancer variants, with evidence for diagnosis, prognosis and drug response
+hg19 civic cosmicMuts A broad catalog of somatic mutations reported in cancer, without clinical interpretation
+hg19 >dbVar_somatic cosmicMuts A much larger catalog of somatic point mutations in cancer
+
+# Structural variation cross-links:
+hg38 >srSv longReadVariants The long-read structural variant callsets these short-read sets are compared against
+hg38 >platinumGenomes giab A larger and more current benchmark callset from well-characterized reference samples
+hg38 iscaComposite dgvPlus Structural variants seen in apparently healthy individuals, for frequency context
+hg38 dgvPlus iscaComposite Clinically curated CNVs from ClinGen, with pathogenicity assertions
+hg38 >coriellDelDup iscaComposite Clinically curated CNVs from ClinGen, with pathogenicity assertions
+hg38 iscaComposite clinGenComp Gene-level dosage sensitivity and gene-disease validity curation from the same expert panels
+hg38 clinGenComp iscaComposite Individual CNVs curated by ClinGen, with pathogenicity assertions
+hg38 ~genomicSuperDups tanDups Another view of near-identical duplicated sequence in the genome
+
+hg19 >platinumGenomes giab A larger and more current benchmark callset from well-characterized reference samples
+hg19 iscaComposite dgvPlus Structural variants seen in apparently healthy individuals, for frequency context
+hg19 dgvPlus iscaComposite Clinically curated CNVs from ClinGen, with pathogenicity assertions
+hg19 >coriellDelDup iscaComposite Clinically curated CNVs from ClinGen, with pathogenicity assertions
+hg19 iscaComposite clinGenComp Gene-level dosage sensitivity and gene-disease validity curation from the same expert panels
+hg19 clinGenComp iscaComposite Individual CNVs curated by ClinGen, with pathogenicity assertions
+hg19 ~genomicSuperDups tanDups Another view of near-identical duplicated sequence in the genome
+
+mm10 ~genomicSuperDups tanDups Another view of near-identical duplicated sequence in the genome
+
+# Tandem repeat cross-links:
+hg38 strVar simpleRepeat Tandem repeats annotated in the reference sequence by Tandem Repeats Finder
+hg38 simpleRepeat strVar Population variation in the length of tandem repeats
+hg38 ~trexplorer webstr Another genome-wide tandem repeat catalog with per-locus allele distributions
+hg38 ~microsat simpleRepeat Another annotation of short tandem repeats in the reference sequence
+
+hg19 ~microsat simpleRepeat Another annotation of short tandem repeats in the reference sequence
+
+mm39 ~microsat simpleRepeat Another annotation of short tandem repeats in the reference sequence
+
+mm10 ~microsat simpleRepeat Another annotation of short tandem repeats in the reference sequence
+
+# Allele frequency cross-links:
+hg38 >tgpArchive varFreqs Allele frequencies from many newer population-scale sequencing projects
+
+# Regulation cross-links:
+hg38 geneHancer oreganno Literature-curated regulatory elements and transcription factor binding sites
+hg38 oreganno geneHancer Enhancers and promoters with predicted target genes, integrated from several sources
+hg38 geneHancer vistaEnhancersBb Enhancers tested for activity in transgenic mouse embryos
+hg38 vistaEnhancersBb geneHancer Predicted enhancers and promoters with their likely target genes
+hg38 cCREs refSeqFuncElems Regulatory and other functional elements curated by NCBI from the literature
+hg38 refSeqFuncElems cCREs Candidate regulatory elements called from ENCODE chromatin data
+hg38 tads hicAndMicroC The Hi-C and Micro-C contact maps that domain boundaries are called from
+hg38 hicAndMicroC tads Topologically associating domains and boundaries called from contact maps
+hg38 cpgIslandSuper dnaMethylation Measured methylation levels, which are often depleted over these islands
+hg38 dnaMethylation cpgIslandSuper CpG-dense regions predicted from the reference sequence
+hg38 epdNew fantom5 Transcription start sites and their usage, measured by CAGE
+hg38 fantom5 epdNew Experimentally supported promoters curated in EPDnew
+hg38 gtexEqtlHighConf gtexGeneV8 Gene expression levels in the same GTEx tissues
+hg38 gtexGeneV8 gtexEqtlHighConf Variants associated with expression of nearby genes in the same tissues
+hg38 jaspar wgEncodeReg4TfPeaks Transcription factor peak clusters from ENCODE 4 ChIP-seq experiments
+hg38 wgEncodeReg4TfPeaks jaspar Computationally predicted binding sites from position weight matrices
+hg38 singleCellSignalsPeaks wgEncodeReg4Atac Bulk ATAC-seq accessibility, averaged by organ and tissue
+hg38 wgEncodeReg4Atac singleCellSignalsPeaks Chromatin accessibility resolved by individual cell type
+hg38 fiberSeq dnaMethylation Methylation measured by bisulfite and other assays
+hg38 dnaMethylation fiberSeq Accessibility and CpG methylation read from the same single molecules
+hg38 fiberSeq cCREs Candidate regulatory elements called from short-read ENCODE data
+hg38 cCREs fiberSeq Regulatory elements called on single molecules, resolved by haplotype
+hg38 fiberSeq wgEncodeRegDnase Chromatin accessibility measured by DNase hypersensitivity
+hg38 wgEncodeRegDnase fiberSeq Chromatin accessibility measured one molecule at a time
+
+hg19 geneHancer oreganno Literature-curated regulatory elements and transcription factor binding sites
+hg19 oreganno geneHancer Enhancers and promoters with predicted target genes, integrated from several sources
+hg19 geneHancer vistaEnhancersBb Enhancers tested for activity in transgenic mouse embryos
+hg19 vistaEnhancersBb geneHancer Predicted enhancers and promoters with their likely target genes
+hg19 cpgIslandSuper dnaMethylation Measured methylation levels, which are often depleted over these islands
+hg19 dnaMethylation cpgIslandSuper CpG-dense regions predicted from the reference sequence
+hg19 epdNew fantom5 Transcription start sites and their usage, measured by CAGE
+hg19 fantom5 epdNew Experimentally supported promoters curated in EPDnew
+
+mm39 cpgIslandSuper dnaMethylation Measured methylation levels, which are often depleted over these islands
+mm39 dnaMethylation cpgIslandSuper CpG-dense regions predicted from the reference sequence
+
+mm10 cCREs refSeqFuncElems Regulatory and other functional elements curated by NCBI from the literature
+mm10 refSeqFuncElems cCREs Candidate regulatory elements called from ENCODE chromatin data
+
+danRer11 cpgIslandSuper dnaMethylation Measured methylation levels, which are often depleted over these islands
+danRer11 dnaMethylation cpgIslandSuper CpG-dense regions predicted from the reference sequence
+
+# Gene and protein cross-links:
+hg38 uniprot spMut Amino acid substitutions annotated in UniProt, mapped to the genome
+hg38 spMut uniprot Protein domains, sites and other UniProt annotations mapped to the genome
+hg38 ucscGenePfam uniprot Protein domains and functional sites from UniProt
+hg38 uniprot ucscGenePfam Pfam domains mapped onto GENCODE transcripts
+hg38 knownGene mane One representative transcript per gene, agreed between RefSeq and GENCODE
+hg38 mane knownGene The full GENCODE gene set that MANE Select transcripts are drawn from
+hg38 refSeqComposite mane The MANE Select subset of RefSeq transcripts, matched to GENCODE
+hg38 mane refSeqComposite The full NCBI RefSeq transcript set that MANE Select is drawn from
+hg38 knownGene hgnc Official gene symbols and names from the HGNC, with previous symbols and aliases
+hg38 hgnc knownGene The default gene set, whose gene names come from this nomenclature
+hg38 refSeqComposite hgnc Official gene symbols and names from the HGNC, with previous symbols and aliases
+hg38 hgnc refSeqComposite Transcript annotations from NCBI, which use these gene symbols
+hg38 mane hgnc Official gene symbols and names from the HGNC, with previous symbols and aliases
+hg38 hgnc mane One agreed representative transcript per gene, matched between RefSeq and GENCODE
+hg38 >ccdsGene mane One representative transcript per gene, matched between RefSeq and GENCODE
+hg38 refSeqComposite xenoRefGene RefSeq transcripts from other species, aligned to the human genome
+hg38 xenoRefGene refSeqComposite Human RefSeq transcripts, rather than transcripts from other species
+hg38 pseudogenes ucscRetroAli9 Retroposed gene copies, a major source of processed pseudogenes
+hg38 ucscRetroAli9 pseudogenes Curated pseudogene annotations from GENCODE and Yale
+hg38 ncOrfs gwipsvizRiboseq Ribosome profiling data, the main evidence for translation of non-canonical ORFs
+hg38 gwipsvizRiboseq ncOrfs Open reading frames outside annotated CDS regions, called partly from ribosome profiling
+hg38 lrg lrgTranscriptAli The fixed LRG transcript annotations within these regions
+hg38 lrgTranscriptAli lrg The genomic LRG reference regions these transcripts belong to
+hg38 crispr10K crisprAllTargets Cas9 target sites across the whole genome, not only near exons
+hg38 crisprAllTargets crispr10K Cas9 target sites restricted to exons and 10 kb of flanking sequence
+
+hg19 uniprot spMut Amino acid substitutions annotated in UniProt, mapped to the genome
+hg19 spMut uniprot Protein domains, sites and other UniProt annotations mapped to the genome
+hg19 ucscGenePfam uniprot Protein domains and functional sites from UniProt
+hg19 uniprot ucscGenePfam Pfam domains mapped onto GENCODE transcripts
+hg19 knownGene hgnc Official gene symbols and names from the HGNC, with previous symbols and aliases
+hg19 hgnc knownGene The default gene set, whose gene names come from this nomenclature
+hg19 refSeqComposite hgnc Official gene symbols and names from the HGNC, with previous symbols and aliases
+hg19 hgnc refSeqComposite Transcript annotations from NCBI, which use these gene symbols
+hg19 refSeqComposite xenoRefGene RefSeq transcripts from other species, aligned to the human genome
+hg19 xenoRefGene refSeqComposite Human RefSeq transcripts, rather than transcripts from other species
+hg19 lrg lrgTranscriptAli The fixed LRG transcript annotations within these regions
+hg19 lrgTranscriptAli lrg The genomic LRG reference regions these transcripts belong to
+hg19 crispr10K crisprAllTargets Cas9 target sites across the whole genome, not only near exons
+hg19 crisprAllTargets crispr10K Cas9 target sites restricted to exons and 10 kb of flanking sequence
+
+mm39 ucscGenePfam uniprot Protein domains and functional sites from UniProt
+mm39 uniprot ucscGenePfam Pfam domains mapped onto GENCODE transcripts
+mm39 refSeqComposite xenoRefGene RefSeq transcripts from other species, aligned to the human genome
+mm39 xenoRefGene refSeqComposite Human RefSeq transcripts, rather than transcripts from other species
+
+mm10 uniprot spMut Amino acid substitutions annotated in UniProt, mapped to the genome
+mm10 spMut uniprot Protein domains, sites and other UniProt annotations mapped to the genome
+mm10 ucscGenePfam uniprot Protein domains and functional sites from UniProt
+mm10 uniprot ucscGenePfam Pfam domains mapped onto GENCODE transcripts
+mm10 refSeqComposite xenoRefGene RefSeq transcripts from other species, aligned to the human genome
+mm10 xenoRefGene refSeqComposite Human RefSeq transcripts, rather than transcripts from other species
+mm10 crispr10K crisprAllTargets Cas9 target sites across the whole genome, not only near exons
+mm10 crisprAllTargets crispr10K Cas9 target sites restricted to exons and 10 kb of flanking sequence
+
+hs1 refSeqComposite xenoRefGene RefSeq transcripts from other species, aligned to the human genome
+hs1 xenoRefGene refSeqComposite Human RefSeq transcripts, rather than transcripts from other species
+
+danRer11 refSeqComposite xenoRefGene RefSeq transcripts from other species, aligned to the human genome
+danRer11 xenoRefGene refSeqComposite Human RefSeq transcripts, rather than transcripts from other species
+
+# Map and assembly cross-links:
+hg38 ~t2tChain chm13LiftOver Another alignment of the T2T CHM13 assembly to GRCh38
+hg38 problematic LCRs Low-complexity regions measured by longdust, another common source of alignment artifacts
+hg38 LCRs problematic Curated regions that often cause artifacts in sequencing and alignment
+hg38 hg38Patch11 patchesPsl Alignments of the patch and alt sequences to the primary assembly
+hg38 patchesPsl hg38Patch11 The patch and alternate sequences themselves, as placed on the assembly
+hg38 exomeProbesets genotypeArrays Microarray probesets and optical genome mapping sites
+hg38 genotypeArrays exomeProbesets Exome capture kit target regions and probe positions
+
+hg19 exomeProbesets genotypeArrays Microarray probesets and optical genome mapping sites
+hg19 genotypeArrays exomeProbesets Exome capture kit target regions and probe positions
+
+hs1 problematic LCRs Low-complexity regions measured by longdust, another common source of alignment artifacts
+hs1 LCRs problematic Curated regions that often cause artifacts in sequencing and alignment
+
+# Comparative genomics cross-links:
+hg38 unusualcons cons100way The vertebrate conservation scores these unusually conserved regions are called from
+hg38 cons100way unusualcons Ultraconserved elements, human accelerated regions and similar features
+hg38 gerp cons100way UCSC conservation scores from a 100-species vertebrate alignment
+hg38 cons100way gerp Conservation scores from Ensembl, computed on a 65-amniote alignment
+hg38 ~cons241way cons447way Another Zoonomia mammalian alignment, built on a different species set
+
+# Mouse gene and regulation cross-links:
+mm39 ~TOGAv2 HLTOGAannotvHg38v1 Another TOGA annotation projection, from a different release
+mm39 knownGene wgEncodeGencodeSuper All transcripts from each GENCODE release, including sets never used as the default gene track
+mm39 wgEncodeGencodeSuper knownGene The current default gene set
+mm39 ~liftOverMm10 grcIncidentDb Assembly changes between the mouse assemblies, and why they were made
+
+mm10 >knownGeneOld11 knownGene The newer version of this track
+mm10 ~TOGAv2 HLTOGAannotvHg38v1 Another TOGA annotation projection, from a different release
+mm10 epdNew fantom5 Transcription start sites and their usage, measured by CAGE
+mm10 fantom5 epdNew Experimentally supported promoters curated in EPDnew
+mm10 tabulaMuris tabulaMurisSenis The same single-cell atlas extended across the mouse lifespan
+mm10 tabulaMurisSenis tabulaMuris Single-cell expression across adult mouse organs, the basis of the Senis atlas
+
+# hs1 cross-links:
+hs1 varFreqs phasedVars Projects that provide haplotype-phased genotypes and variants
+hs1 phasedVars varFreqs Projects where variant frequencies, aka allele frequencies, are publicly available
+hs1 ~mappability problematic Regions that are hard to align to, and that often produce artifacts
+hs1 ~sedefSegDups censat Another class of highly repetitive sequence resolved by the T2T assembly
+hs1 ~simpleRepeat microsatellites Another annotation of short tandem repeats in the reference sequence
+
+# danRer11 cross-links:
+danRer11 >transMapV5 transMapV6 The current version of the TransMap alignments
+danRer11 ensGene refSeqComposite Gene models from NCBI RefSeq, curated independently of Ensembl
+danRer11 refSeqComposite ensGene Gene models from Ensembl, curated independently of RefSeq
+danRer11 ~simpleRepeat microsat Another annotation of short tandem repeats in the reference sequence
+
+# Repeat annotation cross-links:
+hg38 rmsk nestedRepeats Fragments of the same repeats joined by RepeatMasker ID, showing which pieces belong together
+hg38 nestedRepeats rmsk The individual repeat annotations these fragments were joined from
+hg38 rmsk joinedRmsk A detailed view of the same annotations, showing the alignment structure of each repeat
+hg38 joinedRmsk rmsk The standard view of these annotations, one item per repeat
+hg38 rmsk simpleRepeat Tandem repeats found by TRF, rather than the interspersed repeat families
+hg38 simpleRepeat rmsk Interspersed repeats and low-complexity DNA, annotated by family
+hg38 rmsk windowmaskerSdust An alternative masking of repetitive and low-complexity sequence, computed without a repeat library
+hg38 windowmaskerSdust rmsk Repeats annotated by family from a curated library, rather than found de novo
+
+hg19 rmsk nestedRepeats Fragments of the same repeats joined by RepeatMasker ID, showing which pieces belong together
+hg19 nestedRepeats rmsk The individual repeat annotations these fragments were joined from
+hg19 rmsk simpleRepeat Tandem repeats found by TRF, rather than the interspersed repeat families
+hg19 simpleRepeat rmsk Interspersed repeats and low-complexity DNA, annotated by family
+hg19 rmsk windowmaskerSdust An alternative masking of repetitive and low-complexity sequence, computed without a repeat library
+hg19 windowmaskerSdust rmsk Repeats annotated by family from a curated library, rather than found de novo
+
+mm39 rmsk nestedRepeats Fragments of the same repeats joined by RepeatMasker ID, showing which pieces belong together
+mm39 nestedRepeats rmsk The individual repeat annotations these fragments were joined from
+mm39 rmsk simpleRepeat Tandem repeats found by TRF, rather than the interspersed repeat families
+mm39 simpleRepeat rmsk Interspersed repeats and low-complexity DNA, annotated by family
+mm39 rmsk windowmaskerSdust An alternative masking of repetitive and low-complexity sequence, computed without a repeat library
+mm39 windowmaskerSdust rmsk Repeats annotated by family from a curated library, rather than found de novo
+
+mm10 rmsk nestedRepeats Fragments of the same repeats joined by RepeatMasker ID, showing which pieces belong together
+mm10 nestedRepeats rmsk The individual repeat annotations these fragments were joined from
+mm10 rmsk joinedRmsk A detailed view of the same annotations, showing the alignment structure of each repeat
+mm10 joinedRmsk rmsk The standard view of these annotations, one item per repeat
+mm10 rmsk simpleRepeat Tandem repeats found by TRF, rather than the interspersed repeat families
+mm10 simpleRepeat rmsk Interspersed repeats and low-complexity DNA, annotated by family
+mm10 rmsk windowmaskerSdust An alternative masking of repetitive and low-complexity sequence, computed without a repeat library
+mm10 windowmaskerSdust rmsk Repeats annotated by family from a curated library, rather than found de novo
+
+danRer11 rmsk nestedRepeats Fragments of the same repeats joined by RepeatMasker ID, showing which pieces belong together
+danRer11 nestedRepeats rmsk The individual repeat annotations these fragments were joined from
+danRer11 rmsk simpleRepeat Tandem repeats found by TRF, rather than the interspersed repeat families
+danRer11 simpleRepeat rmsk Interspersed repeats and low-complexity DNA, annotated by family
+danRer11 rmsk windowmaskerSdust An alternative masking of repetitive and low-complexity sequence, computed without a repeat library
+danRer11 windowmaskerSdust rmsk Repeats annotated by family from a curated library, rather than found de novo
+
+# Literature and association cross-links:
+hg38 gwasCatalog varsInPubs Individual variants mentioned in the literature, text-mined from full-text papers
+hg38 varsInPubs gwasCatalog Trait and disease associations from published genome-wide association studies
+hg38 gwasCatalog snpedia Wiki summaries of what has been published about individual SNPs
+hg38 snpedia gwasCatalog The underlying published associations, with effect sizes and p-values
+hg38 gwasCatalog gtexEqtlHighConf Variants that change gene expression, often used to find the gene behind an association signal
+hg38 gtexEqtlHighConf gwasCatalog Trait and disease association signals these expression effects are usually compared against
+hg38 snpedia varsInPubs Individual variants mentioned in the literature, text-mined from full-text papers
+hg38 varsInPubs snpedia Wiki summaries of what has been published about individual SNPs
+
+hg19 gwasCatalog varsInPubs Individual variants mentioned in the literature, text-mined from full-text papers
+hg19 varsInPubs gwasCatalog Trait and disease associations from published genome-wide association studies
+hg19 gwasCatalog snpedia Wiki summaries of what has been published about individual SNPs
+hg19 snpedia gwasCatalog The underlying published associations, with effect sizes and p-values
+hg19 snpedia varsInPubs Individual variants mentioned in the literature, text-mined from full-text papers
+hg19 varsInPubs snpedia Wiki summaries of what has been published about individual SNPs
+
+# Variant impact predictor cross-links:
+hg38 mutScore primateAi A pathogenicity predictor that also works from 3D protein structure
+hg38 primateAi mutScore Missense variant clustering within 3D protein structures
+hg38 mutScore revel An ensemble missense pathogenicity score, recommended by the ACMG, built from multiple predictors
+hg38 revel mutScore Missense variant clustering within 3D protein structures
+hg38 mutScore alphaMissense A deep-learning missense pathogenicity predictor
+hg38 alphaMissense mutScore Missense variant clustering within 3D protein structures
+hg38 mutScore clinPred An ensemble missense pathogenicity predictor that incorporates gnomAD allele frequency
+hg38 clinPred mutScore Missense variant clustering within 3D protein structures
+hg38 >caddSuper1_7 revel An ensemble pathogenicity score for coding variants
+hg38 >caddSuper1_7 clinPred An ensemble missense pathogenicity predictor that incorporates gnomAD allele frequency
+hg38 >caddSuper1_7 alphaMissense A deep-learning missense pathogenicity predictor
+hg38 >caddSuper1_7 gnomadVariants Population allele frequencies, useful for judging whether a high-scoring variant is common
+hg38 predictionScoresSuper caddSuper1_7 A deleteriousness score for all single-base substitutions and selected indels, coding and non-coding
+hg38 caddSuper1_7 predictionScoresSuper Other variant impact and pathogenicity prediction scores
+hg38 predictionScoresSuper caddSuper The previous CADD release, with the older model and training set
+hg38 caddSuper predictionScoresSuper Other variant impact and pathogenicity prediction scores
+hg38 predictionScoresSuper revel An ensemble missense pathogenicity score for coding variants
+hg38 revel predictionScoresSuper Other variant impact and pathogenicity prediction scores
+hg38 predictionScoresSuper alphaMissense A deep-learning missense pathogenicity predictor
+hg38 alphaMissense predictionScoresSuper Other variant impact and pathogenicity prediction scores
+
+hg19 >caddSuper1_7 gnomadSuper Population allele frequencies, useful for judging whether a high-scoring variant is common
+hg19 mutScore primateAi A pathogenicity predictor that also works from 3D protein structure
+hg19 primateAi mutScore Missense variant clustering within 3D protein structures
+hg19 mutScore revel An ensemble missense pathogenicity score built from multiple predictors
+hg19 revel mutScore Missense variant clustering within 3D protein structures
+hg19 mutScore alphaMissense A deep-learning missense pathogenicity predictor
+hg19 alphaMissense mutScore Missense variant clustering within 3D protein structures
+hg19 mutScore clinPred An ensemble missense pathogenicity predictor that incorporates gnomAD allele frequency
+hg19 clinPred mutScore Missense variant clustering within 3D protein structures
+hg19 >caddSuper1_7 revel An ensemble pathogenicity score for coding variants
+hg19 >caddSuper1_7 clinPred An ensemble missense pathogenicity predictor that incorporates gnomAD allele frequency
+hg19 >caddSuper1_7 alphaMissense A deep-learning missense pathogenicity predictor
+hg19 predictionScoresSuper caddSuper1_7 A deleteriousness score for all single-base substitutions and selected indels, coding and non-coding
+hg19 caddSuper1_7 predictionScoresSuper Other variant impact and pathogenicity prediction scores
+hg19 predictionScoresSuper caddSuper The previous CADD release, with the older model and training set
+hg19 caddSuper predictionScoresSuper Other variant impact and pathogenicity prediction scores
+hg19 predictionScoresSuper revel An ensemble missense pathogenicity score for coding variants
+hg19 revel predictionScoresSuper Other variant impact and pathogenicity prediction scores
+hg19 predictionScoresSuper alphaMissense A deep-learning missense pathogenicity predictor
+hg19 alphaMissense predictionScoresSuper Other variant impact and pathogenicity prediction scores
+
+# Splicing impact cross-links:
+hg38 ~spliceAI abSplice Another deep-learning predictor of splice-altering variants
+hg38 spliceAI spliceVarDb Splicing variants with experimental validation, useful for checking these predictions
+hg38 spliceVarDb spliceAI Predicted splice-altering effects, scored genome-wide
+hg38 spliceAI spliceAIWt The same model run on the reference sequence, showing where splicing is expected without any variant
+hg38 spliceAIWt spliceAI The same model scored for variants, rather than for the reference sequence
+hg38 abSplice spliceVarDb Splicing variants with experimental validation, useful for checking these predictions
+hg38 spliceVarDb abSplice Predicted aberrant splicing, scored per variant and tissue
+hg38 spliceImpactSuper predictionScoresSuper Pathogenicity scores for coding and non-coding variants generally, not only splicing
+hg38 predictionScoresSuper spliceImpactSuper Prediction scores and databases for variants that disrupt splicing
+hg38 nmd spliceImpactSuper Predicted and validated splice-altering variants, a common source of premature termination codons
+hg38 spliceImpactSuper nmd Regions where premature termination codons are predicted to escape nonsense-mediated decay
+
+hg19 ~spliceAI abSplice Another deep-learning predictor of splice-altering variants
+hg19 spliceImpactSuper predictionScoresSuper Pathogenicity scores for coding and non-coding variants generally, not only splicing
+hg19 predictionScoresSuper spliceImpactSuper Prediction scores and databases for variants that disrupt splicing
+
+# MaveDB / MaveMD cross-links:
+hg38 mavedb mavemd The clinically curated subset, with ACMG functional evidence calibrations
+hg38 mavemd mavedb The full set of variant effect maps in MaveDB, without clinical calibration
+# One-way: MaveMD carries a snapshot of ClinVar and gnomAD annotations from the MaveDB API,
+# so point readers at our always-current tracks. No reciprocal line, since MaveMD is too
+# narrow to be worth listing on two of the most heavily used tracks we have.
+hg38 >mavemd clinvar Our current ClinVar release, rather than the snapshot MaveMD's calibrations were computed against
+hg38 >mavemd gnomadVariants Our current gnomAD release, rather than the frequencies MaveMD supplies with each measurement
+
+# Constraint score cross-links:
+hg38 constraintSuper predictionScoresSuper Per-variant deleteriousness and pathogenicity scores, rather than regional constraint
+hg38 predictionScoresSuper constraintSuper Regional and gene-level constraint measured from population variation
+hg38 ~jarvis ukbDepletion Another score for how depleted of variation a non-coding region is
+hg38 ~hmc gnomadPLI Another constraint metric derived from the absence of variation in population data
+hg38 hmc ucscGenePfam The Pfam protein domains that homologous missense constraint is calculated over
+hg38 ucscGenePfam hmc Missense constraint measured across homologous positions within these domains
+hg38 promoterAi jarvis A score prioritizing non-coding regions more broadly, not only promoters
+hg38 jarvis promoterAi A deep-learning predictor for variants in promoter regions specifically
+
+hg19 constraintSuper predictionScoresSuper Per-variant deleteriousness and pathogenicity scores, rather than regional constraint
+hg19 predictionScoresSuper constraintSuper Regional and gene-level constraint measured from population variation
+hg19 ~jarvis ukbDepletion Another score for how depleted of variation a non-coding region is
+hg19 ~hmc gnomadPLI Another constraint metric derived from the absence of variation in population data
+hg19 hmc ucscGenePfam The Pfam domains that homologous missense constraint is calculated over
+hg19 ucscGenePfam hmc Missense constraint measured across homologous positions within these domains
+
+# mm10 mouse strain cross-links:
+mm10 mm10Strains1 mouseStrainsCactus Whole-genome alignment of the 16 strain assemblies to the reference
+mm10 mouseStrainsCactus mm10Strains1 Alternate strain sequences mapped to their reference genome location

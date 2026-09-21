@@ -13,6 +13,7 @@
 #include "obscure.h"
 #include "binRange.h"
 #include "pipeline.h"
+#include "cheapcgi.h"
 #include "jksql.h"
 #include "net.h"
 #include "bed.h"
@@ -24,6 +25,7 @@
 #include "hgConfig.h"
 #include "hdb.h"
 #include "hui.h"
+#include "htmlSanitize.h"
 #include "customTrack.h"
 #include "customPp.h"
 #include "customFactory.h"
@@ -176,11 +178,7 @@ if ((startsWith("http://", url)
     return TRUE;
 
 // we allow bigDataUrl's to point to trash (or sessionDataDir, if configured)
-char *sessionDataDir = cfgOption("sessionDataDir");
-char *sessionDataDirOld = cfgOption("sessionDataDirOld");
-if (startsWith(trashDir(), url) ||
-    (isNotEmpty(sessionDataDir) && startsWith(sessionDataDir, url)) ||
-    (isNotEmpty(sessionDataDirOld) && startsWith(sessionDataDirOld, url)))
+if (isTrashOrSessionDataPath(url))
     return TRUE;
 
 if (udcIsResolvable(url))
@@ -3792,6 +3790,13 @@ freeMem(tmp);
 static boolean checkGroup(char *db, char *group)
 /* Check if group is valid in db (if mysql, in grp table; if hub, in groups file or default) */
 {
+// "blat" is the synthetic "BLAT Results" group that hgTracks adds in code (it is not a row in the
+// grp table), so accept it here; otherwise a BLAT result track's group=blat would be rejected and
+// forced back into the generic "user" (Custom Tracks) group.  Only accept it when the feature is
+// on: with blatResultsGroup off hgTracks never creates the group, so a hand-written group=blat
+// would otherwise be an orphan that lands in "other".
+if (sameString(group, "blat") && cfgOptionBooleanDefault("blatResultsGroup", FALSE))
+    return TRUE;
 static struct hash *dbToGroups = NULL;
 if (dbToGroups == NULL)
     dbToGroups = hashNew(0);
@@ -3917,7 +3922,10 @@ if ((val = hashFindVal(hash, "htmlUrl")) != NULL)
 		    }
 		ds = netSlurpFile(sd);
 		close(sd);
-		track->tdb->html = dyStringCannibalize(&ds);
+		char *fetched = dyStringCannibalize(&ds);
+		/* This came in over the network, so keep only what we allow. */
+		track->tdb->html = htmlSanitize(fetched);
+		freeMem(fetched);
 		}
 	    }
 	}
@@ -4120,6 +4128,32 @@ customTrackUpdateFromSettings(track, genomeDb, line, lineIx);
 return track;
 }
 
+static char *customMemFromSpec(char *text, char **retName, unsigned long *retSize)
+/* Parse a "<scheme>://<name> <address> <size>" string made by prepCompressedFile
+ * or prepBigData, and return the uploaded data it names.  Return NULL unless
+ * this program handed out that address:  such a string can also arrive in a cgi
+ * variable, and then the address comes from whoever sent the request.  If
+ * retName is not NULL the "<scheme>://<name>" part is cloned into it. */
+{
+char *copy = cloneString(text);
+char *words[4];
+int wordCount = chopByWhite(copy, words, ArraySize(words));
+char *mem = NULL;
+/* A registered address and size are each an unsigned long, at most 20 digits.
+ * A longer word cannot name a block we handed out, so leave mem NULL and let
+ * the caller fall back to treating the text as literal data. */
+if (wordCount == 3 && strlen(words[1]) <= 20 && strlen(words[2]) <= 20)
+    {
+    char spec[64];
+    safef(spec, sizeof(spec), "%s %s", words[1], words[2]);
+    mem = cgiMemBlobFind(spec, retSize);
+    if (mem != NULL && retName != NULL)
+	*retName = cloneString(words[0]);
+    }
+freeMem(copy);
+return mem;
+}
+
 static struct lineFile *customLineFile(char *text, boolean isFile)
 /* Figure out input source, handling URL's and compression */
 {
@@ -4136,28 +4170,19 @@ if (isFile)
     }
 else
     {
-    if (startsWith("compressed://",text))
+    if (startsWith("compressed://",text) || startsWith("memory://", text))
 	{
-	char *words[3];
-	char *mem;
-        unsigned long size;
-	chopByWhite(text,words,3);
-    	mem = (char *)sqlUnsignedLong(words[1]);
-        size = sqlUnsignedLong(words[2]);
-	lf = lineFileDecompressMem(TRUE, mem, size);
-	}
-    else if (startsWith("memory://", text))
-	{
-	int len = strlen(text) + 1;
-	char copy[len];
-	safecpy(copy, len, text);
-	char *words[3];
-	int wordCount = chopByWhite(copy, words, 3);
-	if (wordCount != 3)
-	    errAbort("customLineFile: badly formatted input '%s': expected 3 words, got %d",
-		     text, wordCount);
-	char *mem = (char *)sqlUnsignedLong(words[1]);
-	lf = lineFileOnString(words[0], TRUE, mem);
+	char *name = NULL;
+	unsigned long size = 0;
+	char *mem = customMemFromSpec(text, &name, &size);
+	if (mem == NULL)
+	    /* Not data this program uploaded, so it is just text that happens
+	     * to look like a reference to some. */
+	    lf = lineFileOnString(CT_NO_FILE_NAME, TRUE, text);
+	else if (startsWith("compressed://", text))
+	    lf = lineFileDecompressMem(TRUE, mem, size);
+	else
+	    lf = lineFileOnString(name, TRUE, mem);
 	}
     else
         {

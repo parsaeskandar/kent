@@ -6,6 +6,7 @@
 #include "jksql.h"
 #include "htmshell.h"
 #include "web.h"
+#include "hCommon.h"
 #include "cheapcgi.h"
 #include "cart.h"
 #include "hui.h"
@@ -604,17 +605,24 @@ if (cartJsonIsNoWarns() && hgp && hgp->singlePos)
         trackName = cloneString(track->track);
         }
     trackHubFixName(trackName);
-    puts("Content-type:text/html\n");
+    cspWriteResponseHeader();
+    cgiPrintContentType("text/html");
     puts("<HTML>\n<HEAD>\n");
     printf("<script type='text/javascript' src='../js/utils.js'></script>\n");
-    printf("<script>\n");
+    printf("<script nonce='%s'>\n", getNonce());
     // we are about to redirect back to hgTracks, save the search term onto the
     // history stack so it will appear in the dropdown of auto-suggestions before
-    // redirecting
+    // redirecting.  db and userSearch are user-supplied and go into a JS string literal
+    // inside this inline <script>; jsonStringEscape escapes quotes and '/' so neither the
+    // string literal nor a literal </script> can break out (XSS).
+    char *jsDb = jsonStringEscape(db);
+    char *jsSearch = jsonStringEscape(userSearch);
     printf("addRecentSearch(\"%s\", \"%s\", {\"label\": \"%s\", \"value\": \"%s\", \"id\": \"%s\"});\n",
-            db, userSearch, userSearch, userSearch, newPosBuf);
+            jsDb, jsSearch, jsSearch, jsSearch, newPosBuf);
     printf("window.location.href=\"../cgi-bin/hgTracks?");
-    printf("db=%s", db);
+    // db here is a URL query parameter, so cgi-encode it rather than reuse the JS-escaped jsDb
+    char *urlDb = cgiEncode(db);
+    printf("db=%s", urlDb);
     printf("&position=%s", newPosBuf);
     if (!sameString(trackName, "chromInfo"))
         printf("&%s=pack", trackName);

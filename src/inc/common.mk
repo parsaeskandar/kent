@@ -68,12 +68,16 @@ else
   endif
 endif
 
+# zlib comes from the zlib-ng submodule in submodules/zlib-ng, built in
+# zlib-compat mode so the header and the symbols are the ordinary zlib ones, and
+# linked statically the way htslib is.  zlib-ng writes a PNG about three times
+# faster and reads a bigBed block about twice as fast, and its output is ordinary
+# deflate that any zlib can read.  Building it here also makes the platforms
+# agree: before this, x86_64 happened to find a static /lib64/libz.a while the
+# arm64 build fell through to a shared -lz.  Override on the make command line
+# with ZLIB=... to link some other zlib.  refs #38125
 ifeq (${ZLIB},)
-  ifneq ($(wildcard /lib64/libz.a),)
-    ZLIB=/lib64/libz.a
-  else
-    ZLIB=-lz
-  endif
+  ZLIB=$(kentSrc)/submodules/zlib-ng/libz.a
 endif
 
 # for Darwin (Mac OSX), use static libs when they can be found
@@ -86,9 +90,8 @@ ifeq ($(UNAME_S),Darwin)
     HG_INC += -I/opt/homebrew/include
     L += -L/opt/homebrew/lib/
   endif
-  ifneq ($(wildcard /opt/local/lib/libz.a),)
-    ZLIB = /opt/local/lib/libz.a
-  endif
+  # no ZLIB line here: Darwin uses the zlib-ng submodule like every other
+  # platform.  refs #38125
   ifneq ($(wildcard /opt/local/lib/libpng.a),)
     PNGLIB = /opt/local/lib/libpng.a
   endif
@@ -531,7 +534,37 @@ ENCODEDCC_DIR = ${PIPELINE_PATH}/downloads/encodeDCC
 
 CC_PROG_OPTS = ${COPT} ${CFLAGS} ${HG_DEFS} ${LOWELAB_DEFS} ${HG_WARN} ${HG_INC} ${XINC}
 %.o: %.c
-	${CC} ${CC_PROG_OPTS} -o $@ -c $<
+	${CC} ${CC_PROG_OPTS} ${DEPGEN} -o $@ -c $<
+
+# Generated header dependencies.  Every makefile in the tree includes this file,
+# so the two lines below give the whole tree the rebuild rule that hand-written
+# "foo.o: bar.h" lines only ever covered a few objects of.  refs #36621
+#
+# -MMD writes foo.d next to foo.o, listing every header that compile actually
+# read, and the -include below feeds those back to make.  -MP adds an empty
+# target for each of those headers, so deleting or renaming a header does not
+# leave make asking for a file no rule can build.  System headers are left out
+# (-MMD rather than -MD) because they do not change between builds here.
+#
+# Objects are built next to their source, so the current directory is the whole
+# of it here.  The two makefiles that put objects in a subdirectory, lib and
+# hg/lib, pick those up themselves at the foot of their own file.  ${wildcard}
+# is evaluated when the makefile is read, which is the right time: a .d written
+# during this run belongs to an object this run just compiled from scratch, so
+# there is nothing stale to catch.
+#
+# Turn it off for one build with "make DEPGEN=".
+#
+# The save and restore around the include is not decoration.  A .d file holds
+# rules, and make takes its default goal from the first rule it sees, included
+# files and all.  Without this, "make" in lib/ built adjacency.o and stopped,
+# because that was the first line of the first .d file.  Setting .DEFAULT_GOAL
+# back to what it was (usually nothing, since common.mk is read before the
+# makefile's own rules) hands the choice back to the makefile.
+DEPGEN = -MMD -MP
+kentSavedGoal := $(.DEFAULT_GOAL)
+-include $(wildcard *.d)
+.DEFAULT_GOAL := $(kentSavedGoal)
 
 # autodetect UCSC installation of node.js:
 ifeq (${NODEBIN},)

@@ -69,9 +69,9 @@ cell bed bedGraph
 centerLabelsDense *
 centerLabelsPack *
 chainColor chain bigChain
-chainLinearGap netAlign chain bed psl bigPsl bigChain bigMaf
-chainMinScore netAlign chain bed psl bigPsl bigChain bigMaf
-chainNormScoreAvailable netAlign bed chain bigChain
+chainLinearGap netAlign chain bed psl bigPsl bigChain bigMaf bigNet
+chainMinScore netAlign chain bed psl bigPsl bigChain bigMaf bigNet
+chainNormScoreAvailable netAlign bed chain bigChain bigNet
 chimpDb bed
 chimpMacaqueOrthoTable bed
 chimpOrangMacOrthoTable bed
@@ -120,7 +120,9 @@ defaultLabelFields big*
 defaultLinkedTables genePred bigGenePred
 defaultMaf wigMaf
 defaultMaxWeight bed
+defaultGroupBy *
 defaultSortField *
+denseClick bigBed bed bigPsl genePred bigGenePred psl
 denseCoverage bigBed
 densePack bed bigBed
 dimensionAchecked *
@@ -303,8 +305,8 @@ mafFile customTracks
 mafShowSnp wigMaf
 mafTrack bed
 mapDispatcher expRatio
-matrix netAlign bed chain psl bigPsl bigChain bigMaf
-matrixHeader netAlign bed chain psl bigPsl bigChain bigMaf
+matrix netAlign bed chain psl bigPsl bigChain bigMaf bigNet
+matrixHeader netAlign bed chain psl bigPsl bigChain bigMaf bigNet
 maxCheckboxes *
 maxChromName customTracks
 maxHeightPixels *
@@ -319,6 +321,7 @@ metadata *
 mergeSpannedItems bigBed
 mgiUrl bed
 mgiUrlLabel bed
+minAc vcf vcfTabix vcfPhasedTrio
 minFreq vcf vcfTabix
 minGrayLevel bed broadPeak narrowPeak bedLogR bigBed
 minLimit *
@@ -331,7 +334,7 @@ motifMapTable factorSource
 motifMaxWindow factorSource
 motifDrawDefault factorSource
 mouseOverField big*
-mouseOver bigLolly bigBed bigPsl bigGenePred bed bigDbSnp
+mouseOver bigLolly bigBed bigPsl bigGenePred bed bigDbSnp bigNarrowPeak
 mouseOverFunction bigWig
 msaTable wig wigMafProt wigMaf
 multiRegionsBedUrl *
@@ -359,7 +362,7 @@ origTrackLine customTracks
 otherDb *
 otherTwoBitUrl *
 otherDbTable bed
-otherOrg netAlign chain bigChain
+otherOrg netAlign chain bigChain bigNet
 otherSpecies halSnake
 pairEndsByName bam
 pairedEndUrlFormat bed
@@ -389,6 +392,7 @@ ucscRetroInfo psl bigPsl
 ucscRetroParentTables *
 vcfChildSample vcfPhasedTrio
 vcfParentSamples vcfPhasedTrio
+vcfPhasedColorBy vcfPhasedTrio
 vcfUseAltSampleNames vcfPhasedTrio
 saturationScore hic
 setColorWith bigWig
@@ -412,6 +416,7 @@ sGroup_Carnivore wigMaf bigMaf
 sGroup_Carnivora wigMaf bigMaf
 sGroup_Cetartiodactyla wigMaf bigMaf
 sGroup_Chiroptera wigMaf bigMaf
+sGroup_Classical_laboratory bigMaf
 sGroup_Columbia_Medellin wigMaf
 sGroup_CoV_2019 wigMaf
 sGroup_CoV wigMaf
@@ -482,6 +487,7 @@ sGroup_Primates_tarsiidae wigMaf bigMaf
 sGroup_primate wigMaf
 sGroup_Puerto_Rico wigMaf
 sGroup_Punjabo_Pakis wigMaf
+sGroup_Rat/rn6 bigMaf
 sGroup_Reptiles wigMaf bigMaf
 sGroup_Reston_1989-90 wigMaf
 sGroup_Rhabditina wigMaf
@@ -497,6 +503,7 @@ sGroup_vertebrate wigMaf
 sGroup_Vertebrate wigMaf bigMaf
 sGroup_Vertebrates wigMaf
 sGroup_Vietnam_Kinh wigMaf
+sGroup_Wild_derived bigMaf
 sGroup_Virus wigMaf
 sGroup_worm wigMaf
 sGroup_Xenarthra bigMaf
@@ -510,13 +517,13 @@ sGroup_Zaire(DRC)_1976-7 wigMaf
 *FilterPriority bed narrowPeak broadPeak big*
 *HighlightPriority bed narrowPeak broadPeak big*
 sampleColorFile vcf vcfTabix
-sampleMetadataFile vcf vcfTabix
-scoreFilter broadPeak narrowPeak bed interaction bedlogR peptideMapping bigBed bigPsl
+sampleMetadataFile vcf vcfTabix vcfPhasedTrio
+scoreFilter broadPeak narrowPeak bed interaction bedlogR peptideMapping bigBed bigPsl bigNarrowPeak
 scoreFilterByRange bed peptideMapping bigBed bigPsl
-scoreFilterLimits broadPeak narrowPeak bed interaction bedlogR peptideMapping bigBed bigPsl
+scoreFilterLimits broadPeak narrowPeak bed interaction bedlogR peptideMapping bigBed bigPsl bigNarrowPeak
 scoreFilterMax bed bedlogR peptideMapping bigBed bigPsl
-scoreMax bed bedlogR interaction peptideMapping narrowPeak bigBed bigPsl
-scoreMin broadPeak narrowPeak bed bedlogR interaction peptideMapping bigBed bigPsl
+scoreMax bed bedlogR interaction peptideMapping narrowPeak bigBed bigPsl bigNarrowPeak
+scoreMin broadPeak narrowPeak bed bedlogR interaction peptideMapping bigBed bigPsl bigNarrowPeak
 scoreLabel bed bigBed bigPsl bigGenePred bigLolly
 searchIndex bigBed bigPsl bigGenePred bigBarChart
 searchTrix bigBed bigPsl bigGenePred
@@ -531,12 +538,16 @@ showCdsMaxZoom psl bigPsl chain bigChain
 showCfg *
 showDiffBasesAllScales *
 showDiffBasesMaxZoom *
-showHardyWeinberg vcf vcfTabix
+showHardyWeinberg vcf vcfTabix vcfPhasedTrio
 showNames bam
 showSubtrackColorOnUi *
 showTopScorers bed5FloatScoreWithFdr bed5FloatScore bed
-signalFilter bed narrowPeak broadPeak
-signalFilterLimits bed narrowPeak broadPeak
+signalFilter bed narrowPeak broadPeak bigNarrowPeak
+signalFilterLimits bed narrowPeak broadPeak bigNarrowPeak
+pValueFilter bed narrowPeak broadPeak bigNarrowPeak
+pValueFilterLimits bed narrowPeak broadPeak bigNarrowPeak
+qValueFilter bed narrowPeak broadPeak bigNarrowPeak
+qValueFilterLimits bed narrowPeak broadPeak bigNarrowPeak
 singleCellColumnNames *
 skipFields bigBed bigPsl bigGenePred bigLolly
 skipEmptyFields bigBed bigPsl
@@ -615,6 +626,7 @@ useScore *
 vcfDoFilter vcf vcfTabix vcfPhasedTrio
 vcfDoQual vcf vcfTabix vcfPhasedTrio
 vcfDoMaf vcf vcfTabix vcfPhasedTrio
+vcfDoMinAc vcf vcfTabix vcfPhasedTrio
 view *
 viewLimits *
 viewLimitsMax bed bedGraph wig bigWig

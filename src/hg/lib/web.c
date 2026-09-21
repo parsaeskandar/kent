@@ -599,7 +599,7 @@ if (needStart)
     {
     // All callers of this (via webPushErrHandlersCartDb) have skipped Content-type
     // because they want to output text unless we hit this condition:
-    puts("Content-type:text/html\n");
+    cgiPrintContentType("text/html");
     cartWebStart(errCart, errDb, "Error");
     }
 htmlVaWarn(format, args);
@@ -1059,7 +1059,7 @@ if (*retDb == NULL)  // if db is not in URL, but genome is, use it for db
 
 /* Was the database passed in as a cgi param?
  * If so, it takes precedence and determines the genome. */
-*retDb = asmAliasFind(*retDb);
+*retDb = asmAliasFindUnlessGenArk(*retDb);
 if (*retDb && hDbExists(*retDb))
     {
     *retGenome = hGenome(*retDb);
@@ -1081,7 +1081,7 @@ else if (*retClade && gotClade)
 else
     {
     *retDb = cartOptionalString(cart, dbCgiName);
-    *retDb = asmAliasFind(*retDb);
+    *retDb = asmAliasFindUnlessGenArk(*retDb);
     *retGenome = cartOptionalString(cart, orgCgiName);
     *retClade = cartOptionalString(cart, cladeCgiName);
     /* If there was a db found in the session that determines everything. */
@@ -1170,38 +1170,14 @@ getDbGenomeClade(cart, retDb, retGenome, &garbage, oldVars);
 freeMem(garbage);
 }
 
-static void webIncludeFileSubst(char *file, struct cart *cart)
-/* Include an HTML file in a CGI.  If cart is non-null, invoke hVarSubstWithCart.
- *   The file path may begin with hDocumentRoot(); if it doesn't, it is
- *   assumed to be relative and hDocumentRoot() will be prepended. */
-{
-char *str = hFileContentsOrWarning(file);
-if (cart != NULL)
-    {
-    char *db = cartString(cart, "db");
-    hVarSubstWithCart("webIncludeFileSubst", cart, NULL, db, &str);
-    }
-puts(str);
-freeMem(str);
-}
-
 void webIncludeFile(char *file)
 /* Include an HTML file in a CGI.
  *   The file path may begin with hDocumentRoot(); if it doesn't, it is
  *   assumed to be relative and hDocumentRoot() will be prepended. */
 {
-return webIncludeFileSubst(file, NULL);
-}
-
-void webIncludeHelpFileSubst(char *fileRoot, struct cart *cart, boolean addHorizLine)
-/* Given a help file root name (e.g. "hgPcrResult" or "cutters"),
- * print out the contents of the file.  If cart is non-NULL, invoke hVarSubstWithCart
- * before printing.  If addHorizLine, print out an <HR> first. */
-{
-if (addHorizLine)
-    htmlHorizontalLine();
-char *file = hHelpFile(fileRoot);
-webIncludeFileSubst(file, cart);
+char *str = hFileContentsOrWarning(file);
+puts(str);
+freeMem(str);
 }
 
 void webIncludeHelpFile(char *fileRoot, boolean addHorizLine)
@@ -1209,7 +1185,9 @@ void webIncludeHelpFile(char *fileRoot, boolean addHorizLine)
  * print out the contents of the file.  If addHorizLine, print out an
  * <HR> first. */
 {
-return webIncludeHelpFileSubst(fileRoot, NULL, addHorizLine);
+if (addHorizLine)
+    htmlHorizontalLine();
+webIncludeFile(hHelpFile(fileRoot));
 }
 
 void webPrintLinkTableStart()
@@ -1672,33 +1650,51 @@ if(scriptName)
     }
 
 // Fill in the top-right Login link (placeholder <!-- LOGIN_LINK --> in globalNavBar.inc, inside
-// the #topRightLinks container).  Logged out: a "Login" link to hgSession.  Logged in: the
+// the #topRightLinks container).  Logged out: a "Login" link straight to hgLogin.  Logged in: the
 // username, which opens an account dialog (handled in topLinks.js using the data-* attributes
-// below).  No login system: removed.
+// below).  No login system: removed.  Login, logout and the account links all send the visitor
+// back to the page they are on now.
     {
     char *loginLi = "";
     if (loginSystemEnabled() || wikiLinkEnabled())
         {
         char *userName = wikiLinkUserName();
         struct dyString *dy = dyStringNew(512);
+        // Come back to the page the visitor was reading when they clicked, refs #38192.  The
+        // return URL is NULL on the few pages there is no point returning to, and then these
+        // links fall back to their old hgSession target.
+        char *hgsid = cart ? cartSessionId(cart) : "";
+        char *retEnc = wikiLinkEncodeCurrentPageReturnUrl(hgsid);
         if (userName == NULL)
             {
             // Link straight to the login page (same target hgSession's own Login link uses),
             // rather than bouncing the user through hgSession first.
-            char *loginUrl = wikiLinkUserLoginUrl(cart ? cartSessionId(cart) : "");
+            char *loginUrl = retEnc ? wikiLinkUserLoginUrlReturning(hgsid, retEnc)
+                                    : wikiLinkUserLoginUrl(hgsid);
             dyStringPrintf(dy, "<a class='topRightLink' href='%s' id='loginLink' "
                 "title='Log in to save and share sessions'>Login</a>", loginUrl);
+            freez(&loginUrl);
             }
         else
             {
-            char *hgsid = cart ? cartSessionId(cart) : NULL;
-            char *logoutUrl = wikiLinkUserLogoutUrl(hgsid);
-            char *changePwUrl = wikiLinkChangePasswordUrl(hgsid);
+            char *logoutUrl = retEnc ? wikiLinkUserLogoutUrlReturning(hgsid, retEnc)
+                                     : wikiLinkUserLogoutUrl(hgsid);
+            char *changePwUrl = retEnc ? wikiLinkChangePasswordUrlReturning(hgsid, retEnc)
+                                       : wikiLinkChangePasswordUrl(hgsid);
+            char *changeEmailUrl = retEnc ? wikiLinkChangeEmailUrlReturning(hgsid, retEnc)
+                                          : wikiLinkChangeEmailUrl(hgsid);
+            char *changeRecovEmailUrl = retEnc
+                ? wikiLinkChangeRecovEmailUrlReturning(hgsid, retEnc)
+                : wikiLinkChangeRecovEmailUrl(hgsid);
             dyStringPrintf(dy, "<a class='topRightLink' href='#' id='loginLink' "
                 "title='Account info and sign out' "
-                "data-username=\"%s\" data-logouturl=\"%s\" data-changepwurl=\"%s\">%s</a>",
-                userName, logoutUrl, changePwUrl ? changePwUrl : "", userName);
+                "data-username=\"%s\" data-logouturl=\"%s\" data-changepwurl=\"%s\" "
+                "data-changeemailurl=\"%s\" data-changerecovemailurl=\"%s\">%s</a>",
+                userName, logoutUrl, changePwUrl ? changePwUrl : "",
+                changeEmailUrl ? changeEmailUrl : "",
+                changeRecovEmailUrl ? changeRecovEmailUrl : "", userName);
             }
+        freez(&retEnc);
         loginLi = dyStringCannibalize(&dy);
         }
     menuStr = replaceChars(menuStr, "<!-- LOGIN_LINK -->", loginLi);
@@ -1718,9 +1714,13 @@ if(scriptName)
         char *userName = (loginSystemEnabled() || wikiLinkEnabled()) ? wikiLinkUserName() : NULL;
         char *shareMode = isHgTrackUi ? "url" : "session";
         struct dyString *dy = dyStringNew(256);
+        // data-shortlink lets topLinks.js build the exact share URL to preview in the dialog, before
+        // the session is actually created, matching addSessionLink()'s server-side choice.
         dyStringPrintf(dy, "<a class='topRightLink' href='#' id='shareLink' "
             "title='Get a link to this view to share with others' "
-            "data-sharemode='%s' data-loggedin='%d'", shareMode, (userName != NULL));
+            "data-sharemode='%s' data-loggedin='%d' data-shortlink='%d'",
+            shareMode, (userName != NULL),
+            cfgOptionBooleanDefault("hgSession.shortLink", FALSE));
         if (userName != NULL)
             dyStringPrintf(dy, " data-username=\"%s\"", userName);
         dyStringAppend(dy, ">Share a link</a>");

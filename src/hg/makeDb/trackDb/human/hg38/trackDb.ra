@@ -1,6 +1,9 @@
 include ncOrfs.ra
 
-include strVar.ra
+# The released, hg38-only STRchive/strVar version.  The alpha version lives in
+# human/strVarNew.ra and is held back until the auto-push is in place, #38268.
+# Delete this include and the three files it pulls in when that version ships.
+include strVar.ra beta,public
 
 include barCharts.ra
 
@@ -53,6 +56,8 @@ include gnomad.pext.ra
 
 include rnaMod.ra alpha
 include m6aAtlas.ra alpha
+
+include singleCellSignalsPeaks.ra alpha
 
 track miRnaAtlas
 compositeTrack on
@@ -541,8 +546,7 @@ include trackDb.cloneEnd.ra
 
 include hg38Patch11.ra alpha
 
-include knownGene.ra beta,public
-include knownGene.alpha.ra alpha
+include knownGene.ra
 include knownGeneArchive.ra
 include knownGene.nmd_deco.ra alpha
 
@@ -682,8 +686,7 @@ bigDataUrl /gbdb/hg38/gtex/gtexTranscExpr.bb
 
 include trackDb.gencode.ra
 
-include wgEncodeReg.ra beta,public
-include wgEncodeReg.alpha.ra alpha
+include wgEncodeReg.ra
 include wgEncodeReg4.ra
 
 include encode3.ra
@@ -692,7 +695,7 @@ include encode.cCREs.override.ra
 include hic.ra
 
 include gnomad.ra
-include gnomadMpc.ra alpha
+include gnomadMpc.ra
 
 
 include platinumGenomes.ra
@@ -926,6 +929,8 @@ include long_read_transcripts.ra
 
 include mavedb.ra
 
+include mavemd.ra alpha
+
 include vgpLiftOver.ra alpha
 include psuVsUcscChains.ra alpha
 
@@ -935,10 +940,6 @@ include mpra.ra
 include nmd.ra
 include ancient.ra
 
-# release alpha only here - we don't want to push out mb2 without
-# Andrew's stamp of approval
-include mb2.ra alpha
-
 ### initial testing of HPRC chain tracks
 include hprcV2.trackDb.txt alpha
 
@@ -946,6 +947,19 @@ include vgp577way.trackDb.ra alpha
 
 include crPred.ra alpha
 
-include andy_tdb.txt alpha
-
 include tad.ra alpha
+
+track dnaMethylation override
+
+include methbase2.ra alpha
+
+include fiberSeq.ra alpha
+
+include imprinting.ra alpha
+# include hg38.GCF_040939455.1.chainNet.ra alpha
+
+include hprcPclai.ra alpha
+
+include episignatures.ra alpha
+
+include transcriptionStart.ra alpha

@@ -25,7 +25,14 @@
 #include "errCatch.h"
 #include "twoBit.h"
 #include "trackHub.h"
+#include "jsonWrite.h"
 #include <limits.h>
+
+// how long a pre-finish hook waits for another upload to the same hub, and how
+// often it retries while waiting. A big batch into one hub queues on this lock,
+// so hg.conf can raise the wait without a rebuild
+#define HUB_LOCK_TIMEOUT_DEFAULT "300"
+#define HUB_LOCK_POLL_MS 100
 
 char *emailForUserName(char *userName)
 /* Fetch the email for this user from gbMembers hgcentral table */
@@ -186,8 +193,13 @@ if (userName)
     char *encUserName = cgiEncode(userName);
     char *userPrefix = md5HexForString(encUserName);
     userPrefix[2] = '\0';
+    // the directory on disk is named encUserName, so a user name like "abc-def" is
+    // stored as the literal characters "abc%2Ddef". Encode a second time so apache
+    // looks for that literal '%': the URL component must be "abc%252Ddef".
+    // writeHubStanzasForFile does the same thing to a file name for bigDataUrl
     struct dyString *userDirDy = dyStringNew(0);
-    dyStringPrintf(userDirDy, "%s/%s/%s/", getHubSpaceUrl(), userPrefix, encUserName);
+    dyStringPrintf(userDirDy, "%s/%s/%s/", getHubSpaceUrl(), userPrefix,
+        cgiEncodeFull(encUserName));
     retUrl = dyStringCannibalize(&userDirDy);
     }
 return retUrl;
@@ -230,39 +242,35 @@ if (pathPrefix)
 return NULL;
 }
 
-static boolean checkHubSpaceRowExists(struct hubSpace *row)
-/* Return TRUE if row already exists */
-{
-struct sqlConnection *conn = hConnectCentral();
-struct dyString *queryCheck = sqlDyStringCreate("select count(*) from hubSpace where userName='%s' and fileName='%s' and parentDir='%s'", row->userName, row->fileName, row->parentDir);
-int ret = sqlQuickNum(conn, dyStringCannibalize(&queryCheck));
-hDisconnectCentral(&conn);
-return ret > 0;
-}
-
 static boolean checkHubSpaceLocationExists(char *userName, char *location)
-/* Return TRUE if location exists for userName and has exactly one row */
+/* Return TRUE if this user already has a row for location. location is the row's
+ * identity: a file name plus its immediate parent directory is not unique, two hubs
+ * can each hold a 'sub/test.bb' */
 {
 struct sqlConnection *conn = hConnectCentral();
 struct dyString *queryCheck = sqlDyStringCreate("select count(*) from hubSpace where userName='%s' and location='%s'", userName, location);
 int ret = sqlQuickNum(conn, dyStringCannibalize(&queryCheck));
 hDisconnectCentral(&conn);
-return ret == 1;
+return ret > 0;
 }
 
-boolean userHasOwnNamedHubTxtInDir(char *userName, char *parentDir)
+boolean userHasOwnNamedHubTxtInDir(char *userName, char *hubName, char *hubDir)
 /* Return TRUE if the user uploaded a *.hub.txt file NOT literally named 'hub.txt'
- * (e.g. 'araTha1.hub.txt') in parentDir. Distinguishes "user's own authoritative
- * hub.txt" from "backend-synthesized hub.txt that we're free to modify". */
+ * (e.g. 'araTha1.hub.txt') at the top level of hubDir. Distinguishes "user's own
+ * authoritative hub.txt" from "backend-synthesized hub.txt that we're free to modify".
+ * parentDir alone would also match a *.hub.txt sitting in some other hub's
+ * subdirectory that happens to be named hubName, so pin it to hubDir as well */
 {
-if (!userName || !parentDir || !parentDir[0]) return FALSE;
+if (isEmpty(userName) || isEmpty(hubName) || isEmpty(hubDir)) return FALSE;
+struct dyString *prefix = dyStringCreate("%s/", hubDir);
 struct sqlConnection *conn = hConnectCentral();
 struct dyString *q = sqlDyStringCreate(
     "select count(*) from hubSpace where userName='%s' and parentDir='%s' "
-    "and fileType='hub.txt' and fileName<>'hub.txt'",
-    userName, parentDir);
+    "and left(location,%d)='%s' and fileType='hub.txt' and fileName<>'hub.txt'",
+    userName, hubName, (int)dyStringLen(prefix), dyStringContents(prefix));
 int ret = sqlQuickNum(conn, dyStringCannibalize(&q));
 hDisconnectCentral(&conn);
+dyStringFree(&prefix);
 return ret > 0;
 }
 
@@ -281,27 +289,20 @@ hDisconnectCentral(&conn);
 return ret;
 }
 
-char *hubNameFromPath(char *path)
-/* Return the last directory component of path. Assume that a '.' char in the last component
- * means that component is a filename and go back further */
+char *hubLeafFromPath(char *path)
+/* Return the last '/' separated component of path, ignoring a trailing '/'. Callers
+ * pass a directory, so there is no filename to guess at: a '.' in the last component
+ * is part of a directory name, which isValidParentDir allows */
 {
 char *copy = cloneString(path);
-if (endsWith(copy, "/"))
+while (endsWith(copy, "/"))
     trimLastChar(copy);
-char *ptr = strrchr(copy, '/');
-// check to see if we're in a file name, like /blah/blah/name/hub.txt
-if (ptr)
+char *lastSlash = strrchr(copy, '/');
+if (lastSlash)
     {
-    if (strchr(ptr, '.'))
-        {
-        *ptr = 0;
-        ptr = strrchr(copy, '/');
-        }
-    if (ptr)
-        {
-        ++ptr;
-        return cloneString(ptr);
-        }
+    char *leaf = cloneString(lastSlash + 1);
+    freeMem(copy);
+    return leaf;
     }
 return copy;
 }
@@ -317,6 +318,23 @@ if (!sqlTableExistsOnMain(conn, "hubSpace"))
     errAbort("No hubSpace MySQL table is present. Please send an email to genome-www@soe.ucsc.edu  describing the exact steps you took just before you got this error");
     }
 hubSpaceSaveToDb(conn, row, "hubSpace", 0);
+hDisconnectCentral(&conn);
+}
+
+static void fillEmptyDirRowDb(char *userName, char *location, char *db)
+/* Give a directory row a genome if it does not have one yet. The rows above a file
+ * are created without one, so a hub whose first upload landed in a subdirectory has
+ * no genome on its own row, and the UI then reads it as a hub for genome "" and
+ * refuses to add anything to it. Only ever fills an empty value, so a hub that
+ * already has a genome keeps it */
+{
+if (isEmpty(userName) || isEmpty(location) || isEmpty(db))
+    return;
+struct sqlConnection *conn = hConnectCentral();
+struct dyString *q = sqlDyStringCreate(
+    "update hubSpace set db='%s' where userName='%s' and location='%s' and db=''",
+    db, userName, location);
+sqlUpdate(conn, dyStringCannibalize(&q));
 hDisconnectCentral(&conn);
 }
 
@@ -354,9 +372,11 @@ for (i = 0; i < foundSlashes; i++)
     row->md5sum = "";
     row->parentDir = i > 0 ? components[i-1] : "";
     row->hubType = hubType ? hubType : "trackHub";
-    // only insert a row for this parentDir if it's unique to the table
-    if (!checkHubSpaceRowExists(row))
+    // only insert a row for this directory if it's not in the table yet
+    if (!checkHubSpaceLocationExists(row->userName, row->location))
         addHubSpaceRowForFile(row);
+    else
+        fillEmptyDirRowDb(row->userName, row->location, db);
     }
 }
 
@@ -386,18 +406,60 @@ errCatchFree(&errCatch);
 return result;
 }
 
-static char *hubPathFromParentDir(char *parentDir, char *userDataDir)
-/* Assume parentDir does not have leading '/' or '.', parse out the first dir component
- * and add it to the users directory*/
+char *hubRootFromParentDir(char *parentDir)
+/* Return the first '/' separated component of parentDir, which is the hub itself.
+ * The hub.txt and the hubSpace dir row for a hub both live at that level, while
+ * hubLeafFromPath gives the immediately containing directory, which for a nested
+ * parentDir like 'myHub/hg38' is a subdirectory of the hub */
 {
 char *copy = cloneString(parentDir);
 char *firstSlash = strchr(copy, '/');
-if (!firstSlash)
+if (firstSlash)
+    *firstSlash = 0;
+return copy;
+}
+
+char *hubPathFromParentDir(char *parentDir, char *userDataDir)
+/* Return the directory holding this hub's hub.txt, that is the user's directory
+ * plus the hub component of parentDir */
+{
+char *hubRoot = hubRootFromParentDir(parentDir);
+char *hubPath = catTwoStrings(userDataDir, hubRoot);
+freeMem(hubRoot);
+return hubPath;
+}
+
+static char *hubSubPathFromParentDir(char *parentDir)
+/* Return the part of parentDir below the hub component, keeping its trailing '/',
+ * or "" when the file sits directly in the hub. This is the prefix a bigDataUrl
+ * needs, since hub.txt is at the hub and the file may be in a subdirectory */
+{
+char *firstSlash = strchr(parentDir, '/');
+if (firstSlash && firstSlash[1] != '\0')
+    return cloneString(firstSlash + 1);
+return cloneString("");
+}
+
+static char *pathRelativeToHubDir(char *filePath, char *hubDir)
+/* Return the part of filePath below hubDir. twoBitPath and bigDataUrl are relative
+ * to the hub.txt, so a file in a subdirectory needs that subdirectory in its setting.
+ * Fall back to the file name if filePath is not under hubDir */
+{
+// the '/' test keeps a hub from matching a sibling whose name it is a prefix of
+if (startsWith(hubDir, filePath) && filePath[strlen(hubDir)] == '/')
     {
-    return copy;
+    char *rel = filePath + strlen(hubDir);
+    while (*rel == '/')
+        rel++;
+    if (*rel != '\0')
+        return cloneString(rel);
     }
-*firstSlash = 0;
-return catTwoStrings(userDataDir, copy);
+// only reachable if the file is not under the hub, which means the two paths
+// disagree about symlinks. The setting we fall back to will not resolve
+fprintf(stderr, "warning: '%s' is not under hub dir '%s', hub.txt setting "
+        "will use the file name alone\n", filePath, hubDir);
+char *lastSlash = strrchr(filePath, '/');
+return cloneString(lastSlash ? lastSlash + 1 : filePath);
 }
 
 static void upgradeHubTxtForAssembly(char *hubFile, char *db, char *twoBitFileName)
@@ -442,8 +504,16 @@ if (genomeIdx < 0)
     return;
     }
 
-char *twoBitBase = strrchr(twoBitFileName, '/');
-twoBitBase = twoBitBase ? twoBitBase + 1 : twoBitFileName;
+char *hubDir = cloneString(hubFile);
+char *lastSlash = strrchr(hubDir, '/');
+if (lastSlash)
+    *lastSlash = 0;
+else
+    {
+    freeMem(hubDir);
+    hubDir = cloneString(".");
+    }
+char *twoBitBase = pathRelativeToHubDir(twoBitFileName, hubDir);
 char *defaultPos = defaultPosFromTwoBit(twoBitFileName);
 
 struct dyString *out = dyStringNew(1024);
@@ -471,12 +541,6 @@ for (ln = lines, i = 0; ln; ln = ln->next, i++)
 
 // Write to a sibling temp file and rename into place so a partial write
 // (ENOSPC, SIGKILL, etc.) cannot leave the user's hub.txt truncated.
-char *hubDir = cloneString(hubFile);
-char *lastSlash = strrchr(hubDir, '/');
-if (lastSlash)
-    *lastSlash = 0;
-else
-    strcpy(hubDir, ".");
 char *tmpFile = cloneString(rTempName(hubDir, "hub", ".txt"));
 FILE *f = mustOpen(tmpFile, "w");
 mustWrite(f, out->string, out->stringSize);
@@ -490,19 +554,44 @@ dyStringFree(&out);
 slNameFreeList(&lines);
 }
 
-static void setAssemblyHubTypeForDir(char *userName, char *parentDir)
-/* Flip this user's hub (dir row + direct-child files) to hubType='assemblyHub'.
- * Does not recurse into nested parentDirs like hubName/tracks; only the
- * hubtools-then-UI promotion flow can produce those. */
+static void refreshHubTextRow(char *userName, char *hubFile)
+/* Bring the hubSpace row for a hub.txt back in line with the file on disk. Called
+ * after rewriting a hub.txt that already has a row, so My Data and the quota do not
+ * keep reporting the size and checksum from before the rewrite. Keyed on location:
+ * a user can have a subdirectory whose name is another hub's name, which would give
+ * two hub.txt rows the same fileName and parentDir */
 {
-if (!userName || !parentDir || parentDir[0] == '\0') return;
+if (isEmpty(userName) || !fileExists(hubFile))
+    return;
+time_t modTime = fileModTime(hubFile);
+struct sqlConnection *conn = hConnectCentral();
+struct dyString *q = sqlDyStringCreate(
+    "update hubSpace set fileSize=%lld, md5sum='%s', lastModified='%s' "
+    "where userName='%s' and location='%s'",
+    (long long)fileSize(hubFile), md5HexForFile(hubFile),
+    sqlUnixTimeToDate(&modTime, TRUE), userName, hubFile);
+sqlUpdate(conn, dyStringCannibalize(&q));
+hDisconnectCentral(&conn);
+}
+
+static void setAssemblyHubTypeForDir(char *userName, char *hubDir)
+/* Flip every row of this user's hub to hubType='assemblyHub': the hub's own directory
+ * row and everything below it, however deeply nested. Matches on a location prefix
+ * with left() rather than LIKE, since a hub name may contain '_' and LIKE would read
+ * that as a wildcard. left() counts characters, which is the same as bytes here
+ * because cgiEncodeFull leaves only ASCII in a path. Callers run in the tusd hook,
+ * where getDataDir has already canonicalized the prefix the rows were written with */
+{
+if (isEmpty(userName) || isEmpty(hubDir)) return;
+struct dyString *prefix = dyStringCreate("%s/", hubDir);
 struct sqlConnection *conn = hConnectCentral();
 struct dyString *q = sqlDyStringCreate(
     "update hubSpace set hubType='assemblyHub' "
-    "where userName='%s' and (parentDir='%s' or (fileName='%s' and parentDir=''))",
-    userName, parentDir, parentDir);
+    "where userName='%s' and (location='%s' or left(location,%d)='%s')",
+    userName, hubDir, (int)dyStringLen(prefix), dyStringContents(prefix));
 sqlUpdate(conn, dyStringCannibalize(&q));
 hDisconnectCentral(&conn);
+dyStringFree(&prefix);
 }
 
 int lockHubDir(char *hubDir)
@@ -512,11 +601,30 @@ int lockHubDir(char *hubDir)
 {
 struct dyString *lockPath = dyStringCreate("%s%s.hub.lock",
     hubDir, endsWith(hubDir, "/") ? "" : "/");
-int fd = open(dyStringContents(lockPath), O_RDWR | O_CREAT, 0666);
+// O_CLOEXEC so the md5sum children we fork under this lock do not inherit it.
+// An inherited fd outliving a killed hook would hold the lock with no owner left
+// to release it, and every later upload to the hub would time out
+int fd = open(dyStringContents(lockPath), O_RDWR | O_CREAT | O_CLOEXEC, 0666);
 if (fd < 0)
     errnoAbort("could not open hub lock %s", dyStringContents(lockPath));
-if (flock(fd, LOCK_EX) < 0)
-    errnoAbort("could not acquire hub lock on %s", dyStringContents(lockPath));
+// poll rather than block, so one stuck upload cannot hold up every other upload
+// to this hub indefinitely
+// clamp so a mistyped hg.conf value cannot turn into a negative wait
+int timeoutSeconds = atoi(cfgOptionDefault("hubSpaceLockTimeout", HUB_LOCK_TIMEOUT_DEFAULT));
+if (timeoutSeconds < 1 || timeoutSeconds > 3600)
+    timeoutSeconds = atoi(HUB_LOCK_TIMEOUT_DEFAULT);
+int timeoutMs = timeoutSeconds * 1000;
+int waitedMs = 0;
+while (flock(fd, LOCK_EX | LOCK_NB) < 0)
+    {
+    if (errno != EWOULDBLOCK)
+        errnoAbort("could not acquire hub lock on %s", dyStringContents(lockPath));
+    if (waitedMs >= timeoutMs)
+        errAbort("Timed out waiting for another upload to this hub to finish. "
+                "Please try again.");
+    sleep1000(HUB_LOCK_POLL_MS);
+    waitedMs += HUB_LOCK_POLL_MS;
+    }
 dyStringFree(&lockPath);
 return fd;
 }
@@ -529,24 +637,13 @@ if (fd >= 0)
     close(fd);
 }
 
-boolean literalHubTxtExistsOnDisk(char *parentDir, char *userDataDir)
-/* Return TRUE if path/hub.txt is a real file on disk. Used by pre-finish to
- * decide between synthesize-fresh vs upgrade-in-place. */
-{
-if (!parentDir || !parentDir[0]) return FALSE;
-char *hubDir = hubPathFromParentDir(parentDir, userDataDir);
-struct dyString *hubFileDy = dyStringCreate("%s%shub.txt",
-    hubDir, endsWith(hubDir, "/") ? "" : "/");
-char *hubFile = dyStringCannibalize(&hubFileDy);
-boolean exists = fileExists(hubFile);
-freeMem(hubFile);
-return exists;
-}
-
-void upgradeExistingHubToAssembly(struct hubSpace *rowForFile, char *userDataDir, char *encodedParentDir)
-/* When a 2bit lands in a hub, add the assembly stanza to hub.txt (if the
- * backend owns it) and flip every row for this hub to hubType='assemblyHub'.
- * No-op unless rowForFile is a 2bit. */
+void upgradeExistingHubToAssembly(struct hubSpace *rowForFile, char *userDataDir,
+    boolean backendOwnsHubTxt)
+/* When a 2bit arrives into a hub, mark every hubSpace row for this hub as
+ * hubType='assemblyHub'. When backendOwnsHubTxt, first add the assembly stanza to
+ * the synthesized hub.txt, which is itself a no-op if that file does not exist.
+ * Pass FALSE for a hub.txt the user uploaded, whose contents are theirs to write.
+ * The whole function is a no-op unless rowForFile is a 2bit. */
 {
 if (!sameOk(rowForFile->fileType, "2bit"))
     return;
@@ -555,11 +652,18 @@ char *hubDir = hubPathFromParentDir(rowForFile->parentDir, userDataDir);
 struct dyString *hubFileDy = dyStringCreate("%s%shub.txt",
     hubDir, endsWith(hubDir, "/") ? "" : "/");
 char *hubFile = dyStringCannibalize(&hubFileDy);
-upgradeHubTxtForAssembly(hubFile, rowForFile->db, rowForFile->location);
+// rewrite hub.txt before any row is touched. upgradeHubTxtForAssembly aborts on a
+// failed write and the caller's errCatch does not roll back mysql, so flipping the
+// rows first would leave a hub marked assemblyHub whose hub.txt has no twoBitPath
+if (backendOwnsHubTxt)
+    upgradeHubTxtForAssembly(hubFile, rowForFile->db, rowForFile->location);
 
-char *hubNameOnly = encodedParentDir ? hubNameFromPath(encodedParentDir) : NULL;
-if (hubNameOnly && hubNameOnly[0])
-    setAssemblyHubTypeForDir(rowForFile->userName, hubNameOnly);
+setAssemblyHubTypeForDir(rowForFile->userName, hubDir);
+if (backendOwnsHubTxt)
+    {
+    // hub.txt just changed on disk, so the row's size and md5 are out of date
+    refreshHubTextRow(rowForFile->userName, hubFile);
+    }
 
 freeMem(hubFile);
 }
@@ -571,6 +675,9 @@ char *writeHubText(char *path, char *userName, char *db, char *twoBitFileName)
  * the 2bit). For convenience, return the file name of the created hub, which
  * can be freed. */
 {
+// an empty path would put the hub.txt at the root of the filesystem
+if (isEmpty(path))
+    errAbort("no directory given for the hub, cannot create hub.txt");
 int oldUmask = 00;
 oldUmask = umask(0);
 makeDirsOnPath(path);
@@ -583,7 +690,7 @@ hubFile = dyStringCannibalize(&hubFileDy);
 if (fileExists(hubFile))
     return hubFile;
 
-char *hubName = hubNameFromPath(path);
+char *hubName = hubLeafFromPath(path);
 FILE *f = mustOpen(hubFile, "w");
 fprintf(f, "hub %s\n"
     "email %s\n"
@@ -598,8 +705,7 @@ if (twoBitFileName)
     {
     // Assembly hub: write twoBitPath plus stub fields the user can edit later.
     // The bigDataUrl/twoBitPath is relative to the hub.txt location.
-    char *twoBitBase = strrchr(twoBitFileName, '/');
-    twoBitBase = twoBitBase ? twoBitBase + 1 : twoBitFileName;
+    char *twoBitBase = pathRelativeToHubDir(twoBitFileName, path);
     char *defaultPos = defaultPosFromTwoBit(twoBitFileName);
     fprintf(f, "twoBitPath %s\n"
         "organism %s\n"
@@ -615,37 +721,41 @@ carefulClose(&f);
 return hubFile;
 }
 
-static boolean bigDataUrlExistsInHub(char *hubFileName, char *fileName)
-/* Check if a bigDataUrl line already references this file in the hub.txt.
+static boolean trackExistsInHub(char *hubFileName, char *track, char *bigDataUrl)
+/* Check if this track is already in the hub.txt, either by name or by the file it
+ * points at. Track names have to be unique within a hub, so that is the key that
+ * matters, but a user's own hub.txt may reference the file under a different name.
  * Simple line-by-line check - not a full trackDb parser. */
 {
-if (!hubFileName || !fileName)
+if (!hubFileName)
     return FALSE;
 
 struct lineFile *lf = lineFileMayOpen(hubFileName, TRUE);
 if (!lf)
     return FALSE;
 
+boolean found = FALSE;
 char *line;
-while (lineFileNext(lf, &line, NULL))
+while (!found && lineFileNext(lf, &line, NULL))
     {
     char *trimmedLine = skipLeadingSpaces(line);
-    if (startsWith("bigDataUrl ", trimmedLine))
+    if (track && startsWith("track ", trimmedLine))
         {
-        char *url = trimmedLine + 11; // skip "bigDataUrl "
-        url = skipLeadingSpaces(url);
-        if (isEmpty(url))
-            continue;
-        // Check if the URL ends with this filename (handles relative paths)
-        if (endsWith(url, fileName) || sameString(url, fileName))
-            {
-            lineFileClose(&lf);
-            return TRUE;
-            }
+        char *name = trimSpaces(skipLeadingSpaces(trimmedLine + 6));
+        found = sameString(name, track);
+        }
+    else if (bigDataUrl && startsWith("bigDataUrl ", trimmedLine))
+        {
+        char *url = trimSpaces(skipLeadingSpaces(trimmedLine + 11));
+        // compare whole paths: a bare 'track.bb' is a different file from
+        // 'hg38/track.bb', and 'mydata.bb' is not 'data.bb'
+        if (startsWith("./", url))
+            url += 2;
+        found = sameString(url, bigDataUrl);
         }
     }
 lineFileClose(&lf);
-return FALSE;
+return found;
 }
 
 static void writeTrackStanza(char *hubFileName, char *track, char *bigDataUrl, char *type, char *label, char *bigFileLocation)
@@ -655,7 +765,7 @@ if ( (sameString(type, "bamIndex") || sameString(type, "tabixIndex") || sameStri
     return;
 
 // Skip if this file is already referenced in hub.txt (e.g., user uploaded their own hub.txt)
-if (bigDataUrlExistsInHub(hubFileName, bigDataUrl))
+if (trackExistsInHub(hubFileName, track, bigDataUrl))
     return;
 
 FILE *f = mustOpen(hubFileName, "a");
@@ -691,7 +801,7 @@ fprintf(f, "track %s\n"
 carefulClose(&f);
 }
 
-static char *writeHubStanzasForFile(struct hubSpace *rowForFile, char *userDataDir, char *parentDir)
+static char *writeHubStanzasForFile(struct hubSpace *rowForFile, char *userDataDir)
 /* Create a hub.txt (if necessary) and add track stanzas for the file described by rowForFile.
  * If the file is a 2bit, write the assembly-hub genome stanza instead of a track stanza.
  * Returns the path to the hub.txt */
@@ -710,17 +820,22 @@ if (!isAssemblyHub)
     // if the filename from tus was &.bb, tus encodes this to "\u0026.bb", which we write to
     // disk as %5Cu0026.bb, and apache needs to find at:
     // https://url/hash/userName/%25Cu0026.bb in order to work in hgTracks
-    writeTrackStanza(hubFileName, rowForFile->fileName, cgiEncodeFull(rowForFile->fileName), rowForFile->fileType, rowForFile->fileName, rowForFile->location);
+    // The subdirectory part needs no such encoding: isValidParentDir limits those
+    // components to letters, digits, '.' and '_'.
+    char *subPath = hubSubPathFromParentDir(rowForFile->parentDir);
+    struct dyString *bigDataUrl = dyStringCreate("%s%s", subPath, cgiEncodeFull(rowForFile->fileName));
+    writeTrackStanza(hubFileName, rowForFile->fileName, dyStringCannibalize(&bigDataUrl), rowForFile->fileType, rowForFile->fileName, rowForFile->location);
+    freeMem(subPath);
     }
 return hubFileName;
 }
 
-void createNewTempHubForUpload(char *requestId, struct hubSpace *rowForFile, char *userDataDir, char *parentDir)
+void createNewTempHubForUpload(char *requestId, struct hubSpace *rowForFile, char *userDataDir)
 /* Creates a hub.txt for this upload, and updates the hubSpace table for the
  * hub.txt and any parentDirs we need to create. */
 {
 // first create the hub.txt if necessary and write the stanza for this track
-char *hubPath = writeHubStanzasForFile(rowForFile, userDataDir, parentDir);
+char *hubPath = writeHubStanzasForFile(rowForFile, userDataDir);
 
 // update the mysql table with a record of the hub.txt:
 struct hubSpace *hubTextRow = NULL;
@@ -735,9 +850,11 @@ hubTextRow->lastModified = sqlUnixTimeToDate(&lastModTime, TRUE);
 hubTextRow->db = rowForFile->db;
 hubTextRow->location = hubPath;
 hubTextRow->md5sum = md5HexForFile(hubPath);
-hubTextRow->parentDir = hubNameFromPath(hubPath);
+// the hub.txt sits at the hub root, so take the hub name from the file's parentDir
+// rather than picking it back out of the hub.txt path
+hubTextRow->parentDir = hubRootFromParentDir(rowForFile->parentDir);
 hubTextRow->hubType = rowForFile->hubType ? rowForFile->hubType : "trackHub";
-if (!checkHubSpaceRowExists(hubTextRow))
+if (!checkHubSpaceLocationExists(hubTextRow->userName, hubTextRow->location))
     addHubSpaceRowForFile(hubTextRow);
 }
 
@@ -796,14 +913,79 @@ else
 // TODO: we should also modify the hub.txt associated with this file
 }
 
+static struct dyString *hubSpaceQueryForUser(char *userName)
+/* Return a select of every hubSpace column the My Data table needs, restricted to
+ * one user. Callers narrow it further with sqlDyStringPrintf.
+ * Both times come back as seconds since the epoch so the browser can show them in
+ * the reader's own timezone. They need different conversions to get there:
+ * creationTime is mysql's CURRENT_TIMESTAMP, so UNIX_TIMESTAMP reads it correctly,
+ * while every writer of lastModified stores a GMT clock reading, which TIMESTAMPDIFF
+ * measures without applying the session timezone a second time */
+{
+return sqlDyStringCreate("select userName, fileName, fileSize, fileType, "
+    "UNIX_TIMESTAMP(creationTime) as creationTime, "
+    "TIMESTAMPDIFF(SECOND, '1970-01-01 00:00:00', lastModified) as lastModified, "
+    "db, location, md5sum, parentDir, hubType from hubSpace where userName='%s'", userName);
+}
+
 struct hubSpace *listFilesForUser(char *userName)
 /* Return the files the user has uploaded */
 {
 struct sqlConnection *conn = hConnectCentral();
-struct dyString *query = sqlDyStringCreate("select userName, fileName, fileSize, fileType, creationTime, DATE_FORMAT(lastModified, '%%c/%%d/%%Y, %%l:%%i:%%s %%p') as lastModified, db, location, md5sum, parentDir, hubType from hubSpace where userName='%s' order by location,creationTime", userName);
+struct dyString *query = hubSpaceQueryForUser(userName);
+sqlDyStringPrintf(query, " order by location,creationTime");
 struct hubSpace *fileList = hubSpaceLoadByQuery(conn, dyStringCannibalize(&query));
 hDisconnectCentral(&conn);
 return fileList;
+}
+
+struct hubSpace *listFilesInHubDir(char *userName, char *hubName)
+/* Return the user's rows for one hub: the hub's own directory row plus every row
+ * underneath it */
+{
+if (isEmpty(hubName))
+    return NULL;
+struct hubSpace *hubList = NULL, *file, *next;
+struct dyString *prefix = dyStringCreate("%s/", hubName);
+// select the rows in C on the path stripDataDir gives, rather than on location in
+// the query. A row's location can carry either the hg.conf tusdDataDir or the
+// tusdMountPoint prefix, and stripDataDir is what knows about both
+for (file = listFilesForUser(userName); file != NULL; file = next)
+    {
+    next = file->next;
+    char *path = stripDataDir(file->location, userName);
+    if (sameOk(path, hubName) || (path && startsWith(dyStringContents(prefix), path)))
+        {
+        file->next = NULL;
+        slAddHead(&hubList, file);
+        }
+    }
+slReverse(&hubList);
+dyStringFree(&prefix);
+return hubList;
+}
+
+void hubSpaceWriteFileList(struct jsonWrite *jw, char *userName, struct hubSpace *fileList)
+/* Write fileList as the "fileList" array of jw, in the row shape the My Data table reads */
+{
+jsonWriteListStart(jw, "fileList");
+struct hubSpace *file;
+for (file = fileList; file != NULL; file = file->next)
+    {
+    jsonWriteObjectStart(jw, NULL);
+    jsonWriteString(jw, "fileName", file->fileName);
+    jsonWriteNumber(jw, "fileSize", file->fileSize);
+    jsonWriteString(jw, "fileType", file->fileType);
+    jsonWriteString(jw, "parentDir", file->parentDir);
+    jsonWriteString(jw, "genome", file->db);
+    jsonWriteNumber(jw, "lastModified", file->lastModified ? sqlLongLong(file->lastModified) : 0);
+    jsonWriteNumber(jw, "uploadTime", file->creationTime ? sqlLongLong(file->creationTime) : 0);
+    jsonWriteString(jw, "fullPath", stripDataDir(file->location, userName));
+    jsonWriteString(jw, "md5sum", file->md5sum);
+    jsonWriteString(jw, "hubType", file->hubType ? file->hubType : "trackHub");
+    jsonWriteObjectEnd(jw);
+    }
+jsonWriteListEnd(jw);
 }
 
 #define defaultHubName "defaultHub"

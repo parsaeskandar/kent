@@ -24,9 +24,6 @@ struct cart;         // forward definition for use in trackDb.h
 #define CART_VAR_EMPTY "[]"
 #define IS_CART_VAR_EMPTY(var) ((var) == NULL || sameString(var,CART_VAR_EMPTY))
 
-// A list of headers each CGI can use to control their own HTTP headers
-extern struct slPair *httpHeaders;
-
 typedef struct sqlConnection *(*DbConnector)();
 /* funtion type used to get a connection to database */
 
@@ -503,6 +500,11 @@ void cartSetDbDisconnector(DbDisconnect disconnector);
 #define hgsLoadUrlName hgSessionPrefix "loadUrlName"
 #define hgsDoLoadUrl hgSessionPrefix "doLoadUrl"
 
+// Set when a saved session has just replaced the whole cart, so that the next hgTracks page can
+// tell the user what they opened and that their previous browser configuration is gone.
+// hgTracks removes it as soon as it has seen it.
+#define hgsSessionJustLoaded hgSessionPrefix "sessionJustLoaded"
+
 #define namedSessionTable cartNamedSessionDbTable()
 
 void sessionTouchLastUse(struct sqlConnection *conn, char *encUserName,
@@ -636,8 +638,18 @@ boolean cartTdbTreeCleanupOverrides(struct trackDb *tdb,struct cart *newCart,str
 /* When composite/view settings changes, remove subtrack specific settings
    Returns TRUE if any cart vars are removed */
 
-void cartCopyLocalHubs(struct cart *cart);
-/* Find any custom composite and quickLift hubs and copy them so they can be modified. */
+boolean cartCollectionHubCopyOnWrite();
+/* Return TRUE if a track collection hub file is copied when the program that writes it asks for
+ * a copy, rather than on every session load.  hg.conf gate for #38273. */
+
+void cartRequestLocalHubCopy();
+/* Declare that this program rewrites the track collection hub file that the cart names, so that
+ * cartNew() replaces it with a private copy in trash before the hubs are loaded.  Call this
+ * before opening the cart.  hgCollection is the only caller.  refs #38273 */
+
+void cartCopyLocalHubsOnSessionLoad(struct cart *cart);
+/* Copy any custom composite hubs after loading a session.  The pre-#38273 behavior; does nothing
+ * under the collectionHubCopyOnWrite gate.  Goes away when the gate does. */
 
 void cartReplaceHubVars(struct cart *cart, char *hubFileVar, char *oldHubUrl, char *newHubUrl);
 /* Replace all cart variables corresponding to oldHubUrl (and/or its hub ID) with

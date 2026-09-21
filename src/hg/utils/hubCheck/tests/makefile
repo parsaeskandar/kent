@@ -3,7 +3,7 @@ include ../../../../inc/common.mk
 
 hubCheck = ${DESTBINDIR}/hubCheck
 
-test:: one two errors supertrackChild genomesErrors badType badSubgroups autoScale noLongLabel badGroups goodGroups noCompositeGroup allowWarnings seqNameCheck noSeqNameCheck selfParent dotInName fieldCountMismatch
+test:: one two errors supertrackChild genomesErrors badType badSubgroups autoScale noLongLabel badGroups goodGroups noCompositeGroup allowWarnings seqNameCheck noSeqNameCheck selfParent dotInName fieldCountMismatch relPath missingFile
 
 one:	mkout
 	-${hubCheck} input/hub1.txt > output/output1.txt
@@ -76,6 +76,21 @@ dotInName: mkout
 fieldCountMismatch: mkout
 	-cd input && ${hubCheck} fieldCountMismatch.txt > ../output/fieldCountMismatch.output.txt 2>/dev/null
 	diff expected/fieldCountMismatch.output.txt output/fieldCountMismatch.output.txt
+
+# A hub reached by a relative path, with its data file in a subdirectory below
+# hub.txt. Deliberately NOT run from inside input/, because the point is to check
+# that the hub directory is prepended to bigDataUrl once and not twice. The
+# expected output is a field count mismatch, which hubCheck can only report if it
+# found and opened the file.
+relPath: mkout
+	-${hubCheck} input/relPath/hub.txt > output/relPath.output.txt 2>/dev/null
+	diff expected/relPath.output.txt output/relPath.output.txt
+
+# A bigDataUrl that does not exist has to be reported. hubCheck used to prune such a
+# track out of the list before it ever got checked, and then exited 0 saying nothing.
+missingFile: mkout
+	-${hubCheck} input/relPath/missingFile.txt > output/missingFile.output.txt 2>/dev/null
+	diff expected/missingFile.output.txt output/missingFile.output.txt
 
 mkout::
 	@mkdir -p output

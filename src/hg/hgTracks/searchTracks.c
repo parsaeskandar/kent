@@ -1050,7 +1050,8 @@ for (group = groupList; group != NULL; group = group->next)
     if (group->trackList != NULL)
         {
         groups[numGroups] = cloneString(group->name);
-        labels[numGroups] = cloneString(group->label);
+        // a hub group's label is built from the hub's shortLabel and its groups.txt label
+        labels[numGroups] = htmlEncode(group->label);
         numGroups++;
         if (numGroups >= ArraySize(groups))
             internalErr();
@@ -1058,6 +1059,11 @@ for (group = groupList; group != NULL; group = group->next)
     }
 hashFree(&superHash);
 
+// On an assembly hub the organism and the freeze name both come from the hub, but they are
+// not escaped here: webStartWrapperDetailedNoArgs puts the title through htmlTextOut, which
+// escapes & < > and the double quote for us.  Escaping it a second time printed the entity
+// instead of the character, so every assembly with a '/' in its description read
+// "(GRCh38&#x2F;hg38)" in the blue bar.
 safef(buf, sizeof(buf),"Search for Tracks in the %s %s Assembly",
       organism, hFreezeFromDb(database));
 webStartWrapperDetailedNoArgs(cart, database, "", buf, FALSE, FALSE, FALSE, FALSE);
@@ -1087,7 +1093,7 @@ hPrintf("<div id='tabs' style='display:none; %s'>\n<ul>\n<li><a href='#simpleTab
 hPrintf("<table id='simpleTable' style='width:100%%; font-size:.9em;'><tr><td colspan='2'>");
 hPrintf("<input type='text' name='%s' id='simpleSearch' class='submitOnEnter' value='%s' "
         "style='max-width:1000px; width:100%%;'>\n",
-        TRACK_SEARCH_SIMPLE,simpleEntry == NULL ? "" : simpleEntry);
+        TRACK_SEARCH_SIMPLE,simpleEntry == NULL ? "" : htmlEncode(simpleEntry)); // escape (XSS)
 jsOnEventById("keyup", "simpleSearch", "findTracks.searchButtonsEnable(true);");
 
 hPrintf("</td></tr><td style='max-height:4px;'></td></tr></table>");
@@ -1113,7 +1119,7 @@ hPrintf("<td align='right'>contains</td>\n");
 hPrintf("<td colspan='%d'>", cols - 4);
 hPrintf("<input type='text' name='%s' id='nameSearch' class='submitOnEnter' value='%s' "
         "style='min-width:326px; font-size:.9em;'>",
-        TRACK_SEARCH_ON_NAME, nameSearch == NULL ? "" : nameSearch);
+        TRACK_SEARCH_ON_NAME, nameSearch == NULL ? "" : htmlEncode(nameSearch)); // escape (XSS)
 jsOnEventById("keyup", "nameSearch", "findTracks.searchButtonsEnable(true);");
 hPrintf("</td></tr>\n");
 
@@ -1124,7 +1130,7 @@ hPrintf("<td align='right'>contains</td>\n");
 hPrintf("<td colspan='%d'>", cols - 4);
 hPrintf("<input type='text' name='%s' id='descSearch' value='%s' class='submitOnEnter' "
         "style='max-width:536px; width:536px; font-size:.9em;'>",
-        TRACK_SEARCH_ON_DESCR, descSearch == NULL ? "" : descSearch);
+        TRACK_SEARCH_ON_DESCR, descSearch == NULL ? "" : htmlEncode(descSearch)); // escape (XSS)
 jsOnEventById("keyup", "descSearch", "findTracks.searchButtonsEnable(true);");
 hPrintf("</td></tr>\n");
 

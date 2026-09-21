@@ -917,9 +917,18 @@ return edwSubmitCountErrors(submit,conn) + edwSubmitCountNewValid(submit, conn) 
 void edwAddSubmitJob(struct sqlConnection *conn, char *userEmail, char *url, boolean update)
 /* Add submission job to table and wake up daemon. */
 {
+/* The command built below is later run through a shell by edwRunDaemon, with url and
+ * userEmail each wrapped in single quotes.  Inside single quotes every character is literal
+ * except a single quote itself, so a quote (or a newline) in either value would break out of
+ * the quoting and inject arbitrary shell commands.  Refuse those characters. refs #38060 */
+if (strpbrk(url, "'\n\r") != NULL)
+    errAbort("Illegal character in submission URL.");
+if (strpbrk(userEmail, "'\n\r") != NULL)
+    errAbort("Illegal character in submission user.");
+
 /* Create command and add it to edwSubmitJob table. */
 char command[strlen(url) + strlen(userEmail) + 256];
-safef(command, sizeof(command), "edwSubmit %s'%s' %s", (update ? "-update " : ""), url, userEmail);
+safef(command, sizeof(command), "edwSubmit %s'%s' '%s'", (update ? "-update " : ""), url, userEmail);
 char query[strlen(command)+128];
 sqlSafef(query, sizeof(query), "insert edwSubmitJob (commandLine) values('%s')", command);
 sqlUpdate(conn, query);
@@ -949,8 +958,7 @@ return edwValidFileLoadByQuery(conn, query);
 void edwWebHeaderWithPersona(char *title)
 /* Print out HTTP and HTML header through <BODY> tag with persona info */
 {
-printf("Content-Type:text/html\r\n");
-printf("\r\n\r\n");
+cgiPrintContentType("text/html");
 puts("<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01 Transitional//EN\" "
 	      "\"http://www.w3.org/TR/html4/loose.dtd\">");
 printf("<HTML><HEAD><TITLE>%s</TITLE>\n", "ENCODE Data Warehouse");

@@ -204,8 +204,9 @@ for(i = 0;; i++)
 		dyStringAppendC(ds, '\\');
                 break;
             default:
-                // we don't need to convert \,/ or "
-		dyStringAppendC(ds, c);
+                // \\, \/ and \" stand for the character after the backslash, which the
+                // dyStringAppendC below adds.  Adding it here as well doubled it, so a URL
+                // came back out of the parser as "https:////host//path".
                 break;
             }
         dyStringAppendC(ds, c);
@@ -552,7 +553,11 @@ void jsonPrintOneStart(struct jsonElement *ele, char *name, boolean isLast, int 
 spaceOut(f, indent);
 if (name != NULL)
     {
-    fprintf(f, "\"%s\": ", name);
+    // names are not always literals: an assembly hub's genome name ends up here, so a name
+    // is encoded the same way a string value is.
+    char *escaped = jsonStringEscapeLm(name, NULL);
+    fprintf(f, "\"%s\": ", escaped);
+    freez(&escaped);
     }
 switch (ele->type)
     {

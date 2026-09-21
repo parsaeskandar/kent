@@ -38,9 +38,28 @@ hgsql -e 'desc assemblyList;' hgcentraltest
 | taxId          | int(10) unsigned    | YES  |     | NULL    |       |
 | clade          | varchar(255)        | YES  |     | NULL    |       |
 | description    | varchar(1023)       | YES  |     | NULL    |       |
-| browserExists  | tinyint(3) unsigned | YES  |     | NULL    |       |
+| browserExists  | tinyint(3) unsigned | YES  | MUL | NULL    |       |
 | hubUrl         | varchar(511)        | YES  |     | NULL    |       |
+| year           | int(10) unsigned    | YES  |     | NULL    |       |
+| refSeqCategory | varchar(31)         | YES  | MUL | NULL    |       |
+| versionStatus  | varchar(15)         | YES  | MUL | NULL    |       |
+| assemblyLevel  | varchar(15)         | YES  | MUL | NULL    |       |
+| haplotypes     | varchar(511)        | YES  |     | NULL    |       |
 +----------------+---------------------+------+-----+---------+-------+
+
+hgsql -e 'show index from assemblyList;' hgcentraltest
+   FULLTEXT gIdx (name, commonName, scientificName, clade, description,
+                  refSeqCategory, versionStatus, assemblyLevel, haplotypes)
+   -- MATCH() column lists below must name exactly these 9 columns, in
+   -- any order, or MySQL silently runs an unindexed full-table scan
+   -- instead of using this index (see the boolean-mode caveat in the
+   -- MySQL manual, "Boolean Full-Text Searches")
+   PRIMARY KEY (name)
+   INDEX idxBrowserExists (browserExists)
+   INDEX idxRefSeqCategory (refSeqCategory)
+   INDEX idxVersionStatus (versionStatus)
+   INDEX idxAssemblyLevel (assemblyLevel)
+   INDEX idxFilters (browserExists, refSeqCategory, versionStatus, assemblyLevel)
 */
 
 static long long sqlJsonOut(struct jsonWrite *jw, struct sqlResult *sr)
@@ -224,7 +243,7 @@ for (int i = 1; i < wordCount; ++i)
 /* initial SELECT allows any browser exist status, existing or not */
 struct dyString *query = dyStringNew(64);
 sqlDyStringPrintf(query, "SELECT COUNT(*) FROM %s ", asmListTable);
-sqlDyStringPrintf(query, "WHERE MATCH(name, commonName, scientificName, clade, description) AGAINST ('%s' IN BOOLEAN MODE)", queryDy->string);
+sqlDyStringPrintf(query, "WHERE MATCH(name, commonName, scientificName, clade, description, refSeqCategory, versionStatus, assemblyLevel, haplotypes) AGAINST ('%s' IN BOOLEAN MODE)", queryDy->string);
 addConditions(query);	/* add optional SELECT options */
 
 long long matchCount = sqlQuickLongLong(conn, query->string);
@@ -240,7 +259,7 @@ if (matchCount > 0)
 	dyStringFree(&query);
 	query = dyStringNew(64);
 	sqlDyStringPrintf(query, "SELECT * FROM %s ", asmListTable);
-        sqlDyStringPrintf(query, "WHERE MATCH(name, commonName, scientificName, clade, description, refSeqCategory, versionStatus, assemblyLevel) AGAINST ('%s' IN BOOLEAN MODE)", queryDy->string);
+        sqlDyStringPrintf(query, "WHERE MATCH(name, commonName, scientificName, clade, description, refSeqCategory, versionStatus, assemblyLevel, haplotypes) AGAINST ('%s' IN BOOLEAN MODE)", queryDy->string);
 	addConditions(query);	/* add optional SELECT options */
 	sqlDyStringPrintf(query, " ORDER BY priority LIMIT %d;", maxItemsOutput);
 	struct sqlResult *sr = sqlGetResult(conn, query->string);
@@ -261,7 +280,7 @@ long long itemCount = 0;
 *totalMatchCount = 0;
 
 struct dyString *query = sqlDyStringCreate("SELECT COUNT(*) FROM %s ", asmListTable);
-sqlDyStringPrintf(query, "WHERE MATCH(name, commonName, scientificName, clade, description, refSeqCategory, versionStatus, assemblyLevel) AGAINST ('%s' IN BOOLEAN MODE)", searchWord);
+sqlDyStringPrintf(query, "WHERE MATCH(name, commonName, scientificName, clade, description, refSeqCategory, versionStatus, assemblyLevel, haplotypes) AGAINST ('%s' IN BOOLEAN MODE)", searchWord);
 addConditions(query);	/* add optional SELECT options */
 
 long long matchCount = sqlQuickLongLong(conn, query->string);
@@ -270,7 +289,7 @@ if (matchCount < 1)	/* no match, add the * wild card match to make a prefix matc
     {
     dyStringClear(query);
     sqlDyStringPrintf(query, "SELECT COUNT(*) FROM %s ", asmListTable);
-    sqlDyStringPrintf(query, "WHERE MATCH(name, commonName, scientificName, clade, description, refSeqCategory, versionStatus, assemblyLevel) AGAINST ('%s*' IN BOOLEAN MODE)", searchWord);
+    sqlDyStringPrintf(query, "WHERE MATCH(name, commonName, scientificName, clade, description, refSeqCategory, versionStatus, assemblyLevel, haplotypes) AGAINST ('%s*' IN BOOLEAN MODE)", searchWord);
     addConditions(query);	/* add optional SELECT options */
     matchCount = sqlQuickLongLong(conn, query->string);
     if (matchCount > 0)
@@ -288,7 +307,7 @@ else
     {
     dyStringClear(query);
     sqlDyStringPrintf(query, "SELECT * FROM %s ", asmListTable);
-    sqlDyStringPrintf(query, "WHERE MATCH(name, commonName, scientificName, clade, description, refSeqCategory, versionStatus, assemblyLevel) AGAINST ('%s%s' IN BOOLEAN MODE)", searchWord, *prefixSearch ? "*" : "");
+    sqlDyStringPrintf(query, "WHERE MATCH(name, commonName, scientificName, clade, description, refSeqCategory, versionStatus, assemblyLevel, haplotypes) AGAINST ('%s%s' IN BOOLEAN MODE)", searchWord, *prefixSearch ? "*" : "");
     addConditions(query);	/* add optional SELECT options */
     sqlDyStringPrintf(query, " ORDER BY priority LIMIT %d;", maxItemsOutput);
     struct sqlResult *sr = sqlGetResult(conn, query->string);
@@ -550,7 +569,11 @@ hDisconnectCentral(&conn);
 void apiAssemblyRequest(char *words[MAX_PATH_INFO])
 /* interface to the assemblySearch.html request form.  Replaces the
  *   primitive /cgi-bin/asr perl CGI script.  Inserts a row into the
- *   ottoRequest table; the otto cron job watcher handles email.
+ *   ottoRequest table; the otto cron job watcher handles email.  When
+ *   asmAlias already maps the requested asmId to an existing browser,
+ *   that db goes into toDb instead of a duplicate asmId, which tells
+ *   ottoRequest.py to send an "already available" acknowledgement
+ *   instead of queuing a build.
  */
 {
 char *extraArgs = verifyLegalArgs(argAssemblyRequest);
@@ -581,6 +604,34 @@ if (isNotEmpty(betterName))
 if (isNotEmpty(comment))
     dyStringPrintf(fullComment, "; comment: '%s'", comment);
 
+/* If asmAlias already maps this asmId to a browser we have, there is
+ * nothing to build.  asmAliasFind() returns its argument unchanged when
+ * no alias row matches, so differentString() is the standard way (see
+ * hubApi.c and hg/lib/web.c) to detect a real hit. */
+char *existingBrowser = asmAliasFind(asmId);
+boolean alreadyExists = differentString(existingBrowser, asmId);
+
+/* Record the request in the ottoRequest table.  For a normal request,
+ * asmId is placed in both fromDb and toDb (toDb otherwise unused for
+ * requestType='assembly', and left non-empty in case the column does
+ * not allow empty).  When asmAlias resolves asmId to an existing
+ * browser, toDb carries that browser's db/asmId instead -- fromDb !=
+ * toDb is then the signal that ottoRequest.py uses to send the "already
+ * available" acknowledgement and close out the row immediately instead
+ * of handing it to asmRequestWatch.sh, which would otherwise wait
+ * forever for a build that will never happen.  Done locally (this host
+ * has hgcentral write grants) or relayed to genome.ucsc.edu (it
+ * doesn't) -- see inUcscEduDomain()/onGenomeRRMachine(). */
+char *toDb = alreadyExists ? existingBrowser : asmId;
+char *ottoStatus;
+if (inUcscEduDomain() && !onGenomeRRMachine())
+    ottoStatus = relaySubmitOttoRequest("assembly", asmId, toDb, email, dyStringContents(fullComment));
+else
+    ottoStatus = submitOttoRequest("assembly", asmId, toDb, email, dyStringContents(fullComment));
+
+if (sameString(ottoStatus, "error"))
+    apiErrAbort(err500, err500Msg, "internal error recording assembly request");
+
 char nowTime[256];
 time_t seconds = clock1();
 struct tm *timeNow = localtime(&seconds);
@@ -591,27 +642,15 @@ dyStringPrintf(msg, "%s\nAssembly request\nasmId: %s\nname: %s\nemail: %s\nbette
     nowTime, asmId, name, email,
     isNotEmpty(betterName) ? betterName : "",
     isNotEmpty(comment) ? comment : "");
+if (alreadyExists)
+    dyStringPrintf(msg, "\nnote: an equivalent browser for '%s' already exists as '%s'; "
+        "a confirmation email with a link is on its way instead of a new build",
+        asmId, existingBrowser);
 
 struct jsonWrite *jw = apiStartOutput();
 jsonWriteString(jw, "msg", dyStringContents(msg));
+jsonWriteString(jw, "existingBrowser", alreadyExists ? existingBrowser : NULL);
 apiFinishOutput(0, NULL, jw);
-
-char *ottoTable = cfgOption("ottoTable");        /* probably ottoRequest */
-if (isNotEmpty(ottoTable))
-    {
-    struct sqlConnection *conn = hConnectOtto();
-    if (sqlTableExists(conn, ottoTable))
-        {
-        /* asmId placed in both fromDb and toDb in case toDb does not allow empty */
-        struct dyString *update = dyStringNew(0);
-        sqlDyStringPrintf(update,
-            "INSERT INTO %s (requestType, fromDb, toDb, email, comment, requestTime, status, buildDir) "
-            "VALUES ('assembly', '%s', '%s', '%s', '%s', now(), 0, '')",
-            ottoTable, asmId, asmId, email, dyStringContents(fullComment));
-        sqlUpdate(conn, dyStringCannibalize(&update));
-        }
-    hDisconnectOtto(&conn);
-    }
 
 dyStringFree(&fullComment);
 dyStringFree(&msg);

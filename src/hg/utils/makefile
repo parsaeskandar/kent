@@ -52,6 +52,7 @@ UTILS_APPLIST = \
 	mafToBigMaf \
 	mafToBigMafSummary \
 	makeTableList \
+	netToBigNet \
 	oligoMatch \
 	overlapSelect \
 	positionalTblCheck \
@@ -97,6 +98,7 @@ DIRS = ${buildRefresh} \
 	refSeqGet \
 	safePush \
 	scaffoldFaToAgp \
+	snapshotCleaner \
 	toDev64 \
 	vcfRenameAndPrune \
 	vcfToHgvs \
@@ -112,6 +114,8 @@ TEST_DIRS = \
 	gtfToGenePred \
 	hgvsToVcf \
 	hubCheck \
+	mafToBigMafSummary \
+	netToBigNet \
 	overlapSelect \
 	pslToBigPsl \
 	refSeqGet \

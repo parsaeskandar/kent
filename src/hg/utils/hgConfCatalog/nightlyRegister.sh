@@ -1,0 +1,257 @@
+#!/bin/bash
+# Keep hgConfCatalog.py's mechanical fields true without asking a developer for
+# anything, and report only what needs a person's judgement.  Refs #37925.
+#
+# The premise is that a developer adding an hg.conf read should not have to know
+# this catalog exists.  Asking them to did not work: hubSpaceLockTimeout arrived
+# as one supporting line inside an unrelated bugfix and nothing noticed until
+# somebody ran --reconcile by hand a day later.  So this job writes down the
+# facts itself, nightly, then commits and pushes them.  It leaves exactly one
+# thing for a human: deciding what each new setting is for, and whether a
+# boolean is a release gate or a mirror knob.  Those two are refused on
+# purpose; see auto_register()'s comments in hgConfCatalog.py.
+#
+# It carries one errand of its own, on the same terms.  When a gate's default
+# is flipped TRUE the hand-written line that turned it on in some machine's
+# hg.conf becomes pointless, and nobody is watching for that, so --redundant
+# names those lines here.  Deleting one is a judgement about a file this job
+# does not own, so it only ever reports them.
+#
+# It runs in the weekly build's own tree, and that tree is shared with a build
+# process that will not tolerate surprises, so three rules are absolute:
+#
+#   1. master only.  cherryPickCommits.csh and tagBeta.csh both cd into
+#      $BUILDHOME/kent/src/utils/qa/weeklybld and check out v${NN}_branch or
+#      beta before coming back to master.  Committing during that window would
+#      put an unreviewed row on a release branch and push it.  Release branches
+#      belong to the build process alone, so if HEAD is not master this job does
+#      nothing at all and tries again tomorrow.
+#   2. never leave the tree dirty.  autoBuild.sh's ensure_clean_git() aborts the
+#      whole build on any uncommitted change in that tree.  Every exit path here
+#      either commits or restores the file, via the trap below.
+#   3. never run beside a build.  /tmp/autoBuild.lock means one is in progress.
+#
+# Everything it writes is regenerable from the tree, so on any doubt it throws
+# its own work away rather than leave a mess for the build to trip over.
+#
+# HEARTBEAT.  A job that only speaks up when something is wrong is a job nobody
+# notices has died, so while this one is still new it says one line every night,
+# whatever happened, and appends the same line to a history file.  The mail is
+# the part that keeps it in mind; the history outlives the mail, so a gap in the
+# dates shows when it stopped.  Turn the mail off once it is boring, with
+# HGCONF_NIGHTLY_HEARTBEAT=no in the crontab, and the history keeps going.
+
+set -euo pipefail
+
+BUILDHOME=${BUILDHOME:-/hive/groups/browser/newBuild}
+CHECKOUT=${HGCONF_NIGHTLY_CHECKOUT:-$BUILDHOME/kent}
+LOCKFILE=${AUTOBUILD_LOCKFILE:-/tmp/autoBuild.lock}
+RELPATH=src/hg/utils/hgConfCatalog/hgConfCatalog.py
+CATALOG=$CHECKOUT/$RELPATH
+PUSH=${HGCONF_NIGHTLY_PUSH:-yes}
+HEARTBEAT=${HGCONF_NIGHTLY_HEARTBEAT:-yes}
+# The build's own log directory: untracked, already written to by the build
+# account, and the place a buildmeister is already looking.
+LOGDIR=${HGCONF_NIGHTLY_LOGDIR:-$CHECKOUT/src/utils/qa/weeklybld/logs}
+HISTORY=$LOGDIR/hgConfRegister.history
+
+# One line per run, to the history file always and to stdout unless the mail has
+# been turned off.  Called on every exit path, including the ones that do
+# nothing, because "skipped, a build was running" is a heartbeat too and its
+# absence is the thing worth noticing.
+beat() {
+    local line
+    line="$(date '+%Y-%m-%d %H:%M') $*"
+    mkdir -p "$LOGDIR" 2>/dev/null || true
+    echo "$line" >> "$HISTORY" 2>/dev/null || true
+    if [[ $HEARTBEAT == yes ]]; then
+        echo "$line"
+    fi
+}
+
+# A failure is loud on stderr regardless of the heartbeat setting, and is worth
+# a history line of its own so a run that died is distinguishable from one that
+# never happened.
+fail() {
+    echo "nightlyRegister: $*" >&2
+    mkdir -p "$LOGDIR" 2>/dev/null || true
+    echo "$(date '+%Y-%m-%d %H:%M') FAILED: $*" >> "$HISTORY" 2>/dev/null || true
+    exit 1
+}
+
+[[ -d $CHECKOUT/.git ]] || fail "no checkout at $CHECKOUT"
+[[ -x $CATALOG ]] || fail "no hgConfCatalog.py at $CATALOG"
+
+cd "$CHECKOUT"
+
+# Rule 3.  A running build owns this tree; come back tomorrow.
+if [[ -f $LOCKFILE ]]; then
+    lock_pid=$(cat "$LOCKFILE" 2>/dev/null || echo)
+    if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
+        beat "skipped: a build is running (pid $lock_pid)"
+        exit 0
+    fi
+fi
+
+# Rule 1.  Not master, not our business.  Mid-build is a normal state for this
+# tree rather than an error, so this is a heartbeat line and not a complaint.
+branch=$(git rev-parse --abbrev-ref HEAD)
+if [[ $branch != master ]]; then
+    beat "skipped: tree is on $branch, not master"
+    exit 0
+fi
+
+# Rule 2.  From here on, any exit that has not committed puts the file back the
+# way the build expects to find it.
+committed=no
+cleanup() {
+    if [[ $committed == no ]]; then
+        git checkout -- "$RELPATH" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+# Only this one file is ours to touch.  Anything else already modified means
+# somebody is working here, and the build is about to complain about it anyway.
+others=$(git status --porcelain -- . | grep -v '^?? ' | grep -v " $RELPATH$" || true)
+if [[ -n $others ]]; then
+    fail "$CHECKOUT has local changes outside the catalog:
+$others"
+fi
+
+# Start from what master actually says.  Without this, rows written last night
+# are still here, the writer counts them as already registered, and the commit
+# turns into a pile of yesterdays.
+git checkout -- "$RELPATH" 2>/dev/null || true
+git fetch --quiet origin master
+git merge --quiet --ff-only origin/master \
+    || fail "cannot fast-forward $CHECKOUT to origin/master; sort it out by hand"
+
+export KENT_SRC=$CHECKOUT/src
+
+work=$(mktemp -d)
+trap 'cleanup; rm -rf "$work"' EXIT
+
+# The one mechanical pass.  It is deterministic and invents no judgement, so a
+# cron may run it unattended: --auto-register only copies facts off the call.
+#
+# There used to be a second pass here, --fix-citations, which chased the line
+# numbers the catalog stored beside each read.  It is gone, and so is the field
+# it repaired.  Line numbers are derived data, and storing them by hand meant a
+# single insertion near the top of hgTracks.c moved fifteen citations at once:
+# of the sixteen commits this job pushed between 2026-08-07 and 2026-08-28,
+# thirteen changed nothing else.  A row now cites the file, and the line is
+# recomputed for display.  So this job commits only when a setting is genuinely
+# new, which was three of those sixteen nights.
+"$CATALOG" --auto-register  > "$work/register" 2>&1
+
+# What is left after the machine has done all it honestly can.  Non-zero
+# whenever a row is waiting to be classified, so the exit code is information.
+"$CATALOG" --reconcile > "$work/reconcile" 2>&1 || true
+
+# The third pass, and the only one that looks outside the tree.  Flipping a
+# gate's default to TRUE leaves a line behind in every hg.conf somebody had
+# turned it on in by hand, and that line then reads on locally whatever the
+# tree says, which is how a wrong default survives on the one machine that
+# would notice.  Silent unless there is a line to delete, so it costs nothing
+# on the nights there is nothing to say.  Non-zero is the news, not an error,
+# hence || true under set -e.
+"$CATALOG" --redundant > "$work/redundant" 2>&1 || true
+redundant=$(sed -n 's/^REDUNDANT .*: \([0-9][0-9]*\)$/\1/p' \
+    "$work/redundant" | head -1)
+: "${redundant:=0}"
+
+# Both mail paths below want this section on the same terms, and the wording
+# has to say whose job it is: the shared conf on this host is not the reporter's
+# to edit, and hgwbeta and the RR cannot be read from here at all.
+redundant_notes() {
+    [[ -s $work/redundant ]] || return 0
+    echo
+    echo "hg.conf lines a flipped default has made pointless:"
+    sed 's/^/  /' "$work/redundant"
+}
+
+# State worth carrying in one line: a bare pulse would say the cron is alive
+# without saying whether it is doing anything, and the point of the heartbeat is
+# to keep this job in mind rather than merely prove it ran.  Count the holding
+# pen itself, not reconcile's "problems:" total: that total also carries wrong
+# hand-written defaults and citations whose call site left the file, neither of
+# which is a row awaiting classification, and a heartbeat that quietly reports
+# the wrong number is worse than one that reports none.
+waiting=$(sed -n \
+    's/^written down but not classified (\([0-9]*\)).*/\1/p' \
+    "$work/reconcile" | head -1)
+: "${waiting:=0}"
+at=$(git rev-parse --short HEAD)
+
+if git diff --quiet -- "$RELPATH"; then
+    beat "nothing to register, $waiting awaiting classification," \
+         "$redundant conf line(s) to delete, tree at $at"
+    # Still speak up if reconcile found something the machine cannot fix on its
+    # own, since that is the whole point of running.  This goes out whatever the
+    # heartbeat setting: it is news, not a pulse.
+    if [[ -s $work/reconcile ]]; then
+        echo "hg.conf catalog: nothing to register, but --reconcile has notes:"
+        cat "$work/reconcile"
+    fi
+    redundant_notes
+    exit 0
+fi
+
+# Name the settings in the subject line so the commit reads like a person wrote
+# it, and keep it under a sensible width when there are many.
+# Take the names from --auto-register's own report rather than from the diff.
+# Reading them off "+" lines used to credit the job with registering settings it
+# had only re-cited, because --fix-citations rewrote whole h("name", ...) lines
+# and every one of them matched.  The report says what was actually written.
+names=$(sed -n 's/^    \([A-Za-z0-9_.{}]*\) .*/\1/p' "$work/register" | paste -sd, - )
+count=$(echo "$names" | tr ',' '\n' | grep -c . || true)
+if [[ -z $names ]]; then
+    subject="hgConfCatalog: update the catalog, refs #37925"
+elif [[ ${#names} -le 60 ]]; then
+    subject="hgConfCatalog: register $names, refs #37925"
+else
+    subject="hgConfCatalog: register $count settings the tree reads, refs #37925"
+fi
+
+{
+    echo "$subject"
+    echo
+    echo "Written by nightlyRegister.sh, which records the settings the tree"
+    echo "reads that the catalog was missing.  Only facts copied off the call"
+    echo "site are filled in.  No classification is guessed: a new boolean gets no"
+    echo "role=, because calling a release gate a knob would hide it from the"
+    echo "sunset report for good, and every row lands in the 'Awaiting review'"
+    echo "section until somebody reads the call site."
+    echo
+    sed 's/^/  /' "$work/register"
+} > "$work/msg"
+
+git add -- "$RELPATH"
+git commit --quiet --file "$work/msg"
+committed=yes
+
+if [[ $PUSH == yes ]]; then
+    if ! git push --quiet origin master 2>"$work/pusherr"; then
+        # Somebody landed something between the fetch and now.  The work is
+        # regenerable, so drop it rather than leave an unpushed commit sitting
+        # in the build's tree where the next build would carry it along.
+        git reset --hard --quiet origin/master
+        committed=yes   # tree is clean again; nothing for the trap to undo
+        beat "push rejected, dropped the commit, will redo it tomorrow"
+        echo "hg.conf catalog: push rejected, dropped the commit and will redo it tomorrow."
+        cat "$work/pusherr"
+        exit 0
+    fi
+fi
+
+beat "committed ${count:-0} row(s) at $(git rev-parse --short HEAD)," \
+     "$waiting awaiting classification, $redundant conf line(s) to delete"
+echo "hg.conf catalog: $subject"
+echo
+sed 's/^/  /' "$work/register"
+echo
+echo "Left for a person to decide:"
+sed 's/^/  /' "$work/reconcile"
+redundant_notes
+exit 0

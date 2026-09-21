@@ -105,6 +105,10 @@ void writeFramesetType();
 void htmlFramesetStart(char *title);
 /* Write DOCTYPE HTML and HEAD sections for framesets. */
 
+void alnModernStart(char *classicTitle);
+/* Begin an alignment page: modern single-page chrome when the modernAlignPage hg.conf flag is set
+ * (showSomeAlignment then renders the modern body), else the classic <frameset>. */
+
 struct psl *getAlignments(struct sqlConnection *conn, char *table, char *acc);
 /* get the list of alignments for the specified acc */
 
@@ -536,8 +540,14 @@ void printAddWbr(char *text, int distance);
  */
 
 void printIframe(struct trackDb *tdb, char *itemName);
-/* print an iframe with the URL specified in trackDb (iframeUrl), can have
- * the standard codes in it (like $$ for itemName, etc) */
+/* Prepare an iframe with the URL specified in trackDb (iframeUrl), can have
+ * the standard codes in it (like $$ for itemName, etc). The iframe is written
+ * out later, by printPendingIframe(). */
+
+void printPendingIframe();
+/* Write out the iframe queued up by printIframe(), if there is one. The
+ * position-printing routines call this, so the iframe ends up under the
+ * "View DNA" line with the other details. */
 
 char *getIdInUrl(struct trackDb *tdb, char *itemName);
 /* If we have an idInUrlSql tag, look up itemName in that, else just
@@ -547,6 +557,14 @@ char *getIdInUrl(struct trackDb *tdb, char *itemName);
 // Format: detailsScript.<plotType>.<fieldName> <jsonConfig>
 // Parsed in both bigBedClick.c (to build JSON + load JS) and hgc.c (to skip fields from table).
 #define DETAILS_SCRIPT_PREFIX "detailsScript.*"
+
+// Reserved key inside a detailsScript <jsonConfig>: a JSON list of other bigBed field names
+// whose values are exported alongside the setting's own field, as a "fieldValues" object.
+// Lets one setting drive a plot that needs several fields.
+#define DETAILS_SCRIPT_EXPORT_FIELDS "exportFields"
+
+// Most fields a single exportFields list may name, so a hub cannot bloat the details page.
+#define DETAILS_SCRIPT_MAX_EXPORT 32
 
 void printFieldLabel(char *entry);
 /* print the field label, the first column in the table, as a <td>. Allow a

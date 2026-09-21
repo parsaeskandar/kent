@@ -53,6 +53,7 @@
 #include "jsHelper.h"
 #include "mafTrack.h"
 #include "hgConfig.h"
+#include "ra.h"
 #include "encode.h"
 #include "agpFrag.h"
 #include "imageV2.h"
@@ -410,19 +411,23 @@ for (group = groupList; group != NULL; group = group->next)
                 // Whether super child or not, if its a composite, then handle the children
                 if (tdbIsComposite(tdb))
                     {
+                    // A faceted composite's children own their display modes and the
+                    // parent's vis is only a ceiling, so setting the parent is enough -
+                    // don't stomp the per-child preferences on the way through.
+                    boolean keepChildVis = tdbIsFacetedComposite(tdb);
                     struct track *subtrack;
                     for (subtrack=track->subtracks;subtrack!=NULL;subtrack=subtrack->next)
                         {
-                        if (changeVis == tvHide)               // Since subtrack level vis is an
-                            {
-                            cartRemove(cart, subtrack->track); // override, simply remove to hide
-                            if (excludeHash != NULL) // if we're loading an RTS, but probably we should always do this
-                                {
-                                char selName[4096];
-                                safef(selName, sizeof(selName), "%s_sel", subtrack->track);
-                                cartRemove(cart, selName);
-                                }
+                        if (changeVis == tvHide && excludeHash != NULL)
+                            {   // loading an RTS should start from a clean selection,
+                            char selName[4096];             // but probably we should
+                            safef(selName, sizeof(selName), "%s_sel", subtrack->track);
+                            cartRemove(cart, selName);      // always do this
                             }
+                        if (keepChildVis)
+                            continue;
+                        if (changeVis == tvHide)               // Since subtrack level vis is an
+                            cartRemove(cart, subtrack->track); // override, simply remove to hide
                         else
                             cartSetString(cart, subtrack->track, hStringFromTv(changeVis));
                         subtrack->visibility = changeVis;
@@ -1675,7 +1680,7 @@ static int doCenterLabels(struct track *track, struct track *parentTrack,
 {
 if (track->limitedVis != tvHide)
     {
-    MgFont *labelfont;
+    MgFont *labelfont = font;
     if (isCenterLabelIncluded(track))
         {
         int trackPastTabX = (withLeftLabels ? trackTabWidth : 0);
@@ -1710,6 +1715,17 @@ if (track->limitedVis != tvHide)
         labelColor = maybeDarkerLabels(track, hvg, labelColor);
         hvGfxTextCentered(hvg, insideX, y+1, fullInsideWidth, insideHeight,
                           labelColor, labelfont, label);
+        if (theImgBox && curImgTrack)
+            {
+            // Keep the label as text too.  If something ends up drawn over this label
+            // (quickLift difference lines), dragScroll can't show the image slice while
+            // the image is moving, and puts up an html stand-in built from this instead.
+            struct rgbColor rgb = hvGfxColorIxToRgb(hvg, labelColor);
+            char color[16];
+            safef(color, sizeof color, "#%02X%02X%02X", rgb.r, rgb.g, rgb.b);
+            curImgTrack->cntrLabText = cloneString(label);
+            curImgTrack->cntrLabTextColor = cloneString(color);
+            }
         if (track->nextItemButtonable && track->nextPrevItem && !tdbIsComposite(track->tdb))
             {
             if (withNextItemArrows || trackDbSettingOn(track->tdb, "nextItemButton"))
@@ -4395,6 +4411,12 @@ if (strstr(multiRegionsBedUrl,"://"))
     }
 else
     {
+    /* Not a URL, so this is the trash file we wrote the pasted BED to. */
+    if (!isServerUserFilePath(multiRegionsBedUrl))
+	{
+	warn("BED custom regions file [%s] not found.", multiRegionsBedUrl);
+	return FALSE;
+	}
     lf = lineFileMayOpen(multiRegionsBedUrl, TRUE);
     if (!lf)
 	{
@@ -4998,6 +5020,27 @@ for (track = trackList; track != NULL; track = nextTrack)
         {
         double squishyPackPoint = atof(string);
 
+        /* Items outside the window are never laid out into a row, so a squished track
+         * built only from those has no rows, no height, and nothing drawn, but still
+         * claims a row in the image.  Only split the track when the squished part has
+         * something to show here. */
+        struct linkedFeatures *item;
+        boolean squishyInWindow = FALSE;
+        for (item = track->items; item != NULL; item = item->next)
+            {
+            if ((hgFindMatches != NULL) && hashLookup(hgFindMatches, item->name))
+                continue;   // an hgFind match always stays in pack
+            if (item->squishyPackVal > squishyPackPoint
+            &&  track->itemStart(track, item) < winEnd
+            &&  track->itemEnd(track, item)   > winStart)
+                {
+                squishyInWindow = TRUE;
+                break;
+                }
+            }
+        if (!squishyInWindow)
+            continue;
+
         /* clone the track */
         char buffer[strlen(track->track) + strlen("Squinked") + 1];
         safef(buffer, sizeof buffer, "%sSquinked", track->track);
@@ -5028,10 +5071,6 @@ for (track = trackList; track != NULL; track = nextTrack)
             else
                 slAddHead(&track->items, lf);
             }
-
-        // if the squish track has no items, don't bother including it
-        if (slCount(squishTrack->items) == 0)
-            continue;
 
         slReverse(&track->items);
         slReverse(&squishTrack->items);
@@ -5365,6 +5404,14 @@ for(pfRef = preFlatTracks; pfRef; pfRef = pfRef->next)
         tmpPixHeight += trackPlusLabelHeight(pf, fontHeight);
     }
 pixHeight = tmpPixHeight;
+
+// All the ways into density mode have now been decided, so note it in the long labels
+// of the tracks that will actually be drawn.
+for(pfRef = preFlatTracks; pfRef; pfRef = pfRef->next)
+    {
+    if (!isLimitedVisHiddenForAllWindows(pfRef->track))
+        labelTrackAsDensityIfActive(pfRef->track);
+    }
 
 // Construct flatTracks
 for(; preFlatTracks; preFlatTracks = preFlatTracks->next)
@@ -6107,14 +6154,19 @@ char *type = cartUsualString(cart, "hgt.contentType", "html");
 if(sameString(type, "jsonp"))
     {
     struct jsonElement *json = newJsonObject(newHash(8));
+    char *jsonp = cartString(cart, "jsonp");
+    // This path only ever emits a wrapped response, so there is no bare form to
+    // fall back to: reject an invalid callback name outright.
+    if (!isValidJsonpCallback(jsonp))
+        errAbort("invalid callback");
 
-    printf("Content-Type: application/json\n\n");
+    cgiPrintContentType("application/json");
     errAbortSetDoContentType(FALSE);
     jsonObjectAdd(json, "track", newJsonString(cartString(cart, "hgt.trackNameFilter")));
     jsonObjectAdd(json, "height", newJsonNumber(pixHeight));
     jsonObjectAdd(json, "width", newJsonNumber(pixWidth));
     jsonObjectAdd(json, "img", newJsonString(pngTn.forHtml));
-    printf("%s(", cartString(cart, "jsonp"));
+    printf("%s(", jsonp);
     hPrintEnable();
     jsonPrint((struct jsonElement *) json, NULL, 0);
     hPrintDisable();
@@ -6129,18 +6181,21 @@ else if(sameString(type, "png") || sameString(type, "pdf") || sameString(type, "
     char *file;
     if(sameString(type, "pdf"))
         {
-        printf("Content-Disposition: filename=hgTracks.pdf\nContent-Type: application/pdf\n\n");
+        printf("Content-Disposition: filename=hgTracks.pdf\n");
+        cgiPrintContentType("application/pdf");
         file = convertEpsToPdf(psOutput);
         unlink(psOutput);
         }
     else if(sameString(type, "eps"))
         {
-        printf("Content-Disposition: filename=hgTracks.eps\nContent-Type: application/eps\n\n");
+        printf("Content-Disposition: filename=hgTracks.eps\n");
+        cgiPrintContentType("application/eps");
         file = psOutput;
         }
     else
         {
-        printf("Content-Disposition: filename=hgTracks.png\nContent-Type: image/png\n\n");
+        printf("Content-Disposition: filename=hgTracks.png\n");
+        cgiPrintContentType("image/png");
         file = pngTn.forCgi;
         }
 
@@ -6299,7 +6354,14 @@ struct trackDb *tdbList;
 int trackDbCartVersion = 0;
 
 if(trackNameFilter == NULL)
+    {
     tdbList = hTrackDbWithCartVersion(database, &trackDbCartVersion);
+    // getTrackList() asks whether an undecorated cart/CGI variable belongs to a native
+    // track or to an attached hub's track of the same name.  Answer it from the assembly's
+    // track list, which we have right here, instead of a trackDb query per name.  Only
+    // the unfiltered list can answer it, so the filtered branch leaves it to the query.
+    hubTrackBareNamesFromTdbList(tdbList);
+    }
 else
     {
     tdbList = hTrackDbForTrack(database, trackNameFilter);
@@ -7189,8 +7251,9 @@ for (grp = grps; grp != NULL; grp = grp->next)
     }
 grpFreeList(&grps);
 
-double priorityInc;
+double priorityInc = 0;
 double priority = 1.00001;
+boolean haveHubs = (grpList != NULL);   // grpList is consumed by the loop below, so capture this now
 if (grpList)
     {
     minPriority -= 1.0;             // priority is 1-based
@@ -7227,6 +7290,28 @@ if (!foundMap)
     group->defaultIsClosed = FALSE;
     slAddHead(&list, group);
     hashAdd(hash, "map", group);
+    }
+
+// The "BLAT Results" group holds BLAT-search result custom tracks (group=blat, tagged
+// blatResult=on), keeping them out of the generic Custom Tracks group so they are easy to find and
+// clear as a set.  It is synthesized here rather than stored in the grp table; the group header is
+// skipped when it has no tracks (see the group loop that draws the controls).  Gated by hg.conf
+// blatResultsGroup, the same flag hgBlat/hgc read before tagging tracks with group=blat.
+if (cfgOptionBooleanDefault("blatResultsGroup", FALSE))
+    {
+    AllocVar(group);
+    group->name = cloneString("blat");
+    group->label = cloneString("BLAT Results");
+    // Place the group just after Custom Tracks (priority 1) so BLAT users find their results near
+    // the top.  When hubs are attached their groups are spread across (1.0, 1.0 + 0.9*minPriority)
+    // starting at 1.0 + priorityInc, so a hardcoded 1.5 could land in the middle of them; instead
+    // slot BLAT Results at 1.0 + priorityInc/2, i.e. between Custom Tracks and the first hub group,
+    // so it stays directly below Custom Tracks no matter how many hubs are connected.  With no hubs
+    // priorityInc is unset, but 1.5 sits safely between Custom Tracks and the first real group.
+    group->defaultPriority = group->priority = haveHubs ? (1.0 + priorityInc/2) : 1.5;
+    group->defaultIsClosed = FALSE;
+    slAddHead(&list, group);
+    hashAdd(hash, "blat", group);
     }
 
 // The "Visible Tracks" group is now the default top group
@@ -7515,14 +7600,12 @@ if (cartOptionalString(cart, "hgt.trackNameFilter") == NULL)
 /* gcOnFly track: if a trackDb entry exists (native or hub, possibly
  * with a hub_#_ prefix on the table name), patch in on-the-fly
  * computation methods so data comes from genome sequence, not a file.
- * hg.conf switches:
+ * hg.conf switch:
  *   gcOnTheFly=on      - master switch, track is removed if off (default on)
- *   gcOnTheFlyCoExist=on - allow gcOnFly alongside gc5Base/gc5BaseBw
- *                          (default off: remove gcOnFly if either exists)
+ * Also removed if gc5Base or gc5BaseBw is present in trackDb.
  * This must run after loadTrackHubs so assembly hub tracks are present. */
 {
 boolean gcOnTheFlyEnabled = cfgOptionBooleanDefault("gcOnTheFly", TRUE);
-boolean gcCoExist = cfgOptionBooleanDefault("gcOnTheFlyCoExist", FALSE);
 struct track *t, *prev = NULL, *next;
 for (t = trackList; t != NULL; t = next)
     {
@@ -7532,9 +7615,8 @@ for (t = trackList; t != NULL; t = next)
 	boolean remove = FALSE;
 	if (!gcOnTheFlyEnabled)
 	    remove = TRUE;
-	else if (!gcCoExist &&
-	    (rFindTrackWithTable("gc5Base", trackList) != NULL ||
-	     rFindTrackWithTable("gc5BaseBw", trackList) != NULL))
+	else if (rFindTrackWithTable("gc5Base", trackList) != NULL ||
+	    rFindTrackWithTable("gc5BaseBw", trackList) != NULL)
 	    remove = TRUE;
 	if (remove)
 	    {
@@ -7633,8 +7715,13 @@ for (track = trackList; track != NULL; track = track->next)
 
         if ((hel = hashLookup(superTrackHash, track->tdb->parent->track)) == NULL)   // we haven't seen this guy
             {
+            // QuickLifted tracks are exempt from hideTracks -- their visibility is
+            // carried over from the source assembly's cart (and may still be under the
+            // undecorated name until migrated below), so consult the cart, not the URL.
+            boolean superFromCart = !hideTracks ||
+                (trackDbSetting(track->tdb, "quickLiftUrl") != NULL);
             // first deal with visibility of super track
-            char *s = hideTracks ? cgiOptionalString(track->tdb->parent->track) : cartOptionalString(cart, track->tdb->parent->track);
+            char *s = superFromCart ? cartOptionalString(cart, track->tdb->parent->track) : cgiOptionalString(track->tdb->parent->track);
             if (s)
                 {
                 track->tdb->parent->visibility = hTvFromString(s) ;
@@ -7642,7 +7729,10 @@ for (track = trackList; track != NULL; track = track->next)
                 }
             else if (startsWith("hub_", track->tdb->parent->track))
                 {
-                s = hideTracks ? cgiOptionalString( trackHubSkipHubName(track->tdb->parent->track)) :  cartOptionalString( cart, trackHubSkipHubName(track->tdb->parent->track));
+                s = superFromCart ? cartOptionalString( cart, trackHubSkipHubName(track->tdb->parent->track)) : cgiOptionalString( trackHubSkipHubName(track->tdb->parent->track));
+                // the bare name is the native track's if the assembly has one by that name
+                if (s != NULL && !hubTrackOwnsBareName(database, track->tdb->parent->track))
+                    s = NULL;
                 if (s)
                     {
                     cartSetString(cart, track->tdb->parent->track, s);
@@ -7658,7 +7748,17 @@ for (track = trackList; track != NULL; track = track->next)
 
             s = cartOptionalString(cart, buffer);
             if (s == NULL && startsWith("hub_", track->tdb->parent->track))
-                s = cartOptionalString(cart, usedThis = trackHubSkipHubName(buffer));
+                {
+                char *bare = trackHubSkipHubName(buffer);
+                char *bareVal = cartOptionalString(cart, bare);
+                // the bare name is the native track's if the assembly has one by that name
+                if (bareVal != NULL
+                    && hubTrackOwnsBareName(database, track->tdb->parent->track))
+                    {
+                    s = bareVal;
+                    usedThis = bare;
+                    }
+                }
 
             if (s != NULL)
                 {
@@ -7695,9 +7795,14 @@ for (track = trackList; track != NULL; track = track->next)
         }
     else
         {
-        // maybe this track is on the URL without the hub_ prefix
+        // maybe this track is on the URL without the hub_ prefix - but not if the
+        // assembly has a track of that name, in which case the bare name is that one's
         if (startsWith("hub_", track->track))
+            {
             s = cgiOptionalString(trackHubSkipHubName(track->track));
+            if (s && !hubTrackOwnsBareName(database, track->track))
+                s = NULL;
+            }
         if (s != NULL && !track->limitedVisSet)
             {
             track->visibility = hTvFromString(s);
@@ -7717,10 +7822,21 @@ for (track = trackList; track != NULL; track = track->next)
 
         s = cartOptionalString(cart, buffer);
         if (s == NULL && startsWith("hub_", track->track))
-            s = cartOptionalString(cart, usedThis = trackHubSkipHubName(buffer));
+            {
+            char *bare = trackHubSkipHubName(buffer);
+            char *bareVal = cartOptionalString(cart, bare);
+            // the bare name is the native track's if the assembly has one by that name
+            if (bareVal != NULL && hubTrackOwnsBareName(database, track->track))
+                {
+                s = bareVal;
+                usedThis = bare;
+                }
+            }
         if (s != NULL)
             hideKids = TRUE;
         cartRemove(cart, usedThis);   // we don't want these _hideKids variables in the cart
+
+        boolean facetedParent = tdbIsFacetedComposite(track->tdb);
 
         // now see if we have any specified visibilities
         struct track *subtrack;
@@ -7730,19 +7846,37 @@ for (track = trackList; track != NULL; track = track->next)
             char *s = hideTracks ? cgiOptionalString( subtrack->track) : cartOptionalString(cart, subtrack->track);
             if (s == NULL && startsWith("hub_", subtrack->track))
                 {
-                undecoratedVis = TRUE;
+                // the bare name is the native track's if the assembly has one by that
+                // name.  Look the value up before asking: this runs for every subtrack of
+                // the container, and almost no request has a bare name on it at all.
                 s = hideTracks ? cgiOptionalString(trackHubSkipHubName(subtrack->track)) : cartOptionalString(cart, trackHubSkipHubName(subtrack->track));
+                if (s != NULL && hubTrackOwnsBareName(database, subtrack->track))
+                    undecoratedVis = TRUE;
+                else
+                    s = NULL;
                 }
 
             safef(buffer, sizeof buffer, "%s_sel", subtrack->track);
             if (s != NULL)
                 {
                 subtrack->visibility = hTvFromString(s);
-                cartSetString(cart, subtrack->track, s);
-                if (sameString("hide", s))
+                if (facetedParent && sameString("hide", s))
+                    {
+                    // A faceted composite's child holds a standing display mode rather
+                    // than inheriting one, and a standing mode of "hide" would survive
+                    // being re-selected in the facet table and look like a bug.  So take
+                    // the child out of the selection instead of storing that.
+                    cartRemove(cart, subtrack->track);
                     cartSetString(cart, buffer, "0");
+                    }
                 else
-                    cartSetString(cart, buffer, "1");
+                    {
+                    cartSetString(cart, subtrack->track, s);
+                    // Conversely, a faceted child's stored display mode is not a request
+                    // to turn it on - the facet table owns the _sel checkbox.
+                    if (!facetedParent)
+                        cartSetString(cart, buffer, "1");
+                    }
                 if (undecoratedVis)
                     cartRemove(cart, trackHubSkipHubName(subtrack->track)); // remove the undecorated version
                 }
@@ -8070,8 +8204,19 @@ for (track = trackList; track != NULL; track = track->next)
 
 	    if (isTrackForParallelLoad(subtrack))
 		{
-		if (tdbVisLimitedByAncestors(cart,subtrack->tdb,TRUE,TRUE) != tvHide)
+		enum trackVisibility subVis = tdbVisLimitedByAncestors(cart,subtrack->tdb,TRUE,TRUE);
+		if (subVis != tvHide)
 		    {
+		    /* Settle this subtrack's visibility here, on the main thread, before
+		     * the worker thread that loads it can read it.  A composite child's
+		     * visibility is otherwise written lazily by limitedVisFromComposite(),
+		     * called from compositeLoad() on the main thread while the worker is
+		     * already running, so the loader could read it either before or after
+		     * the write and the track came out at one of two heights.  This is the
+		     * same value and the same test limitedVisFromComposite() would use, so
+		     * the write only moves earlier.  refs #38254 */
+		    if (tdbIsCompositeChild(subtrack->tdb) && !subtrack->limitedVisSet)
+			subtrack->visibility = subVis;
 		    struct paraFetchData *pfd;
 		    AllocVar(pfd);
 		    pfd->track = subtrack;  // need pointer to be stable
@@ -8601,7 +8746,7 @@ char buffer[4096];
 safef(buffer, sizeof buffer, "%s-%s", customCompositeCartName, database);
 char *hubFile = cartOptionalString(cart, buffer);
 
-if (hubFile != NULL)
+if (hubFile != NULL && isServerUserFilePath(hubFile))
     {
     char *hubName = hubNameFromUrl(hubFile);
     struct trackDb *hubTdbs = hubCollectTracks( database,  &groupList);
@@ -8823,7 +8968,7 @@ printTrashIcon("Remove this track from the QuickLift group", "quickLiftDelIcon",
 static void printTrackLink(struct track *track)
 /* print a link hgTrackUi with shortLabel and various icons and mouseOvers */
 {
-if (sameOk(track->groupName, "user"))
+if (sameOk(track->groupName, "user") || sameOk(track->groupName, "blat"))
     printTrackDelIcon(track);
 
 char *quickLiftSourceDb = (track->tdb != NULL) ?
@@ -8838,7 +8983,9 @@ if (quickLiftSourceDb != NULL &&
 if (track->hasUi)
     {
     char *url = trackUrl(track->track, chromName);
-    char *longLabel = replaceChars(track->longLabel, "\"", "&quot;");
+    // longLabel comes from trackDb, which a track hub controls, so encode it to match the
+    // shortLabel below.
+    char *longLabel = htmlEncode(track->longLabel);
 
     struct dyString *dsMouseOver = dyStringCreate("%s", longLabel);
     struct trackDb *tdb = track->tdb;
@@ -9126,6 +9273,9 @@ zoomedToCodonLevel = (ceil(virtWinBaseCount/3) * tl.mWidth) <= fullInsideWidth;
 zoomedToCodonNumberLevel = (ceil(virtWinBaseCount/3) * tl.mWidth * 5) <= fullInsideWidth;
 zoomedToCdsColorLevel = (virtWinBaseCount <= fullInsideWidth*3);
 
+boolean canColorItems = cfgOptionBooleanDefault("canColorItems", FALSE);
+if (canColorItems)
+    createItemColorHash();
 
 if (psOutput != NULL)
    {
@@ -9138,8 +9288,12 @@ if (psOutput != NULL)
 
 /* Tell browser where to go when they click on image. */
 hPrintf("<FORM ACTION=\"%s\" NAME=\"TrackHeaderForm\" id=\"TrackHeaderForm\" METHOD=\"GET\">\n\n", hgTracksName());
-jsonObjectAdd(jsonForClient, "insideX", newJsonNumber(insideX)); 
+jsonObjectAdd(jsonForClient, "insideX", newJsonNumber(insideX));
 jsonObjectAdd(jsonForClient, "revCmplDisp", newJsonBoolean(revCmplDisp));
+jsonObjectAdd(jsonForClient, "canColorItems", newJsonBoolean(canColorItems));
+if (canColorItems)
+    jsonObjectAdd(jsonForClient, "itemColors",
+                  newJsonString(cartUsualString(cart, "itemColors", "")));
 
 if (hPrintStatus()) cartSaveSession(cart);
 
@@ -9218,7 +9372,7 @@ if (cartUsualBoolean(cart, "dumpTracks", FALSE))
     struct dyString *dy = dyStringNew(1024);
     logTrackList(dy, trackList);
 
-    printf("Content-type: text/html\n\n");
+    cgiPrintContentType("text/html");
     printf("%s\n", dy->string);
     exit(0);
     }
@@ -9660,33 +9814,40 @@ if (!hideControls)
     // Their names must include a "(" character
     char* noYearDbs[] = { "hg19", "hg38", "mm39", "mm10" };
 
+    // on an assembly hub the organism, the freezeName (the hub's genome description) and the
+    // db name are all supplied by the hub, so escape them before they go in the page
     if ( stringArrayIx(database, noYearDbs, ArraySize(noYearDbs)) != -1 )
         {
         // freezeName is e.g. "Feb. 2009 (GRCh37/hg19)"
         char *afterParen = skipBeyondDelimit(freezeName, '(');
-        afterParen--; // move back one char
-        hPrintf("%s %s on %s %s", organization, browserName, organism, afterParen);
+        if (afterParen != NULL)
+            afterParen--; // move back one char, onto the '(' itself
+        else
+            afterParen = freezeName; // no '(' in the description, so print it whole
+        hPrintf("%s %s on %s %s", organization, browserName, htmlEncode(organism),
+                htmlEncode(afterParen));
         }
     else if (startsWith("zoo",database) )
         {
 	hPrintf("%s %s on %s June 2002 Assembly %s target1",
-	    organization, browserName, organism, freezeName);
+	    organization, browserName, htmlEncode(organism), htmlEncode(freezeName));
 	}
     else
 	{
 	if (sameString(organism, "Archaea"))
 	    {
 	    hPrintf("%s %s on Archaeon %s Assembly",
-		organization, browserName, freezeName);
+		organization, browserName, htmlEncode(freezeName));
 	    }
 	else
 	    {
 	    if (stringIn(database, freezeName))
 		hPrintf("%s %s on %s %s",
-			organization, browserName, organism, freezeName);
+			organization, browserName, htmlEncode(organism), htmlEncode(freezeName));
 	    else
 		hPrintf("%s %s on %s %s (%s)",
-			organization, browserName, trackHubSkipHubName(organism), freezeName, trackHubSkipHubName(database));
+			organization, browserName, htmlEncode(trackHubSkipHubName(organism)),
+			htmlEncode(freezeName), htmlEncode(trackHubSkipHubName(database)));
 	    }
 	}
     hPrintf("</B></SPAN>");
@@ -9819,7 +9980,7 @@ if (!hideControls)
             hPrintf(" ");
             }
 
-        if (cfgOptionBooleanDefault("showAliases", FALSE) && sameString(virtModeType, "default"))
+        if (cfgOptionBooleanDefault("showAliases", TRUE) && sameString(virtModeType, "default"))
             printAliases(chromName, virtChromName);
 
 	if (virtualSingleChrom()) // DISGUISE VMODE
@@ -10074,7 +10235,6 @@ if (!hideControls)
 
         cg = startControlGrid(MAX_CONTROL_COLUMNS, "left");
         struct hash *superHash = hashNew(8);
-        long trackCount = 0;
 	for (group = groupList; group != NULL; group = group->next)
 	    {
 	    if ((group->trackList == NULL) && (group->errMessage == NULL))
@@ -10124,7 +10284,9 @@ if (!hideControls)
                     }
                 }
 
-            hPrintf("</td><td style='text-align:center; width:90%%;'>\n<B>%s</B>", group->label);
+            // group->label for a hub group is built from the hub shortLabel and the hub's
+            // groups.txt label, both supplied by the hub, so escape it
+            hPrintf("</td><td style='text-align:center; width:90%%;'>\n<B>%s</B>", htmlEncode(group->label));
             
             char *hubName = hubNameFromGroupName(group->name);
             struct trackHub *hub = grabHashedHub(hubName);
@@ -10153,7 +10315,11 @@ if (!hideControls)
                     for (struct trackHubGenome *thg = hub->genomeList; thg != NULL; thg = thg->next)
                         {
                         if (!sameWord(thg->name, database))
-                            printf("<option value='%s'>%s</option>\n", thg->name, thg->name);
+                            {
+                            // hub genome names come from the hub, so encode them
+                            char *escName = htmlEncode(thg->name);
+                            printf("<option value='%s'>%s</option>\n", escName, escName);
+                            }
                         }
                     puts("</select>");
                     }
@@ -10166,7 +10332,8 @@ if (!hideControls)
                         hPrintf("<a title='The track hub authors have not provided a descriptionUrl with background "
                                 "information about this track hub. ");
                         if (hub->email)
-                            hPrintf("The authors can be reached at %s. ", hub->email);
+                            // hub-supplied, so encode it
+                            hPrintf("The authors can be reached at %s. ", htmlEncode(hub->email));
                         hPrintf("This link leads to our documentation page about the descriptionUrl statement in hub.txt. ");
                         hPrintf("' href='../goldenPath/help/hgTrackHubHelp.html#hub.txt' "
                                 "style='color:#FFF; font-size: 13px;' target=_blank>No Info</a>");
@@ -10175,9 +10342,11 @@ if (!hideControls)
                         {
                         hPrintf("<a title='Link to documentation about this track hub, provided by the track hub authors (not UCSC). ");
                         if (hub->email)
-                            hPrintf("The authors can be reached at %s", hub->email);
+                            // hub-supplied, so encode it
+                            hPrintf("The authors can be reached at %s", htmlEncode(hub->email));
                         hPrintf("' href='%s' "
-                            "style='color:#FFF; font-size: 13px;' target=_blank>Info</a>", hub->descriptionUrl);
+                            "style='color:#FFF; font-size: 13px;' target=_blank>Info</a>",
+                            htmlEncode(hub->descriptionUrl));
                         }
                     hPrintf("&nbsp;&nbsp;");
 
@@ -10188,6 +10357,18 @@ if (!hideControls)
             hPrintf("<button type='button' class=\"hgtButtonHideGroup\" data-group-name=\"%s\" "
                     "title='Hide all tracks in this group'>Hide group</button>&nbsp;",
                     group->name);
+
+            // The BLAT Results group gets a "Delete all" button that removes every BLAT result track
+            // at once, so users are not stuck deleting accumulated results one by one.
+            if (sameString(group->name, "blat"))
+                {
+                safef(idText, sizeof idText, "%s_delAll", group->name);
+                hPrintf("<button type='button' id='%s' "
+                        "title='Delete all BLAT result tracks'>Delete all</button>&nbsp;", idText);
+                jsOnEventByIdF("click", idText,
+                    "if (window.confirm('Delete all %d BLAT result tracks?')) deleteAllBlatTracks();",
+                    slCount(group->trackList));
+                }
 
             if (hub || group->errMessage)
                 {
@@ -10264,8 +10445,6 @@ if (!hideControls)
 		if (tdbIsSuperTrackChild(track->tdb))
 		    /* don't display supertrack members */
 		    continue;
-                // only top level tracks contribute to the total count
-                trackCount++;
 		myControlGridStartCell(cg, isOpen, group->name,
                                        shouldBreakAll(track->shortLabel));
 
@@ -10298,17 +10477,6 @@ if (!hideControls)
 	    if (group->next != NULL)
 		controlGridEndRow(cg);
 	    }
-        if (trackCount < 32)
-            {
-            // visible tracks not needed, set to display: none
-            // we have to do this here because we need to account for super tracks
-            // not being in the list until groupTrackListAddSuper has been called
-            jsInline("let visTrs = document.querySelectorAll(\"[id^=visible-]\");\n"
-                    "let prev = visTrs[0].previousSibling;\n"
-                    "visTrs.forEach( (v) => v.style.display = \"none\");\n"
-                    "prev.style.display = \"none\";\n"
-                    );
-            }
         hashFree(&superHash);
 	endControlGrid(&cg);
 
@@ -10401,6 +10569,12 @@ if (cfgOptionBooleanDefault("canDoHgcInPopUp", TRUE) && cartUsualBoolean(cart, "
 
 if (cfgOptionBooleanDefault("greyBarIcons", TRUE))
     jsInline("var greyBarIcons = true;\n");
+
+// measure how long the track image takes to reach the reader, on one page load
+// in pngTimingSampleRate.  Zero, or the setting left out, turns it off.
+int pngTimingSampleRate = atoi(cfgOptionDefault("pngTimingSampleRate", "0"));
+if (pngTimingSampleRate > 0)
+    jsInlineF("var pngTimingSampleRate = %d;\n", pngTimingSampleRate);
 
 // TODO GALT nothing to do here.
 pruneRedundantCartVis(trackList);
@@ -10555,6 +10729,12 @@ if(!trackImgOnly)
            "Illustrator or Inkscape.<BR>");
     }
 doTrackForm(psTn.forCgi, &ideoPsTn);
+
+// hgRenderTracks asks for the PDF as the response body, so makeActiveImage has already
+// converted the eps and written it to stdout.  Without this the convertEpsToPdf below
+// aborts on the eps it just deleted.
+if (trackImgOnly)
+    return;
 
 pdfFile = convertEpsToPdf(psTn.forCgi);
 if (strlen(ideoPsTn.forCgi))
@@ -11955,6 +12135,112 @@ jsInlineF("notifBoxSetup(\"hgTracks\", \"%s\", \"%s\");\n", msgId, msg);
 jsInlineF("notifBoxShow(\"hgTracks\", \"%s\");\n", msgId);
 }
 
+void notifyOnce (char *msg, char *msgId)
+/* Like notify(), but for a message that only makes sense on this page, e.g. after a session was
+ * loaded.  It has no "Don't show again" button, as it is gone on the next page anyway. */
+{
+jsInlineF("notifBoxOnce(\"%s\", \"%s\");\n", msg, msgId);
+}
+
+static char *jsSafe(char *text)
+/* Return text ready to go into a double-quoted Javascript string that is assigned to innerHTML:
+ * html-encoded first, so no tag or quote from a session name or description can escape, then
+ * backslash-escaped for the Javascript literal. */
+{
+return javaScriptLiteralEncode(htmlEncode(text));
+}
+
+static void sessionNoticeText(struct dyString *dy, char *sessionName, char *sessionOwner)
+/* Add the body of the note to dy: what was opened, by whom and when, and its description if it
+ * has one.  The date and the description come from hgcentral; if the session is not there
+ * anymore (it can be deleted after it was loaded) just say what the cart remembers. */
+{
+char *created = NULL, *description = NULL;
+struct sqlConnection *conn = hConnectCentral();
+char *encOwner = cgiEncodeFull(sessionOwner);
+char *encName = cgiEncodeFull(sessionName);
+char query[1024];
+sqlSafef(query, sizeof(query),
+        "SELECT firstUse, settings FROM %s WHERE userName='%s' AND sessionName='%s'",
+        namedSessionTable, encOwner, encName);
+struct sqlResult *sr = sqlGetResult(conn, query);
+char **row = sqlNextRow(sr);
+if (row != NULL)
+    {
+    created = cloneString(row[0]);
+    if (isNotEmpty(row[1]))
+        {
+        struct hash *settings = raFromString(row[1]);
+        description = cloneString(hashFindVal(settings, "description"));
+        hashFree(&settings);
+        }
+    }
+sqlFreeResult(&sr);
+hDisconnectCentral(&conn);
+freeMem(encOwner);
+freeMem(encName);
+
+char *loggedIn = wikiLinkUserName();
+boolean isOwn = (loggedIn != NULL && sameString(loggedIn, sessionOwner));
+dyStringPrintf(dy, "You have opened the saved session <b>%s</b>, ", jsSafe(sessionName));
+if (isOwn)
+    dyStringPrintf(dy, "saved by yourself");
+else
+    dyStringPrintf(dy, "saved by user <b>%s</b>", jsSafe(sessionOwner));
+if (isNotEmpty(created))
+    {
+    // firstUse is a mysql datetime, "2026-09-18 11:22:33", the day is enough here
+    char *day = firstWordInLine(created);
+    dyStringPrintf(dy, " on %s", jsSafe(day));
+    }
+dyStringPrintf(dy, ". ");
+
+if (isNotEmpty(description))
+    {
+    // descriptions are stored with the line breaks escaped, and can be long
+    description = replaceChars(description, "\\n", " ");
+    description = replaceChars(description, "\\r", " ");
+    description = trimSpaces(description);
+    boolean truncated = FALSE;
+    if (strlen(description) > 300)
+        {
+        description[300] = 0;
+        truncated = TRUE;
+        }
+    dyStringPrintf(dy, "Session description: <i>%s%s</i> ",
+            jsSafe(description), (truncated ? "..." : ""));
+    }
+
+dyStringPrintf(dy, "The tracks, position and settings you had in the browser before have been "
+        "replaced by this session and cannot be brought back. If you want to keep a browser "
+        "configuration, save it under My Data &gt; My Sessions before you open a session. ");
+}
+
+static void showSessionLoadNotice()
+/* If a saved session has just been loaded into this cart, put a note at the top of the page
+ * saying what was opened and that the previous view is gone.  Only on that one page: the marker
+ * is taken out of the cart here, so the next page does not have it anymore.  Recommended track
+ * sets are left alone: they merge into the cart instead of replacing it and have their own label
+ * next to the assembly name. */
+{
+if (trackImgOnly || !cartVarExists(cart, hgsSessionJustLoaded))
+    return;
+cartRemove(cart, hgsSessionJustLoaded);
+if (!cfgOptionBooleanDefault("sessionLoadNotice", TRUE))
+    return;
+
+char *sessionName = cartOptionalString(cart, hgsOtherUserSessionName);
+char *sessionOwner = cartOptionalString(cart, hgsOtherUserName);
+if (isEmpty(sessionName) || isEmpty(sessionOwner) || hasRecTrackSet(cart))
+    return;
+
+struct dyString *dy = dyStringNew(1024);
+sessionNoticeText(dy, sessionName, sessionOwner);
+dyStringPrintf(dy, "This note is shown only once, it is gone on the next page.");
+notifyOnce(dy->string, "sessionLoad");
+dyStringFree(&dy);
+}
+
 static boolean noPixVariableSetAndInteractive(void) 
 {
 /* if the user is a humand and there is no pix variable in the cart, then run a
@@ -12318,6 +12604,9 @@ if (cartOptionalString(cart, "udcTimeout"))
 	"<A HREF='hgTracks?hgsid=%s|url|&udcTimeout=[]'>here</A>.",cartSessionId(cart));
     notify(buf, "udcTimeout");
     }
+
+showSessionLoadNotice();
+
 #ifdef DEBUG
 if (cdsQueryCache != NULL)
     cacheTwoBitRangesPrintStats(cdsQueryCache, stderr);
@@ -12325,15 +12614,10 @@ if (cdsQueryCache != NULL)
 }
 
 void labelTrackAsFilteredNumber(struct track *tg, unsigned numOut)
-/* add text to track long label to indicate filter is active. Also add doWiggle/windowsize label. */
+/* add text to track long label to indicate filter is active */
 {
 if (numOut > 0)
     tg->longLabel = labelAsFilteredNumber(tg->longLabel, numOut);
-
-if (cartOrTdbBoolean(cart, tg->tdb, "doWiggle", FALSE))
-    labelTrackAsDensity(tg);
-else if (winTooBigDoWiggle(cart, tg))
-    labelTrackAsDensityWindowSize(tg);
 }
 
 void labelTrackAsFiltered(struct track *tg)
@@ -12371,15 +12655,36 @@ else
 }
 
 void labelTrackAsDensity(struct track *tg)
-/* Add text to track long label to indicate density mode */
+/* Add text to track long label to indicate the user asked for density mode */
 {
-tg->longLabel = labelAddNote(tg->longLabel, "item density shown");
+tg->longLabel = labelAddNote(tg->longLabel,
+    "density graph: turn off on the track settings page");
 }
 
 void labelTrackAsDensityWindowSize(struct track *tg)
 /* Add text to track long label to indicate density mode because window size exceeds some threshold */
 {
-tg->longLabel = labelAddNote(tg->longLabel, "item density shown - zoom in for individual items or use squish or dense mode");
+tg->longLabel = labelAddNote(tg->longLabel, "density graph: too many items, zoom in");
+}
+
+void labelTrackAsDensityTooManyItems(struct track *tg)
+/* Add text to track long label to indicate we switched to density mode because there were
+ * too many items to draw one by one */
+{
+tg->longLabel = labelAddNote(tg->longLabel,
+    "density graph: too many items, zoom in or use dense");
+}
+
+void labelTrackAsDensityIfActive(struct track *tg)
+/* If a track is showing item density instead of individual items, say so in the long label,
+ * distinguishing the density the user asked for from the density we had to impose. */
+{
+if (cartOrTdbBoolean(cart, tg->tdb, "doWiggle", FALSE))
+    labelTrackAsDensity(tg);
+else if (winTooBigDoWiggle(cart, tg))
+    labelTrackAsDensityWindowSize(tg);
+else if (tg->limitWiggle)
+    labelTrackAsDensityTooManyItems(tg);
 }
 
 

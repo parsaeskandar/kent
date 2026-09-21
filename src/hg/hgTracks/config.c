@@ -13,6 +13,7 @@
 #include "web.h"
 #include "customTrack.h"
 #include "hgTracks.h"
+#include "trashDir.h"
 #include "hgConfig.h"
 #include "jsHelper.h"
 #include "imageV2.h"
@@ -22,10 +23,28 @@
 #include "trackHub.h"
 #include "versionInfo.h"
 
+static void themeMenuEntry(char *cfgName, char **retLabel, char **retValue)
+/* Split an hg.conf browser.theme.* key into the menu label and the option value.
+ * The value is everything after "browser.theme.", which is what setThemeFromCart
+ * looks the theme up by, so it must survive the round trip through the form
+ * untouched.  The label is only the part after the last '.', with underscores as
+ * spaces, so a sort prefix like browser.theme.2.Sans_Serif shows as "Sans Serif".
+ * The first letter is upper cased, which the plain hDropList used to do for us. */
+{
+char *value = cloneString(cfgName + strlen("browser.theme."));
+char *label = cloneString(findTail(value, '.'));
+replaceChar(label, '_', ' ');
+label[0] = toupper((unsigned char)label[0]);
+*retLabel = label;
+*retValue = value;
+}
+
 static void themeDropDown(struct cart* cart)
-/* Create drop down for UI themes. 
- * specfied in hg.conf like this
- * browser.theme.modern=background.png,HGStyle
+/* Create drop down for UI themes.
+ * specified in hg.conf like this
+ * browser.theme.modern=theme-modern.css
+ * optionally with a sort prefix
+ * browser.theme.3.Sans_Serif=theme-modern.css
  * */
 {
 struct slName* themes = cfgNamesWithPrefix("browser.theme.");
@@ -36,24 +55,18 @@ slNameSort(&themes);
 hPrintf("<TR><TD>website style:");
 hPrintf("<TD style=\"text-align: right\">");
 
-// create labels for drop down box by removing prefix from hg.conf keys
 char *labels[50];
+char *values[50];
 struct slName* el;
 int i = 0;
-el = themes;
 for (el = themes; el != NULL && i<50; el = el->next)
     {
-    char* name = el->name;
-    name = chopPrefix(name); // chop off first three words
-    name = chopPrefix(name);
-    name = chopPrefix(name);
-    replaceChar(name, '_', ' ');
-    labels[i] = name;
+    themeMenuEntry(el->name, &labels[i], &values[i]);
     i++;
     }
 
 char* currentTheme = cartOptionalString(cart, "theme"); 
-hDropList("theme", labels, i, currentTheme);
+cgiMakeDropListWithVals("theme", labels, values, i, currentTheme);
 slFreeList(themes);
 hPrintf("</TD>");
 }
@@ -152,28 +165,59 @@ char *defaultState = "off";
 return sameString(cfgOptionDefault("freeType", defaultState), "on");
 }
 
-void maybeNewFonts(struct hvGfx *hvg)
-/* Check to see if we want to use the alternate font engine (FreeType2). */
+static char *chosenFreeTypeFont(char **retFontName)
+/* Return the file holding the FreeType font the user has picked, and its name in
+ * retFontName.  NULL means stay on the bitmap engine. */
 {
 if (!freeTypeOn())
-    return;
+    return NULL;
 
 if (sameString(tl.textFont, "Bitmap"))
-    return;
-
-char *fontDir = cfgOptionDefault("freeTypeDir", "../htdocs/urw-fonts");
-char buffer[4096];
+    return NULL;
 
 int ii;
 for(ii=0; ii < ArraySize(freeTypeFonts); ii++)
     if (sameString(freeTypeFonts[ii].name, tl.textFont))
         break;
 if (ii == ArraySize(freeTypeFonts))
-    return;   // not a font we know about; leave the bitmap engine in place
-char *fontFile = freeTypeFonts[ii].file;
-char *fontName = freeTypeFonts[ii].name;
-safef(buffer, sizeof buffer, "%s/%s", fontDir, fontFile);
-hvGfxSetFontMethod(hvg, FONT_METHOD_FREETYPE, fontName, buffer );
+    return NULL;   // not a font we know about; leave the bitmap engine in place
+
+static char buffer[PATH_LEN];
+char *fontDir = cfgOptionDefault("freeTypeDir", "../htdocs/urw-fonts");
+safef(buffer, sizeof buffer, "%s/%s", fontDir, freeTypeFonts[ii].file);
+*retFontName = freeTypeFonts[ii].name;
+return buffer;
+}
+
+boolean freeTypeFontActive()
+/* TRUE when the FreeType font engine is the one maybeNewFonts() will actually switch to.  Callers
+ * that pick a font to match the live engine (e.g. squishCodonFont) must use this rather than a
+ * looser test, or they can hand the bitmap engine a cell height it cannot render. */
+{
+char *fontName = NULL;
+return chosenFreeTypeFont(&fontName) != NULL;
+}
+
+void initFontEngine()
+/* Load the text engine the user has picked, before anything measures a string.
+ * Pack mode reserves room for an item by measuring its label, and
+ * mgFontStringWidth answers from whichever engine is loaded at the time.  Doing
+ * this up front keeps the packing from depending on whether some earlier image
+ * on the page -- the ideogram -- happened to load FreeType first. */
+{
+char *fontName = NULL;
+char *fontFile = chosenFreeTypeFont(&fontName);
+if (fontFile != NULL)
+    mgLoadFontEngine(FONT_METHOD_FREETYPE, fontFile);
+}
+
+void maybeNewFonts(struct hvGfx *hvg)
+/* Check to see if we want to use the alternate font engine (FreeType2). */
+{
+char *fontName = NULL;
+char *fontFile = chosenFreeTypeFont(&fontName);
+if (fontFile != NULL)
+    hvGfxSetFontMethod(hvg, FONT_METHOD_FREETYPE, fontName, fontFile);
 }
 
 static void textFontDropDown()
@@ -322,10 +366,10 @@ for (group = groupList; group != NULL; group = group->next)
     hPrintf("<IMG class='toggleButton' "
             "id='%s' src='%s' alt='%s' title='%s this group'>&nbsp;&nbsp;",
             idText, indicatorImg, indicator,isOpen?"Collapse":"Expand");
-    // TODO XSS filter group->name
     jsOnEventByIdF("click", idText, "return vis.toggleForGroup(this,'%s');", group->name);
 
-    hPrintf("<B>&nbsp;%s</B> ", group->label);
+    // a hub group's label is built from the hub's shortLabel and its groups.txt label
+    hPrintf("<B>&nbsp;%s</B> ", htmlEncode(group->label));
     hPrintf("&nbsp;&nbsp;&nbsp;");
     hPrintf("</td><td style='text-align:right;'>\n");
     safef(idText, sizeof idText, "%s_hideAllBut", group->name);
@@ -441,12 +485,13 @@ for (group = groupList; group != NULL; group = group->next)
         hPrintIcons(tdb);
 
         if (track->hasUi)
+            // the labels come from trackDb, which a track hub controls, escape them
             hPrintf("<A TITLE='%s%s...' HREF='%s?%s=%s&db=%s&g=%s&hgTracksConfigPage=configure'>",
                     tdb->parent ? "Part of super track: " : "Configure ",
-                    tdb->parent ? tdb->parent->shortLabel : tdb->shortLabel,
+                    htmlEncode(tdb->parent ? tdb->parent->shortLabel : tdb->shortLabel),
                     hTrackUiForTrack(tdb->track),
                     cartSessionVarName(), cartSessionId(cart), database, track->track);
-        hPrintf(" %s", tdb->shortLabel);
+        hPrintf(" %s", htmlEncode(tdb->shortLabel));
         if (track->hasUi)
 	    hPrintf("</A>");
 	hPrintf("</TD><TD NOWRAP>");
@@ -479,7 +524,7 @@ for (group = groupList; group != NULL; group = group->next)
         else
 	    hPrintf("[No data-%s]", chromName);
 	hPrintf("</TD><TD NOWRAP>");
-        hPrintf("%s", tdb->longLabel);
+        hPrintf("%s", htmlEncode(tdb->longLabel));
 	hPrintf("</TD></TR>\n");
 	}
     hPrintf("<tr class='noData'><td colspan=3>");
@@ -971,7 +1016,9 @@ if (strstr(multiRegionsBedUrl,"://"))
     }
 else
     {
-    if (fileExists(multiRegionsBedUrl))
+    /* Not a URL, so this is the trash file we wrote the pasted BED to.  Check it before
+     * reading, since the contents go straight back to the user in the text area below. */
+    if (isServerUserFilePath(multiRegionsBedUrl) && fileExists(multiRegionsBedUrl))
 	{
 	struct lineFile *lf = lineFileMayOpen(multiRegionsBedUrl, TRUE);
 	char *line;
@@ -987,7 +1034,7 @@ hPrintf("<TEXTAREA NAME='multiRegionsBedInput' ID='multiRegionsBedInput' rows='4
     dyMultiRegionsBedInput->string);
 
 // option to set viewing window to show all regions.  This id also known to JS.
-if (cfgOptionBooleanDefault(MULTI_REGION_CFG_BUTTON_TOP, FALSE))
+if (cfgOptionBooleanDefault(MULTI_REGION_CFG_BUTTON_TOP, TRUE))
     {
     boolean isChecked = cartUsualBoolean(cart, MULTI_REGION_BED_WIN_FULL, FALSE);
     hPrintf("&nbsp;&nbsp");

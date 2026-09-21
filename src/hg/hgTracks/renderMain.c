@@ -18,6 +18,7 @@
 #include "hgTracks.h"
 #include "imageV2.h"
 #include "botDelay.h"
+#include "hgConfig.h"
 
 static void usage()
 /* Print out usage and exit - just temporary. */
@@ -114,6 +115,10 @@ boolean issueBotWarning;
 
 int main(int argc, char *argv[])
 {
+// First, before anything has a chance to allocate: read hg.conf and set how
+// big a step the C library takes when it grows the heap.  refs #38225
+cfgSetMallocTopPad();
+
 cgiSpoof(&argc, argv);
 if(argc == 1)
     {
@@ -142,13 +147,12 @@ if(argc == 1)
         // remote rendering of hgTracks PNG image based on contents of a session; caller may pass in a subset of
         // hgTracks parameters: e.g. db, hgsid, pix, position and tracks with explicit visibilities (e.g. knownGene=pack).
 
-#define PDF_OUTPUT 0
-#if PDF_OUTPUT
-        cartSetString(cart, "hgt.contentType", "pdf");
-        cartSetString(cart, "hgt.psOutput", "on");
-#else
-        cartSetString(cart, "hgt.contentType", "png");
-#endif
+        // hgt.psOutput=on asks for PDF instead of PNG.  Same variable the hgTracks
+        // View->PDF menu item uses, so callers do not have to learn a second name.
+        if (cartUsualBoolean(cart, "hgt.psOutput", FALSE))
+            cartSetString(cart, "hgt.contentType", "pdf");
+        else
+            cartSetString(cart, "hgt.contentType", "png");
         cartSetBoolean(cart, "hgt.imageV1", TRUE);
         if(!cartVarExists(cart, "hgt.internal"))
             {

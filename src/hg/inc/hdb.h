@@ -290,6 +290,14 @@ boolean hChromBandConn(struct sqlConnection *conn,
 /* Fill in text string that says what band pos is on.
  * Return FALSE if not on any band, or table missing. */
 
+char *hLocusNameExpand(char *raw);
+/* Expand locusName-table abbreviations ("ex:"/"in:"/"ig:" and "|") into a human-readable
+ * string. Returns a cloneString'd value (caller frees), or NULL for empty input. */
+
+char *hLocusName(struct sqlConnection *conn, char *chrom, int start, int end);
+/* If conn's database has a "locusName" table, return the human-readable gene/locus label
+ * overlapping the range ("intron STON2", "intergenic FOO-BAR"), else NULL. Caller frees. */
+
 boolean hScaffoldPos(char *db, char *chrom, int start, int end,
                      char **retScaffold, int *retStart, int *retEnd);
 /* Return the scaffold, and start end coordinates on a scaffold, for
@@ -546,6 +554,10 @@ boolean trackDataAccessible(char *database, struct trackDb *tdb);
  * or a database table with the same name.
  * Note: this returns FALSE for composite tracks; use this on subtracks or simple tracks. */
 
+struct trackDb *trackDbPolishAfterLinkupKeepAll(struct trackDb *tdbList);
+/* The part of trackDbPolishAfterLinkup that every caller wants, without dropping
+ * tracks whose data cannot be reached. */
+
 struct trackDb *trackDbPolishAfterLinkup(struct trackDb *tdbList, char *db);
 /* Do various massaging that can only be done after parent/child
  * relationships are established. */
@@ -569,7 +581,12 @@ struct trackDb *tdbForTrack(char *db, char *track,struct trackDb **tdbList);
  * subtrack then inheritance will be handled.  (Unless a subtrack has
  * "noInherit on"...) This will die if the current database does not have
  * a trackDb, but will return NULL if track is not found.
- * MAY pass in prepopulated trackDb list, or may receive the trackDb list as an inout. */
+ * MAY pass in prepopulated trackDb list, or may receive the trackDb list as an inout.
+ *   Pass tdbList whenever you look up more than one track.  With it NULL this loads the
+ * whole trackDb to find one name, and that is only cheap where the shared-memory cache
+ * is on (cacheTrackDbDir in hg.conf) - with the cache off hTrackDb() does not memoize,
+ * so a loop over N names is N full trackDb loads.  To ask only whether a name exists,
+ * hMaybeTrackInfo() is a single-row query instead. */
 #define hTrackDbForTrack(db,track) tdbForTrack(db,track,NULL)
 
 struct trackDb *hTrackDbForTrackAndAncestors(char *db, char *track);

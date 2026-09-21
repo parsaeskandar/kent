@@ -14,9 +14,10 @@ endif
 
 CSS_FILES=HGStyle.css assemblySearch.css autocomplete.css blueStyle.css \
     dataTables-1.10.12.min.css dataTables-1.13.6.min.css dataTables-2.2.2.min.css \
-    dataTables.buttons-3.2.2.min.css dataTables.select-1.7.0.min.css \
+    dataTables.buttons-3.2.2.min.css dataTables.rowReorder-1.5.1.min.css \
+    dataTables.select-1.7.0.min.css \
     dataTables.select-3.0.0.min.css \
-    encodeProject.css facetedComposite.css facets.css floretStyle.css gar.css \
+    encodeProject.css facetedComposite.css facets.css floretStyle.css \
     hgHubConnect.css hgMyData.css jquery-ui.css jquery.contextmenu.css \
     jquery.ui.autocomplete.css jquery.ui.colorPicker.css \
     jquery.treetable.css jquery.treetable.theme.default.css \
@@ -25,10 +26,12 @@ CSS_FILES=HGStyle.css assemblySearch.css autocomplete.css blueStyle.css \
     theme-modern.css ui.dropdownchecklist.css nice_menu.css \
     encodeDataMatrix.css encodeDataSummary.css userAccounts.css \
     encode3.css encode3Ucsc.css bootstrap.min.css \
-    gbStatic.css gb.css gbAfterMenu.css hgGtexTrackSettings.css \
+    gbStatic.css gb.css gbAfterMenu.css hgGtexTrackSettings.css hgBlat.css \
+    gbModern.css hgSession.css \
     spectrum.min.css font-awesome.min.css \
     theme-classic.css theme-dark.css theme-modern.css \
-    bootstrap-3-3-7.min.css shepherd.css hgPangenome.css
+    bootstrap-3-3-7.min.css shepherd.css \
+    reveal-5.1.0.css reveal-white-5.1.0.css hgPangenome.css
 
 user:
 	if test -d ${DOCUMENTROOT}-${USER}; then \

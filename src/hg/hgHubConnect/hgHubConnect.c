@@ -94,9 +94,10 @@ puts("</TD>");
 static void ourPrintCellLink(char *str, char *url)
 {
 ourCellStart();
-printf("<A class=\"cv\" HREF=\"%s\" TARGET=_BLANK>\n", url);
+// every caller passes a hub label and a hub url, both text from a stranger, so escape
+printf("<A class=\"cv\" HREF=\"%s\" TARGET=_BLANK>\n", htmlEncode(url));
 if (str != NULL)
-    fputs(str, stdout); // do not add a newline -- was causing trailing blanks get copied in cut and paste 
+    fputs(htmlEncode(str), stdout); // do not add a newline -- was causing trailing blanks get copied in cut and paste 
 puts("</A>");
 ourCellEnd();
 }
@@ -129,6 +130,10 @@ static void printGenomeList(char *hubUrl, struct slName *genomes, int row, boole
 {
 struct dyString *dyLongHtml = dyStringNew(1024);
 struct dyString *dyShortHtml = dyStringNew(1024);
+// hubUrl comes from the user, so encode it before it goes below: cgiEncode for the query
+// parameter, htmlEncode for the attribute the javascript copies to the clipboard.
+char *urlForQuery = cgiEncode(hubUrl);
+char *urlForAttr = htmlEncode(hubUrl);
 
 char *linkHtml = "<input type='hidden' value='%s'><svg title='click to copy genome browser hub connection URL to clipboard, for sharing with others' class='pasteIcon' style='margin-left: 6px; cursor: pointer; vertical-align:baseline; width:0.8em' xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><!-- Font Awesome Pro 5.15.4 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license (Commercial License) --><path d='M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z'/></svg>";
 
@@ -138,7 +143,11 @@ int charCount = 0;
 struct slName *genome = genomes;
 for(; genome; genome = genome->next)
     {
+    // an assembly hub's genome name comes from the hub, so encode it: escName for the query
+    // string, escTrimmed for the text and title attributes
+    char *escName = cgiEncode(genome->name);
     char *trimmedName = trackHubSkipHubName(genome->name);
+    char *escTrimmed = htmlEncode(trimmedName);
     char *shortName = cloneString(trimmedName);
     // If even the first element is too long, truncate its short name.
     if (genome==genomes && strlen(trimmedName) > GENLISTWIDTH)  
@@ -150,16 +159,16 @@ for(; genome; genome = genome->next)
         if (withLink)
             {
             if (hubConnectIsCurated(genome->name)) {
-                dyStringPrintf(dyShortHtml,"<a class='hgTracksLink' title='Connect hub and open the %s assembly' href='hgTracks?hubUrl=%s&db=%s&position=lastDbPos'>%s</a>" , genome->name, hubUrl, genome->name, shortName);
+                dyStringPrintf(dyShortHtml,"<a class='hgTracksLink' title='Connect hub and open the %s assembly' href='hgTracks?hubUrl=%s&db=%s&position=lastDbPos'>%s</a>" , escTrimmed, urlForQuery, escName, htmlEncode(shortName));
             } else {
-                dyStringPrintf(dyShortHtml,"<a class='hgTracksLink' title='Connect hub and open the %s assembly' href='hgTracks?hubUrl=%s&genome=%s&position=lastDbPos'>%s</a>" , genome->name, hubUrl, genome->name, shortName);
+                dyStringPrintf(dyShortHtml,"<a class='hgTracksLink' title='Connect hub and open the %s assembly' href='hgTracks?hubUrl=%s&genome=%s&position=lastDbPos'>%s</a>" , escTrimmed, urlForQuery, escName, htmlEncode(shortName));
             }
             // https://hgdownload-test.gi.ucsc.edu/hubs/GCA/009/914/755/GCA_009914755.4/hub.txt
             if (withPaste)
-                dyStringPrintf(dyShortHtml, linkHtml, hubUrl);
+                dyStringPrintf(dyShortHtml, linkHtml, urlForAttr);
             }
         else
-            dyStringPrintf(dyShortHtml,"%s" , shortName);
+            dyStringPrintf(dyShortHtml,"%s" , htmlEncode(shortName));
 
         dyStringPrintf(dyShortHtml,", ");
         }
@@ -171,15 +180,15 @@ for(; genome; genome = genome->next)
     if (withLink)
         {
         if (hubConnectIsCurated(genome->name)) {
-            dyStringPrintf(dyLongHtml,"<a title='Connect hub and open the %s assembly' href='hgTracks?hubUrl=%s&db=%s&position=lastDbPos'>%s</a>" , genome->name, hubUrl, genome->name, trimmedName);
+            dyStringPrintf(dyLongHtml,"<a title='Connect hub and open the %s assembly' href='hgTracks?hubUrl=%s&db=%s&position=lastDbPos'>%s</a>" , escTrimmed, urlForQuery, escName, escTrimmed);
         } else {
-            dyStringPrintf(dyLongHtml,"<a title='Connect hub and open the %s assembly' href='hgTracks?hubUrl=%s&genome=%s&position=lastDbPos'>%s</a>" , genome->name, hubUrl, genome->name, trimmedName);
+            dyStringPrintf(dyLongHtml,"<a title='Connect hub and open the %s assembly' href='hgTracks?hubUrl=%s&genome=%s&position=lastDbPos'>%s</a>" , escTrimmed, urlForQuery, escName, escTrimmed);
         }
         if (withPaste)
-            dyStringPrintf(dyLongHtml, linkHtml, hubUrl);
+            dyStringPrintf(dyLongHtml, linkHtml, urlForAttr);
         }
     else
-        dyStringPrintf(dyLongHtml,"%s" , trimmedName);
+        dyStringPrintf(dyLongHtml,"%s" , escTrimmed);
 
     if (genome->next)
         {
@@ -350,15 +359,20 @@ for(hub = unlistedHubList; hub; hub = hub->next)
 	ourPrintCellLink(hub->trackHub->shortLabel, hub->hubUrl);
 	}
     else
-	ourPrintCell("");
+	{
+	// hub did not open, so we have no short label.  Show the url instead, otherwise the
+	// row is just an error message and there is no way to tell which hub it is about.
+	ourPrintCell(htmlEncode(hub->hubUrl));
+	}
 
     boolean hubHasError = (!isEmpty(hub->errorMessage));
     if (hubHasError)
 	{
 	ourCellStart();
+	// the message usually quotes the hub url back at us, and that came from a stranger
 	printf("<span class=\"hubError\">ERROR: %s </span>"
-	    "<a TARGET=_BLANK href=\"../goldenPath/help/hgTrackHubHelp.html#Debug\">Debug Help</a>\n", 
-	    hub->errorMessage);
+	    "<a TARGET=_BLANK href=\"../goldenPath/help/hgTrackHubHelp.html#Debug\">Debug Help</a>\n",
+	    htmlEncode(hub->errorMessage));
 	
 	safef(id, sizeof id, "hubClearButton%d", count);
 	// give people a chance to clear the error 
@@ -375,7 +389,7 @@ for(hub = unlistedHubList; hub; hub = hub->next)
 	if (hub->trackHub->descriptionUrl != NULL)
 	    ourPrintCellLink(hub->trackHub->longLabel, hub->trackHub->descriptionUrl);
 	else
-	    ourPrintCell(hub->trackHub->longLabel);
+	    ourPrintCell(htmlEncode(hub->trackHub->longLabel));  // hub supplied
 	}
     else
 	ourPrintCell("");
@@ -430,6 +444,15 @@ return ret;
 
 void printApiKeySection()
 {
+// This section has to stand on its own: a mirror can set showHubApiKey without setting
+// storeUserFiles, and then nothing that hgHubConnectOfferUpload pulls in is on the page.
+// jsIncludeFile and webIncludeResourceFile only emit a tag the first time, so asking for
+// these again when the upload tab is also up costs nothing.
+jsIncludeFile("lodash.3.10.0.compat.min.js", NULL);
+jsIncludeFile("cart.js", NULL);
+jsIncludeFile("hubApiKey.js", NULL);
+webIncludeResourceFile("font-awesome.min.css"); // the spinner shown while a key is made
+
 puts("<div id='apiKeySection' class='tabSection'>");
 puts("<h4>API key</h4>");
 char *userName = wikiLinkUserName();
@@ -462,9 +485,11 @@ else
         }
     printf("<div id='revokeDiv' class='help' style='display: %s'>\nTo revoke any API keys associated with your account, click the revoke button: <button id='revokeApiKeys'>Revoke</button>\n</div>", existingKey != NULL ? "block" : "none");
     // add the event handlers for clicking the generate/revoke buttons
+    // note the namespace: a button's id also lands on window, so a bare generateApiKey
+    // here would be the button element itself rather than the function
     jsInlineF(""
-    "document.getElementById('generateApiKey').addEventListener('click', generateApiKey);\n"
-    "document.getElementById('revokeApiKeys').addEventListener('click', revokeApiKeys);\n"
+    "document.getElementById('generateApiKey').addEventListener('click', hubApiKey.generate);\n"
+    "document.getElementById('revokeApiKeys').addEventListener('click', hubApiKey.revoke);\n"
     );
     }
 
@@ -484,7 +509,7 @@ puts("<div id=\"hubDeveloper\" class=\"hubList\">");
 
 char *hubUrlVal = "";
 if (hubUrl != NULL)
-    hubUrlVal = catThreeStrings(" value='", hubUrl, "'");
+    hubUrlVal = catThreeStrings(" value='", htmlEncode(hubUrl), "'");
 
 puts("<div class='tabSection'>");
 puts("<h4>Create your own hub</h4>");
@@ -568,7 +593,9 @@ jsOnEventById("click", "hubValidateButton", "makeIframe(event)");
 
 // API Key section 
 
-if (cfgOptionBooleanDefault("storeUserFiles", FALSE) && cfgOptionBooleanDefault("showHubApiKey", FALSE)) // This should probably not be shown on mirrors, so default to FALSE
+// Not tied to storeUserFiles: an apiKey is also used to bypass the download CAPTCHA, and
+// keys are per-central, so a mirror needs to hand out its own keys without running hubSpace.
+if (cfgOptionBooleanDefault("showHubApiKey", FALSE))
     printApiKeySection();
 puts("</div>"); // hub developement tab
 
@@ -589,7 +616,7 @@ if (searchEnabled)
             "Search terms: "
             "<input name=\"hubSearchTerms\" id=\"hubSearchTerms\" class=\"hubField\" "
             "placeholder='e.g. methylation' type=\"text\" size=\"50\" value=\"%s\"> \n",
-            hubSearchTerms!=NULL?hubSearchTerms:"");
+            hubSearchTerms!=NULL?htmlEncode(hubSearchTerms):"");
     printf("\n");
     }
 
@@ -598,7 +625,7 @@ printf("Assembly: "
         "type=\"text\" size=\"15\" value=\"%s\" placeholder='e.g. hg38'> \n"
         "<input name=\"hubSearchButton\" id='hubSearchButton' "
         "class=\"hubField\" type=\"submit\" value=\"Search Public Hubs\">\n",
-        hgHubDbFilter, dbFilter!=NULL?dbFilter:"");
+        hgHubDbFilter, dbFilter!=NULL?htmlEncode(dbFilter):"");
 puts("</FORM>");
 }
 
@@ -682,7 +709,8 @@ if (id != 0)
         jsOnEventByIdF("click", jsId, 
             "document.connectHubForm.elements['hubUrl'].value= '%s';"
             "document.connectHubForm.elements['db'].value= '%s';"
-            "document.connectHubForm.submit();return true;", hubInfo->hubUrl,name);
+            "document.connectHubForm.submit();return true;",
+            javaScriptLiteralEncode(hubInfo->hubUrl), name);
         }
 
     ourCellEnd();
@@ -698,22 +726,23 @@ if (hubHasNoError)
     if (hubInfo->tableHasDescriptionField && !isEmpty(hubInfo->descriptionUrl))
         ourPrintCellLink(hubInfo->longLabel, hubInfo->descriptionUrl);
     else
-        ourPrintCell(hubInfo->longLabel);
+        ourPrintCell(htmlEncode(hubInfo->longLabel));  // hub supplied
     }
 else
     {
     ourCellStart();
+    // the message can quote text that the hub itself supplied, so escape it
     printf("<span class=\"hubError\">ERROR: %s </span>"
-        "<a href=\"../goldenPath/help/hgTrackHubHelp.html#Debug\">Debug Help</a>", 
-        hubInfo->errorMessage);
+        "<a href=\"../goldenPath/help/hgTrackHubHelp.html#Debug\">Debug Help</a>",
+        htmlEncode(hubInfo->errorMessage));
     safef(jsId, sizeof jsId, "hubClearButton%d", count);
     printf(
     "<input name=\"hubClearButton\" id='%s' "
             "class=\"hubButton\" type=\"button\" value=\"Retry Hub\">"
             , jsId);
-    jsOnEventByIdF("click", jsId, 
+    jsOnEventByIdF("click", jsId,
         "document.resetHubForm.elements['hubCheckUrl'].value='%s';"
-        "document.resetHubForm.submit();return true;", hubInfo->hubUrl);
+        "document.resetHubForm.submit();return true;", javaScriptLiteralEncode(hubInfo->hubUrl));
     ourCellEnd();
     }
 
@@ -1444,10 +1473,12 @@ cartWebStart(cart, NULL, "%s", headerText);
 
 struct trackHub *tHub = hub->trackHub;
 
-hPrintf("<P><B>Connected Hub: </B>%s</P>", tHub->shortLabel);
+// the labels, the email and the per genome organism and description all come out of the
+// hub's own text files, so escape them before printing
+hPrintf("<P><B>Connected Hub: </B>%s</P>", htmlEncode(tHub->shortLabel));
 
-hPrintf("<P><B>Hub Description:</B> %s</P>", tHub->longLabel);
-hPrintf("<P><B>Contact email:</B> <A HREF=\"mailto:%s\">%s</A>.</B> Use this contact for all data questions.</P>", tHub->email, tHub->email);
+hPrintf("<P><B>Hub Description:</B> %s</P>", htmlEncode(tHub->longLabel));
+hPrintf("<P><B>Contact email:</B> <A HREF=\"mailto:%s\">%s</A>.</B> Use this contact for all data questions.</P>", htmlEncode(tHub->email), htmlEncode(tHub->email));
 struct trackHubGenome *genomeList = tHub->genomeList;
 
 hPrintf("<P><B>Assemblies:</B> Select an assembly below to start browsing the tracks of this hub:<P>");
@@ -1464,8 +1495,8 @@ for(; genomeList; genomeList = genomeList->next)
     if (org==NULL)
         org = trackHubSkipHubName(hOrganism(genomeList->name));
 
-    hPrintf("<li>Open: <A href=\"../cgi-bin/hgTracks?db=%s&%s&position=lastDbPos\">%s: %s</A></li>",genomeList->name, 
-        cartSidUrlString(cart), org, desc);
+    hPrintf("<li>Open: <A href=\"../cgi-bin/hgTracks?db=%s&%s&position=lastDbPos\">%s: %s</A></li>",
+        cgiEncode(genomeList->name), cartSidUrlString(cart), htmlEncode(org), htmlEncode(desc));
     }
 hPrintf("</ul>");
 
@@ -1639,7 +1670,7 @@ if (cartVarExists(cart, hgHubDoHubCheck))
 
         int retVal = doValidateNewHub(hubUrl);
         if (retVal == 0)
-            printf("<div>Finished checking %s</div>", hubUrl);
+            printf("<div>Finished checking %s</div>", htmlEncode(hubUrl));
         puts("<hr>");
         puts("<p>More information about <b>hub settings</b> can be found on the "
                "<a target=_blank href='https://genome.ucsc.edu/goldenPath/help/trackDb/trackDbHub.html'>Hub Track Database Definition</a> page.");
@@ -1759,11 +1790,17 @@ void doAsync(struct cart *theCart)
 {
 cart = theCart;
 struct cartJson *cj = cartJsonNew(cart);
-cartJsonRegisterHandler(cj, hgHubGetHubSpaceUIState, getHubSpaceUIState);
-cartJsonRegisterHandler(cj, hgHubDeleteFile, doRemoveFile);
-cartJsonRegisterHandler(cj, hgHubMoveFile, doMoveFile);
+// the file commands are hubSpace's, and a site can hand out API keys without running it
+if (cfgOptionBooleanDefault("storeUserFiles", FALSE))
+    {
+    cartJsonRegisterHandler(cj, hgHubGetHubSpaceUIState, getHubSpaceUIState);
+    cartJsonRegisterHandler(cj, hgHubDeleteFile, doRemoveFile);
+    cartJsonRegisterHandler(cj, hgHubMoveFile, doMoveFile);
+    }
 cartJsonRegisterHandler(cj, hgHubGenerateApiKey, cjGenerateApiKey);
 cartJsonRegisterHandler(cj, hgHubRevokeApiKey, cjRevokeApiKey);
+// hgHubSyncApiKey is deliberately not registered here: it comes from a peer mirror with no
+// user session behind it and is answered by doApiKeySyncIfRequested() before any cart exists
 cartJsonExecute(cj);
 }
 
@@ -1778,7 +1815,14 @@ long enteredMainTime = clock1000();
 
 oldVars = hashNew(10);
 cgiSpoof(&argc, argv);
-if (cfgOptionBooleanDefault("storeUserFiles", FALSE) && cgiOptionalString(CARTJSON_COMMAND))
+if (doApiKeySyncIfRequested())
+    {
+    // a peer mirror's api key sync: answered without a cart, nothing else to do
+    }
+// showHubApiKey counts here as well as storeUserFiles: the Generate/Revoke buttons are
+// cartJson requests, and they are offered on sites that do not run hubSpace
+else if ((cfgOptionBooleanDefault("storeUserFiles", FALSE) ||
+     cfgOptionBooleanDefault("showHubApiKey", FALSE)) && cgiOptionalString(CARTJSON_COMMAND))
     cartEmptyShellNoContent(doAsync, hUserCookie(), excludeVars, oldVars);
 else
     cartEmptyShell(doMiddle, hUserCookie(), excludeVars, oldVars);

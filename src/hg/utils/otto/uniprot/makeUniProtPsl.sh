@@ -14,10 +14,10 @@
 # $2 = the transcript fasta file
 # $3 = the transcript->genome PSL file
 # $4 = MINALI, the minimum percent ID, e.g. 0.93
-# $5 = the parasol cluster
-# $6 = temporary workdir
-# $7 = OUTPUT: the nucleotide PSL output file to create
-# $8 = optional: tsv table with mapping from uniprot to transcript
+# $5 = temporary workdir
+# $6 = OUTPUT: the nucleotide PSL output file to create
+# $7 = optional: tsv table with mapping from uniprot to transcript
+# (there used to be a parasol cluster argument here, removed when ku went away)
 
 # Will always rm -rf the work directory, before and after a run
 
@@ -71,10 +71,9 @@ UNIPROTFAGZ=$1
 TRANSCRIPTFA=$2
 TRANSCRIPTPSL=$3
 MINALI=$4
-CLUSTER=$5
-WORKDIR=$6
-OUTFNAME=$7
-PAIRNAME=$8
+WORKDIR=$5
+OUTFNAME=$6
+PAIRNAME=$7
 
 #if [[ "$DB" == "ci3" ]]; then
    #MINALI=0.85
@@ -106,9 +105,21 @@ fi
 if [ -f $WORKDIR/bestAln.psl ] ; then
         echo WARNING: re-using existing protein-transcript alignments to save time! see $WORKDIR/bestAln.psl
 else
-        mkdir $WORKDIR/queries 
-        mkdir $WORKDIR/aligns 
-        faSplit about $WORKDIR/uniProt.fa 2500 $WORKDIR/queries/
+        mkdir -p $WORKDIR/queries
+        mkdir -p $WORKDIR/aligns
+        # Aim for a job count rather than a fixed chunk size. At a flat 2500 bytes this made
+        # 18894 jobs for zebrafish that averaged 13 seconds each, so parasol overhead and
+        # creating 18894 tiny result files cost more than the BLAST did. The cluster is not
+        # the bottleneck either way - it absorbed 57 CPU hours in 12 minutes - but every one
+        # of those files then has to be opened again by the single-threaded pslReps below,
+        # over NFS, which is the slowest part of the whole per-assembly run. refs #38300
+        targetJobs=1000
+        faBytes=`stat -c %s $WORKDIR/uniProt.fa`
+        chunkSize=`expr $faBytes / $targetJobs`
+        # keep the old size as a floor, so a small protein set still splits sensibly
+        if [ $chunkSize -lt 2500 ]; then chunkSize=2500; fi
+        echo "splitting `expr $faBytes / 1000000` MB of protein into chunks of $chunkSize bytes"
+        faSplit about $WORKDIR/uniProt.fa $chunkSize $WORKDIR/queries/
         ${BLASTDIR}/formatdb -i $WORKDIR/transcripts.fa -p F
 
         # create joblist and run
@@ -119,7 +130,8 @@ else
         done; 
         set -x
         cp mapUniprot_doBlast $WORKDIR/
-        ssh $CLUSTER "cd `pwd`/$WORKDIR && para make jobList"
+        # hgwdev is the parasol head node, so "para make" here talks to the hub directly
+        ( cd $WORKDIR && para make jobList )
         echo Concatenating and filtering protein/transcript alignments
         # sort and pick the best alignments for each protein
         find $WORKDIR/aligns -name '*.psl' | xargs cat | pslReps -noIntrons -nohead -nearTop=0.01 -minAli=$MINALI stdin stdout /dev/null > $WORKDIR/bestAln.psl
@@ -143,7 +155,9 @@ else
 fi
 
 # now combine the two alignments with pslMap
-pslMap $WORKDIR/uniProtVsTranscripts.psl $WORKDIR/transcripts.psl $WORKDIR/uniProtVsGenome.psl -mapInfo=$WORKDIR/mapInfo.tab
+# the query is protein and the target is nucleotide, so pslMap has to be told the types,
+# otherwise it guesses and the block sizes come out in the wrong units
+pslMap $WORKDIR/uniProtVsTranscripts.psl $WORKDIR/transcripts.psl $WORKDIR/uniProtVsGenome.psl -mapInfo=$WORKDIR/mapInfo.tab -inType=prot_na -mapType=na_na
 # 2016: lowering to 95% identity due to hg38 alt loci sucking up our main (and more important) alignments from the
 # 2021: using MINALI is more consistent
 # normal chromosomes
