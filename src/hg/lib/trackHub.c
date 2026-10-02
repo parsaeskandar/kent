@@ -2287,7 +2287,16 @@ for(grp = grpList; grp; grp = grp->next)
 for(tdb = tdbList; tdb; tdb = tdb->next)
     {
     grp = hashFindVal(groupHash, tdb->grp);
-    tdb->groupPriority = grp->priority;
+    /* A track can name a group that is not in the list.  For a native database
+     * makeGroupList() rewrites any such name to a known one first, so the
+     * lookup always hits; but that repair is skipped for an assembly served
+     * from a hub (cartTrackDb.c, "if (!trackHubDatabase(db))"), and a hub
+     * database has no grp table to repair against either.  So for a hub-served
+     * assembly the lookup misses and this dereference segfaults.  Leaving the
+     * priority at its default just means the sort below falls back to the
+     * track's own priority, which is what a group of unknown rank deserves. */
+    if (grp != NULL)
+        tdb->groupPriority = grp->priority;
     }
 slSort(&tdbList, cmpPriority);
 
