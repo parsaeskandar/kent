@@ -146,6 +146,9 @@
 #include "chromAlias.h"
 #include "twoBit.h"
 #include "quickLift.h"
+#include "chain.h"
+#include "bigChain.h"
+#include "bigLink.h"
 #include <ctype.h>
 #include <curl/curl.h>
 
@@ -693,16 +696,6 @@ struct pgBlock
     char strand;
     };
 
-struct pgRow
-/* One output line, kept with its sort key: bedToBigBed needs sorted input and
- * the chains do not come out of the walk in position order. */
-    {
-    struct pgRow *next;
-    char *chrom;
-    long start;
-    char *line;
-    };
-
 /* The autoSql definitions bedToBigBed validates against.  Inline so this CGI
  * needs nothing installed beside it; loader/bedToBigBed is already there for
  * custom tracks. */
@@ -861,41 +854,6 @@ if (a->tStart != b->tStart)
 return 0;
 }
 
-static int pgRowCmp(const void *va, const void *vb)
-/* Position order, which is what bedToBigBed insists on. */
-{
-const struct pgRow *a = *((struct pgRow **)va);
-const struct pgRow *b = *((struct pgRow **)vb);
-int diff = strcmp(a->chrom, b->chrom);
-if (diff != 0)
-    return diff;
-if (a->start != b->start)
-    return (a->start < b->start) ? -1 : 1;
-return 0;
-}
-
-static void pgRowAdd(struct pgRow **pList, char *chrom, long start, char *line)
-/* Remember one output line under its sort key. */
-{
-struct pgRow *r;
-AllocVar(r);
-r->chrom = chrom;
-r->start = start;
-r->line = cloneString(line);
-slAddHead(pList, r);
-}
-
-static void pgRowsToFile(struct pgRow *list, char *path)
-/* Sort and write. */
-{
-slSort(&list, pgRowCmp);
-FILE *f = mustOpen(path, "w");
-struct pgRow *r;
-for (r = list; r != NULL; r = r->next)
-    fprintf(f, "%s\n", r->line);
-carefulClose(&f);
-}
-
 static struct pgBlock *pgParseBlocks(struct jsonElement *root, long qSize,
                                      char **retError)
 /* Turn the middleware's "blocks" array into chain-space blocks. */
@@ -1032,11 +990,20 @@ return any;
 static boolean pgWriteChainBeds(struct pgBlock *blocks, char *qName, long qSize,
                                 struct hash *tSizes, char *chainBed, char *linkBed,
                                 char **retError)
-/* Write the two BED files bedToBigBed turns into the bigChain pair. */
+/* Write the two BED files bedToBigBed turns into the bigChain pair.
+ *
+ * Our job is only to decide where one chain ends and the next begins: the graph
+ * gives runs of correspondence that are not colinear, and chain format needs
+ * both sides to advance monotonically within a chain.  Turning the resulting
+ * chains into bigChain/bigLink rows is kent's, via chainToBigChainList() - it
+ * does the field mapping and sorts both lists by target position, which is what
+ * bedToBigBed needs.  We used to hand-format those twelve and five columns, and
+ * a copy of a format nobody told us had changed is exactly the kind of thing
+ * that rots quietly. */
 {
-struct pgRow *chainRows = NULL, *linkRows = NULL;
-char buf[1024];
-int chainId = 0, blockCount = 0;
+struct chain *chainList = NULL;
+int chainId = 0;
+long blockCount = 0;
 struct pgBlock *b = blocks;
 while (b != NULL)
     {
@@ -1055,31 +1022,46 @@ while (b != NULL)
         b = next;                               /* not a sequence we can draw on */
         continue;
         }
-    ++chainId;
+
+    struct chain *chain;
+    AllocVar(chain);
+    chain->id = ++chainId;
+    chain->tName = cloneString(runStart->contig);
+    chain->tSize = tSize;
+    chain->tStart = runStart->tStart;
+    chain->tEnd = runEnd->tEnd;
+    chain->qName = cloneString(qName);
+    chain->qSize = qSize;
+    chain->qStrand = runStart->strand;
+    chain->qStart = runStart->qStart;
+    chain->qEnd = runEnd->qEnd;
+
+    /* One block per aligned run; the score is the aligned base count, which is
+     * what chainRecToBigChain() copies into the bigChain chainScore column. */
+    struct cBlock *blockTail = NULL;
     long aligned = 0;
     struct pgBlock *p;
     for (p = runStart; ; p = p->next)
         {
+        struct cBlock *cb;
+        AllocVar(cb);
+        cb->tStart = p->tStart;
+        cb->tEnd = p->tEnd;
+        cb->qStart = p->qStart;
+        cb->qEnd = p->qEnd;
+        /* Append rather than prepend: chain blocks are in target order. */
+        if (blockTail == NULL)
+            chain->blockList = cb;
+        else
+            blockTail->next = cb;
+        blockTail = cb;
         aligned += p->tEnd - p->tStart;
-        if (p == runEnd)
-            break;
-        }
-    /* bigChain: chrom start end name score strand tSize qName qSize qStart qEnd chainScore */
-    safef(buf, sizeof(buf), "%s\t%ld\t%ld\t%d\t1000\t%c\t%ld\t%s\t%ld\t%ld\t%ld\t%ld",
-          runStart->contig, runStart->tStart, runEnd->tEnd, chainId,
-          runStart->strand, tSize, qName, qSize,
-          runStart->qStart, runEnd->qEnd, aligned);
-    pgRowAdd(&chainRows, runStart->contig, runStart->tStart, buf);
-    /* bigLink: chrom start end name qStart - one row per aligned block */
-    for (p = runStart; ; p = p->next)
-        {
-        safef(buf, sizeof(buf), "%s\t%ld\t%ld\t%d\t%ld",
-              p->contig, p->tStart, p->tEnd, chainId, p->qStart);
-        pgRowAdd(&linkRows, p->contig, p->tStart, buf);
         ++blockCount;
         if (p == runEnd)
             break;
         }
+    chain->score = aligned;
+    slAddHead(&chainList, chain);
     b = next;
     }
 if (blockCount == 0)
@@ -1087,8 +1069,22 @@ if (blockCount == 0)
     *retError = "none of the translated blocks land on a sequence of the target assembly";
     return FALSE;
     }
-pgRowsToFile(chainRows, chainBed);
-pgRowsToFile(linkRows, linkBed);
+
+struct bigChain *bigChains = NULL;
+struct bigLink *bigLinks = NULL;
+chainToBigChainList(chainList, &bigChains, &bigLinks);
+
+FILE *f = mustOpen(chainBed, "w");
+struct bigChain *bc;
+for (bc = bigChains; bc != NULL; bc = bc->next)
+    bigChainTabOut(bc, f);
+carefulClose(&f);
+
+f = mustOpen(linkBed, "w");
+struct bigLink *bl;
+for (bl = bigLinks; bl != NULL; bl = bl->next)
+    bigLinkTabOut(bl, f);
+carefulClose(&f);
 return TRUE;
 }
 
