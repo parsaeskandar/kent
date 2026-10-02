@@ -1204,7 +1204,8 @@ static char *pgSkipSettings[] = {"track", "type", "shortLabel", "longLabel",
     "quickLiftUrl", "quickLiftDb", "quickLifted", "avoidHandler"};
 
 static void pgWriteTrackStanza(struct dyString *dy, struct trackDb *tdb, char *srcDb,
-                               char *chainRel, int priority, boolean isChild)
+                               char *chainRel, int priority, boolean isChild,
+                               char *parentName)
 /* One stanza for a track we are carrying over.
  *
  * Names go in with the source hub's prefix stripped, the way
@@ -1236,13 +1237,23 @@ char parentBuf[512];
 boolean ownsVisibility = FALSE;      /* true when the container decides for us */
 if (isChild && parentVal != NULL)
     {
-    safef(parentBuf, sizeof(parentBuf), "%s", trackHubSkipHubName(parentVal));
+    /* Only the on/off flag is read from the setting.  The name comes from the
+     * stanza we actually wrote for the container, because the two can differ:
+     * a track served from a hub has the dots in its name rewritten to
+     * underscores, while the "parent" setting still carries the dotted form it
+     * was declared with.  Trusting the setting wrote children pointing at a
+     * container that does not exist, and the hub reader rejects the whole
+     * group with "Parent ... doesn't exist in hub".  Only bites where the
+     * container's name has a dot in it, which is why it stayed hidden until
+     * the GCA_*-named chain composites became eligible. */
+    safef(parentBuf, sizeof(parentBuf), "%s",
+          (parentName != NULL) ? parentName : trackHubSkipHubName(parentVal));
     char *sp = skipToSpaces(parentBuf);
     if (sp != NULL)
-        {
         *sp = '\0';
-        ownsVisibility = TRUE;
-        }
+    /* The setting is "<name> on|off" for a composite or view, a bare name for
+     * a superTrack member; only the first owns its children's visibility. */
+    ownsVisibility = (skipToSpaces(parentVal) != NULL);
     }
 /* Group and priority place a track in the browser's track list, which only
  * top-level tracks appear in; a subtrack is placed by its container. */
@@ -1463,7 +1474,8 @@ dyStringAppend(into, isEmpty(tdb->shortLabel) ? tdb->track : tdb->shortLabel);
 static struct dyString *pgEmitTree(struct trackDb *tdb, char *srcDb, char *chainRel,
                                    struct hash *written, struct hash *children,
                                    struct dyString *shown, struct dyString *skipped,
-                                   int *pPriority, boolean isChild, boolean report)
+                                   int *pPriority, boolean isChild, boolean report,
+                                   char *parentName)
 /* Stanzas for this track and everything selected underneath it, or NULL if it
  * carries nothing.
  *
@@ -1518,7 +1530,7 @@ if (pgIsContainer(tdb))
             continue;
         struct dyString *sub = pgEmitTree(child, srcDb, chainRel, written, children,
                                           shown, skipped, pPriority, TRUE,
-                                          report && isSuper);
+                                          report && isSuper, bare);
         if (sub != NULL)
             {
             dyStringAppend(kids, sub->string);
@@ -1537,7 +1549,7 @@ if (pgIsContainer(tdb))
         return NULL;
         }
     struct dyString *dy = dyStringNew(0);
-    pgWriteTrackStanza(dy, tdb, srcDb, chainRel, (*pPriority)++, isChild);
+    pgWriteTrackStanza(dy, tdb, srcDb, chainRel, (*pPriority)++, isChild, parentName);
     dyStringAppend(dy, kids->string);
     dyStringFree(&kids);
     if (report && !isSuper)
@@ -1554,7 +1566,7 @@ if (!pgLiftableTdb(srcDb, tdb))
     return NULL;
     }
 struct dyString *dy = dyStringNew(0);
-pgWriteTrackStanza(dy, tdb, srcDb, chainRel, (*pPriority)++, isChild);
+pgWriteTrackStanza(dy, tdb, srcDb, chainRel, (*pPriority)++, isChild, parentName);
 if (report)
     pgNote(shown, tdb);
 return dy;
@@ -1670,7 +1682,7 @@ for (tdb = tdbList; tdb != NULL; tdb = tdb->next)
         root = above;
         }
     struct dyString *dy = pgEmitTree(root, srcDb, chainRel, written, children,
-                                     shown, skipped, &priority, FALSE, TRUE);
+                                     shown, skipped, &priority, FALSE, TRUE, NULL);
     if (dy != NULL)
         {
         fputs(dy->string, f);
