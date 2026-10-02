@@ -1201,7 +1201,12 @@ return TRUE;
  * layout, so they are not copied into the stanza. */
 static char *pgSkipSettings[] = {"track", "type", "shortLabel", "longLabel",
     "visibility", "parent", "subTrack", "priority", "group", "html",
-    "quickLiftUrl", "quickLiftDb", "quickLifted", "avoidHandler"};
+    "quickLiftUrl", "quickLiftDb", "quickLifted", "avoidHandler",
+    /* Never copied.  trackDbSuperMarkup() leaves a bare "superTrack on" on
+     * every member of a superTrack as well as on the container, so copying it
+     * wrote members that declared themselves superTracks.  A real container
+     * gets the setting written for it below; a member is placed by "parent". */
+    "superTrack"};
 
 static void pgWriteTrackStanza(struct dyString *dy, struct trackDb *tdb, char *srcDb,
                                char *chainRel, int priority, boolean isChild,
@@ -1264,6 +1269,12 @@ if (!isChild)
     }
 if (!ownsVisibility)
     dyStringPrintf(dy, "visibility %s\n", hStringFromTv(tdb->visibility));
+/* A superTrack has to say so, and has to say "show" or the browser draws
+ * nothing under it.  We only ever get here for one the user has showing on the
+ * source, so "show" is always right - and the source's own setting is no use,
+ * since it carries whatever trackDb declared rather than what the user chose. */
+if (tdbIsSuperTrack(tdb))
+    dyStringPrintf(dy, "superTrack on show\n");
 /* Marks the track as one this hub is lifting.  "quickLifted" also relaxes the
  * hub's type check, which is what lets a plain genePred through. */
 dyStringPrintf(dy, "quickLifted on\n");
@@ -1425,6 +1436,16 @@ char *setting = trackDbSetting(tdb, "parent");
 if (isEmpty(setting))
     setting = trackDbSetting(tdb, "subTrack");
 if (isEmpty(setting))
+    {
+    /* A superTrack member is linked by trackDbSuperMarkup() rather than by a
+     * "parent" setting, and the name it was declared with is kept in
+     * parentName.  Do not try to read it back out of the "superTrack" setting:
+     * markup rewrites a member's copy to a bare "on", the same text the
+     * container itself carries, so the setting cannot tell the two apart. */
+    if (tdbIsSuperTrackChild(tdb) && !isEmpty(tdb->parentName))
+        return tdb->parentName;
+    }
+if (isEmpty(setting))
     return NULL;
 static char buf[256];
 safef(buf, sizeof(buf), "%s", setting);
@@ -1445,9 +1466,16 @@ static boolean pgIsContainer(struct trackDb *tdb)
  * plain subtrack of a composite answers "yes" to compositeTrack and to view,
  * and every leaf under NCBI RefSeq and T2T Encode was descended into as though
  * it held tracks of its own - finding none, and dropping the lot. */
+/* "superTrack" is not usable as a container test:  trackDbSuperMarkup()
+ * rewrites a *member's* copy of the setting to a bare "on", which is exactly
+ * what the container says, so testing the setting calls every member a
+ * container of its own.  Having no children, each was then dropped - that is
+ * how Long-read SVs and MPRAs could be showing on the source and never arrive.
+ * tdbIsSuperTrack() reads the flag that markup sets, which does distinguish
+ * them. */
 return tdbIsContainer(tdb) ||
     trackDbLocalSetting(tdb, "compositeTrack") != NULL ||
-    trackDbLocalSetting(tdb, "superTrack") != NULL ||
+    tdbIsSuperTrack(tdb) ||
     trackDbLocalSetting(tdb, "container") != NULL ||
     trackDbLocalSetting(tdb, "view") != NULL;
 }
@@ -1457,8 +1485,9 @@ static boolean pgIsSuperTrack(struct trackDb *tdb)
  * "superTrack on" or "superTrack on show"; a member of one reads
  * "superTrack <containerName>". */
 {
-char *setting = trackDbLocalSetting(tdb, "superTrack");
-return (setting != NULL && startsWithWord("on", setting));
+/* The flag set by trackDbSuperMarkup(), not the setting:  a member's copy of
+ * the setting is rewritten to the container's own "on". */
+return tdbIsSuperTrack(tdb);
 }
 
 static void pgNote(struct dyString *into, struct trackDb *tdb)
@@ -1542,9 +1571,12 @@ if (pgIsContainer(tdb))
         {
         /* Showing on the source, nothing to show on the target.  Say so rather
          * than letting it disappear: a track the user can see on the source and
-         * cannot find afterwards needs an explanation. */
+         * cannot find afterwards needs an explanation.  That holds for a
+         * superTrack too.  Normally its members are what we report, each on its
+         * own, but when not one of them came across there is nothing else left
+         * to speak for it. */
         dyStringFree(&kids);
-        if (report && !isSuper)
+        if (report)
             pgNote(skipped, tdb);
         return NULL;
         }
