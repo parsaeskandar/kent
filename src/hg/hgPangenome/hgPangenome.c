@@ -346,6 +346,46 @@ if (errCatch->gotError)
 errCatchFree(&errCatch);
 }
 
+static char *pgValidateSurjectAll(char *payload, int maxTargets)
+/* The batch surjection: one call places the read on every haplotype that
+ * carries it.  Check the job id's charset and hold max_targets to what this
+ * install is willing to ask for - the service caps it at 500, but a request
+ * for hundreds is seconds of work and the page has no use for them. */
+{
+static char msg[256];
+char *result = NULL;
+struct errCatch *errCatch = errCatchNew();
+if (errCatchStart(errCatch))
+    {
+    struct jsonElement *root = jsonParse(payload);
+    char *jobId = jsonOptionalStringField(root, "job_id", NULL);
+    char *name = jsonOptionalStringField(root, "name", NULL);
+    if (!pgValidJobId(jobId))
+        result = "missing or invalid 'job_id'";
+    else if (isEmpty(name))
+        result = "missing 'name'";
+    else
+        {
+        struct jsonElement *el = jsonFindNamedField(root, "", "max_targets");
+        if (el != NULL && el->type == jsonNumber && el->val.jeNumber > maxTargets)
+            {
+            safef(msg, sizeof(msg), "too many targets: %d (limit is %d)",
+                  (int)el->val.jeNumber, maxTargets);
+            result = msg;
+            }
+        el = jsonFindNamedField(root, "", "min_coverage");
+        if (result == NULL && el != NULL && el->type == jsonNumber &&
+            (el->val.jeNumber < 0 || el->val.jeNumber > 100))
+            result = "min_coverage must be between 0 and 100";
+        }
+    }
+errCatchEnd(errCatch);
+if (errCatch->gotError)
+    result = "invalid JSON payload";
+errCatchFree(&errCatch);
+return result;
+}
+
 static char *pgValidatePayload(char *payload, int maxSeqs, int maxSeqLen,
                                int maxMultimaps)
 /* Server-side enforcement of the input caps (the browser's checks are
@@ -648,6 +688,39 @@ else if (sameString(cmd, "surject"))
     /* A 404 means the job's alignments have aged out of the server's cache.
      * That is the documented fast-path miss, not a failure: answer with a
      * status the page can act on by mapping again. */
+    if (!r.transportErr && r.code == 404)
+        {
+        emitJson("{\"status\":\"expired\"}");
+        dyStringFree(&r.body);
+        freez(&r.errMsg);
+        return;
+        }
+    }
+else if (sameString(cmd, "surjectAll"))
+    {
+    /* Place the read on every haplotype that carries it, in one call.  The
+     * service does a single anchor pass and then surjects in parallel, so this
+     * costs about what one surjection used to - where asking one at a time
+     * cost one request per row. */
+    char *payload = cgiOptionalString("payload");
+    if (isEmpty(payload))
+        {
+        emitJsonError("missing 'payload'");
+        return;
+        }
+    char *bad = pgValidateSurjectAll(payload,
+                                     atoi(cfgOr("pangenome.maxSurjectTargets", "100")));
+    if (bad != NULL)
+        {
+        emitJsonError("%s", bad);
+        return;
+        }
+    safef(url, sizeof(url), "%s/api/v1/surject_all", apiBase);
+    /* Synchronous and slower than the rest: the service asks for at least 60
+     * seconds, so do not let a shorter global timeout cut it off. */
+    int batchTimeout = atoi(cfgOr("pangenome.surjectAllTimeoutSecs", "90"));
+    r = pgHttp(url, payload, max(timeout, batchTimeout), token);
+    /* Same aged-out-of-cache case the single surjection has. */
     if (!r.transportErr && r.code == 404)
         {
         emitJson("{\"status\":\"expired\"}");
@@ -2605,10 +2678,16 @@ if (sameOk(cgiOptionalString("page"), "results"))
      * well still comes back with the best few rather than an empty table. */
     jsInlineF("var pangenomeMinRows = %s;\n",
               cfgOr("pangenome.resultsMinRows", "10"));
-    /* How many of the best rows get a position.  Everything else in the table
-     * comes free with the mapping; a position costs one request each. */
+    /* How many haplotypes the batch surjection places.  Everything else in the
+     * table comes free with the mapping; these come in one request, so this can
+     * be far larger than it was when each position cost a request of its own. */
     jsInlineF("var pangenomeSurjectTop = %s;\n",
-              cfgOr("pangenome.resultsSurjectTop", "10"));
+              cfgOr("pangenome.resultsSurjectTop", "50"));
+    /* Coverage floor for the batch surjection, which is what the service
+     * selects its targets on - distinct from resultsMinIdentity, which decides
+     * which haplotypes get a row at all. */
+    jsInlineF("var pangenomeMinCoverage = %s;\n",
+              cfgOr("pangenome.resultsMinCoverage", "50"));
     jsIncludeFile("hgPangenomeAssemblies.js", NULL);
     jsIncludeFile("hgPangenomeResults.js", NULL);
     cartWebEnd();
@@ -2698,7 +2777,7 @@ if (sameOk(cmd, "contigs"))
 if (cmd != NULL && (sameString(cmd, "map") || sameString(cmd, "poll")
                     || sameString(cmd, "liftover") || sameString(cmd, "haplotypes")
                     || sameString(cmd, "liftoverTargets")
-                    || sameString(cmd, "surject")))
+                    || sameString(cmd, "surject") || sameString(cmd, "surjectAll")))
     {
     /* Rate-limit the expensive submit via the UCSC bottleneck server, with a
      * JSON hog-exit so the client renders it as an error.  Polling is cheap

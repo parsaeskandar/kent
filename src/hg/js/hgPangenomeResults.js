@@ -40,6 +40,10 @@ function pgrMinIdentity() {
     return (typeof pangenomeMinIdentity === "number") ? pangenomeMinIdentity : 90;
 }
 
+function pgrMinCoverage() {
+    return (typeof pangenomeMinCoverage === "number") ? pangenomeMinCoverage : 50;
+}
+
 function pgrMinRows() {
     return (typeof pangenomeMinRows === "number") ? pangenomeMinRows : 10;
 }
@@ -186,15 +190,17 @@ function pgrForm(obj) {
     }).join("&");
 }
 
-function pgrSurject(tgt, name, index) {
-    var payload = { tgt: tgt, job_id: pgrJobId(), name: name, index: index };
+function pgrSurjectAll(name, index, maxTargets, minCoverage) {
+    var payload = { job_id: pgrJobId(), name: name, index: index,
+                    max_targets: maxTargets, min_coverage: minCoverage };
     return fetch(pgrSelf, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded",
                    Accept: "application/json" },
-        body: pgrForm({ cmd: "surject", payload: JSON.stringify(payload) })
+        body: pgrForm({ cmd: "surjectAll", payload: JSON.stringify(payload) })
     }).then(pgrCheck);
 }
+
 
 // Run a list of thunks a few at a time.  The backend serialises anyway, so a
 // hundred simultaneous requests would only queue; this keeps the browser's own
@@ -290,6 +296,45 @@ function pgrBuildRows(results) {
 // from the graded list, which already carries coverage and identity, and the
 // positions arrive into it afterwards - best match first, so the rows a user
 // is actually going to click are filled in within the first moment.
+// One record from surject_all onto its row.
+//
+// The record carries both identities and the server's own coverage, so nothing
+// here is derived.  "identity" is the surjected alignment's, as a fraction;
+// "graph_identity" is the figure the mapping already reported for the
+// haplotype's walk through the graph; "coverage" is a percentage and is the
+// same number the mapping's list gave.  An earlier version computed coverage
+// itself, from aligned bases over query length - a different quantity, which
+// made the column mean two things depending on whether the row was placed.
+function pgrApplyRecord(row, rec) {
+    if (rec.coverage != null) { row.coverage = rec.coverage; }
+    if (rec.graph_identity != null) { row.listIdentity = rec.graph_identity; }
+    if (rec.status !== "ok") {
+        row.placeFailed = true;
+        row.placeStatus = rec.status;
+        return;
+    }
+    // target_start/end are local to the fragment named in "haplotype", and that
+    // name carries the fragment's offset.
+    var tgt = pgrSplitTarget(rec.haplotype);
+    if (tgt === null) { row.placeFailed = true; return; }
+    row.contig = tgt.contig;
+    row.start = tgt.offset + rec.target_start;
+    row.end = tgt.offset + rec.target_end;
+    row.strand = rec.strand;
+    row.cigar = rec.cigar;
+    row.score = rec.score;
+    row.surjMapq = rec.mapping_quality;
+    row.matches = rec.matches;
+    row.mismatches = rec.mismatches;
+    row.inserted = rec.inserted;
+    row.deleted = rec.deleted;
+    row.alignedBases = rec.aligned_bases;
+    row.identity = rec.identity == null ? null : rec.identity * 100;
+}
+
+// The mapping's own surjection, which is against the representative and comes
+// free in the poll response.  Shaped differently from a batch record: the
+// fragment is in "target" and the start in "position".
 function pgrApplySurjection(row, resp) {
     var s = resp && resp.surjection;
     if (!s || s.status !== "ok") { row.placeFailed = true; return; }
@@ -307,18 +352,37 @@ function pgrApplySurjection(row, resp) {
     row.inserted = s.inserted;
     row.deleted = s.deleted;
     row.alignedBases = s.aligned_bases;
-    // The surjection reports identity as a fraction where the graded list uses
-    // a percentage.  These two do not agree, and the surjection's is the one to
-    // believe: the graded figure scores the haplotype's walk through the graph,
-    // while this one scores the alignment actually drawn on that assembly.
     row.identity = s.identity == null ? null : s.identity * 100;
-    // Coverage likewise - how much of the query the drawn alignment accounts
-    // for.  Only when the query length is known; otherwise the graded figure
-    // stands.
-    if (s.aligned_bases != null && row.queryLength) {
-        row.coverage = s.aligned_bases / row.queryLength * 100;
-    }
 }
+
+// Records are keyed by "requested", the haplotype name as it was asked for,
+// which is the name the rows carry.  "haplotype" is the fragment it landed on
+// and is for coordinates only.
+var pgrTruncated = 0;
+
+function pgrApplyBatch(rows, job, batch) {
+    if (!batch || !batch.haplotypes) { return; }
+    if (batch.truncated) {
+        pgrTruncated = Math.max(pgrTruncated, batch.candidates || 0);
+    }
+    var byHap = Object.create(null);
+    batch.haplotypes.forEach(function (rec) {
+        if (rec && rec.requested) { byHap[pgrHapKey(rec.requested)] = rec; }
+    });
+    rows.forEach(function (row) {
+        if (row.query !== job.name || row.placement !== job.index) { return; }
+        var rec = byHap[pgrHapKey(row.hap)];
+        if (rec) { pgrApplyRecord(row, rec); }
+    });
+}
+
+function pgrTruncNote() {
+    if (!pgrTruncated) { return null; }
+    return "More haplotypes carry this sequence than were placed (" +
+           pgrFmt(pgrTruncated) + " in all). The rest are listed with their " +
+           "identity and coverage, but without a position.";
+}
+
 
 // ---- the table -------------------------------------------------------------
 //
@@ -379,7 +443,7 @@ function pgrTableHtml(rows, opt) {
         w.asm = Math.max(w.asm, pgrAssemblyLabel(r.db).length);
         w.query = Math.max(w.query, String(r.query || "").length);
         if (r.contig != null) {
-            w.contig = Math.max(w.contig, r.contig.length);
+            w.contig = Math.max(w.contig, r.contig.length + 2);
             w.start = Math.max(w.start, pgrFmt(r.start + 1).length);
             w.end = Math.max(w.end, pgrFmt(r.end).length);
             w.span = Math.max(w.span, pgrFmt(r.end - r.start).length);
@@ -411,13 +475,21 @@ function pgrTableHtml(rows, opt) {
         line += pgrLPad(r.coverage == null ? "" : r.coverage.toFixed(1) + "%", 8) + "  ";
 
         if (r.contig == null) {
-            // No surjection for this one, which is the usual case: only the top
-            // few are placed, and this row is here for its identity and
-            // coverage.  Nothing follows, so nothing is padded.
+            // Not placed.  Usually that just means it fell outside the batch,
+            // and the row is here for its identity and coverage; where the
+            // service gave a reason, say it.  Nothing follows, so nothing is
+            // padded.
+            if (r.placeStatus === "no_anchors") { line += "not present"; }
+            else if (r.placeStatus === "surjection_failed") { line += "no alignment"; }
             out.push(line.replace(/\s+$/, ""));
             return;
         } else {
-            line += pgrPad(pgrEsc(r.contig), w.contig) + "   " +
+            // In near-identical duplications the mapper cannot tell the copies
+            // apart.  It says so with a low MAPQ, and every surjection follows
+            // whichever copy it picked, so mark those rather than letting them
+            // read as settled.
+            var amb = (r.surjMapq != null && r.surjMapq < 10);
+            line += pgrPad(pgrEsc(r.contig) + (amb ? " ?" : ""), w.contig) + "   " +
                     pgrPad(r.strand || "", 4) + " " +
                     pgrLPad(pgrFmt(r.start + 1), w.start) + " " +
                     pgrLPad(pgrFmt(r.end), w.end) + " " +
@@ -537,6 +609,14 @@ function pgrDraw(queries, rows, note) {
             "<A HREF=\"" + pgrSelf + "\">New search</A>.</P>\n";
     if (note) { html += "<P>" + note + "</P>\n"; }
     html += pgrTableHtml(rows, { multiQuery: multiQuery, multiPlace: multiPlace });
+    // The "?" is meaningless without this, and it is on every row of a query
+    // that landed in a segmental duplication.
+    if (rows.some(function (r) { return r.surjMapq != null && r.surjMapq < 10; })) {
+        html += "<P><B>?</B> marks an ambiguous placement. In near-identical " +
+                "duplications the mapper cannot tell the copies apart, and " +
+                "every haplotype is surjected onto whichever copy it chose, so " +
+                "the position may belong to the other one.</P>\n";
+    }
 
     var el = document.getElementById("pgrResults");
     el.innerHTML = html;
@@ -592,30 +672,33 @@ function pgrStart() {
         rows.forEach(function (r, i) { r.rank = i; });
         pgrRows = rows;
 
-        // Place the best few before drawing anything.  Drawing first and letting
-        // the positions arrive afterwards showed one row placed and the rest a
-        // second later, which reads as the page correcting itself; and the
-        // surjection's identity differs from the graded one, so the order would
-        // visibly change under the reader.  Ten placements take well under a
-        // second, so there is nothing to gain by showing a table that is about
-        // to be rewritten.
-        var top = rows.filter(function (r) { return r.contig == null; })
-                      .slice(0, pgrSurjectCount());
-        return pgrPool(top.map(function (row) {
+        // Place them before drawing anything.  One call per placement now
+        // does every haplotype that carries the read: the service anchors once
+        // and surjects in parallel, so fifty cost about what one used to,
+        // where asking one at a time cost a request per row.
+        var jobs = [];
+        (resp.results || []).forEach(function (res) {
+            (res.alignments || []).forEach(function (aln, index) {
+                jobs.push({ name: res.name, index: index });
+            });
+        });
+        return pgrPool(jobs.map(function (j) {
             return function () {
-                return pgrSurject(row.hap, row.query, row.placement)
-                    .then(function (r) { pgrApplySurjection(row, r); })
-                    .catch(function () { row.placeFailed = true; });
+                return pgrSurjectAll(j.name, j.index, pgrSurjectCount(),
+                                     pgrMinCoverage())
+                    .then(function (batch) { pgrApplyBatch(rows, j, batch); })
+                    .catch(function () { /* rows simply stay unplaced */ });
             };
-        }), 6).then(function () {
-            // Re-sort now that the placed rows carry their own identity, which
-            // is the figure the table is ordered on.
+        }), 3).then(function () {
+            // Re-sort now that the placed rows carry the surjected identity,
+            // which is the figure the table is ordered on.
             rows.sort(pgrByIdentity);
             rows.forEach(function (r, i) { r.rank = i; });
             pgrRows = rows;
             pgrCacheWrite(job, resp.results, rows);
-            pgrDraw((resp.results || []).length, rows, null);
+            pgrDraw((resp.results || []).length, rows, pgrTruncNote());
         });
+
     }).catch(function (err) {
         // A job that has aged out of the server's cache is the common case, and
         // not a failure worth an alarming message.
