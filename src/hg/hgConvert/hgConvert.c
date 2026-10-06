@@ -796,9 +796,16 @@ if (pg != NULL)
           cgiEncode(fromPos), cgiEncode(pg->hap),
           wantAnnot ? "on" : "off", wantHide ? "on" : "off");
     cartSetString(cart, "position", fromPos);
-    hPrintf("<script>window.location='%s';</script>\n", url);
     hPrintf("<p>Handing off to TagAlong&#8230; "
             "<a href='%s'>continue</a> if you are not redirected.</p>\n", url);
+    /* The nonce has to be on the tag.  Written as a bare <script> this never
+     * ran: the Content-Security-Policy header names a nonce, and naming one
+     * makes the browser ignore the 'unsafe-inline' that is also in the policy,
+     * so the redirect was dropped without a word and only the link worked.
+     * jsInlineF() would stamp it, but its output is flushed by cartWebEnd(),
+     * and this hand-off returns before the page wrapper even starts. */
+    hPrintf("<script nonce='%s'>window.location.replace('%s');</script>\n",
+            getNonce(), javaScriptLiteralEncode(url));
     return;
     }
 
