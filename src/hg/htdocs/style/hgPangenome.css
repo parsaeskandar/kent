@@ -181,31 +181,3 @@
     font-size: 0.85em;
     padding-left: 2px;
 }
-
-/* ---- results table (page=results) ---------------------------------------
- * The page is built on gbModern.css and hgBlat.css - the strip, the card, the
- * pills, the coverage bar, the identity colour and the score bar all come from
- * there, so this file only adds what BLAT has no equivalent of. */
-
-/* The percentage printed beside hgBlat's .blatCov bar.  BLAT's own coverage
- * column is the bar alone; here the number is worth reading, because two
- * haplotypes can cover the same span at different identities. */
-.pgrPctVal {
-    display: inline-block;
-    margin-left: 0.5em;
-    font-variant-numeric: tabular-nums;
-}
-
-/* An exact carrier: follows every node of the query through the graph. */
-.pgrCarrier { color: #1f7a34; font-weight: bold; }
-#pgrTable .pgrCarrierCol { text-align: center; width: 1.5em; }
-
-/* A position we do not have: either still being fetched, or one the graph
- * scored but could not place on a contig. */
-.pgrNoPos { color: #888; font-style: italic; }
-
-.pgrExact { color: #1f7a34; }
-
-#pgrTable td { vertical-align: top; }
-#pgrTable .pgrMapqCol { font-variant-numeric: tabular-nums; text-align: right; }
-#pgrTable .pgrStrandCol { text-align: center; }

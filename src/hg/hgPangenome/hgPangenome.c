@@ -2591,12 +2591,8 @@ if (sameOk(cgiOptionalString("page"), "results"))
     cartWebStart(cart, NULL, "Pangenome Mapping Results");
     if (issueBotWarning)
         botDelayMessage(getenv("REMOTE_ADDR"), botDelayMillis);
-    /* The same two stylesheets hgBlat's results page uses: the shared house
-     * style (.gbCard, .gbStrip, .gbPill) and BLAT's own table rules.  This page
-     * is the same kind of thing and should not look like a second house. */
-    webIncludeResourceFile("gbModern.css");
-    webIncludeResourceFile("hgBlat.css");
-    webIncludeResourceFile("hgPangenome.css");
+    /* Nothing beyond the standard page style: the table is hgBlat's classic
+     * <TT><PRE> listing, which takes its look from the web shell. */
     printf("<div id='pgrResults'></div>\n");
     injectConfig();
     jsInlineF("var pangenomeJobId = '%s';\n",
@@ -2605,7 +2601,10 @@ if (sameOk(cgiOptionalString("page"), "results"))
      * to the whole panel, and most of its tail is incidental repeat matching. */
     jsInlineF("var pangenomeMinIdentity = %s;\n",
               cfgOr("pangenome.resultsMinIdentity", "90"));
-    jsIncludeDataTablesLibs();
+    /* How many of the best rows get a position.  Everything else in the table
+     * comes free with the mapping; a position costs one request each. */
+    jsInlineF("var pangenomeSurjectTop = %s;\n",
+              cfgOr("pangenome.resultsSurjectTop", "10"));
     jsIncludeFile("hgPangenomeAssemblies.js", NULL);
     jsIncludeFile("hgPangenomeResults.js", NULL);
     cartWebEnd();
