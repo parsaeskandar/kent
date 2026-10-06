@@ -2656,7 +2656,7 @@ printf("<p>Translate a region from one assembly's coordinates to another's "
        "through the pangenome graph, and bring the source's annotations "
        "along with it.</p>\n");
 
-printf("<table class='hgPangenomeTable' border=0>\n");
+printf("<table class='hgPangenomeTable pgcTable' border=0>\n");
 
 /* ---- source ----
  *
