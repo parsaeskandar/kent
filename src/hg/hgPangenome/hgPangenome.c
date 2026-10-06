@@ -2601,6 +2601,10 @@ if (sameOk(cgiOptionalString("page"), "results"))
      * to the whole panel, and most of its tail is incidental repeat matching. */
     jsInlineF("var pangenomeMinIdentity = %s;\n",
               cfgOr("pangenome.resultsMinIdentity", "90"));
+    /* ...but never fewer rows than this, so a sequence that matches nothing
+     * well still comes back with the best few rather than an empty table. */
+    jsInlineF("var pangenomeMinRows = %s;\n",
+              cfgOr("pangenome.resultsMinRows", "10"));
     /* How many of the best rows get a position.  Everything else in the table
      * comes free with the mapping; a position costs one request each. */
     jsInlineF("var pangenomeSurjectTop = %s;\n",

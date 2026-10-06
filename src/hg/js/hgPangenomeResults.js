@@ -40,6 +40,37 @@ function pgrMinIdentity() {
     return (typeof pangenomeMinIdentity === "number") ? pangenomeMinIdentity : 90;
 }
 
+function pgrMinRows() {
+    return (typeof pangenomeMinRows === "number") ? pangenomeMinRows : 10;
+}
+
+// Which haplotypes get a row.  Everything at or above the identity floor, since
+// the tail of the graded list is incidental repeat matching rather than a place
+// the sequence is - but never fewer than pgrMinRows().  A query that matches
+// nothing well should still come back with the best few to look at, not an
+// empty table.  Exact carriers are always kept: they follow every node of the
+// sequence, whatever identity the grader put on them.
+//
+// Takes the list already sorted by identity, so topping up takes the best.
+function pgrSelectRows(sorted) {
+    var floor = pgrMinIdentity();
+    var kept = [], keptSet = [];
+    sorted.forEach(function (r) {
+        if (r.isCarrier || r.listIdentity == null || r.listIdentity >= floor) {
+            kept.push(r);
+            keptSet.push(r);
+        }
+    });
+    if (kept.length >= pgrMinRows()) { return kept; }
+    sorted.forEach(function (r) {
+        if (kept.length >= pgrMinRows()) { return; }
+        if (keptSet.indexOf(r) < 0) { kept.push(r); keptSet.push(r); }
+    });
+    // Topping up appended out of order; put it back in identity order.
+    kept.sort(function (a, b) { return sorted.indexOf(a) - sorted.indexOf(b); });
+    return kept;
+}
+
 // ---- small helpers ---------------------------------------------------------
 
 function pgrEsc(s) {
@@ -215,13 +246,7 @@ function pgrBuildRows(results) {
                 });
             }
 
-            var floor = pgrMinIdentity();
-            (aln.haplotype_coverage || []).forEach(function (c) {
-                // Below the floor is incidental repeat matching, not a place the
-                // sequence is.  The tail of the graded list is most of it.
-                if (c.identity != null && c.identity < floor) { return; }
-                add(c.haplotype, c);
-            });
+            (aln.haplotype_coverage || []).forEach(function (c) { add(c.haplotype, c); });
             // A carrier the graded list never mentioned still belongs here.
             Object.keys(carriers).forEach(function (k) { add(carriers[k], null); });
 
@@ -497,6 +522,7 @@ function pgrStart() {
             var cb = b.coverage == null ? -1 : b.coverage;
             return cb - ca;
         });
+        rows = pgrSelectRows(rows);
         rows.forEach(function (r, i) { r.rank = i; });
         pgrRows = rows;
 
