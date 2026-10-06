@@ -2128,11 +2128,11 @@ cartSetString(cart, connectVar, "1");
  * DNA to find mismatches, which it can only do if that assembly is among the
  * hubs loaded on the target's page.  Harmless when the source is a native
  * assembly - genarkUrl is NULL and there is nothing to attach. */
+unsigned srcHubId = 0;
 char *srcHubUrl = genarkUrl(srcDb);
 if (srcHubUrl != NULL)
     {
     char *srcErr = NULL;
-    unsigned srcHubId = 0;
     errCatch = errCatchNew();
     if (errCatchStart(errCatch))
         srcHubId = hubFindOrAddUrlInStatusTable(cart, srcHubUrl, &srcErr);
@@ -2155,6 +2155,20 @@ if (srcHubUrl != NULL)
 struct dyString *url = dyStringNew(512);
 dyStringPrintf(url, "hgTracks?db=%s&position=%s&%s=1",
                cgiEncode(tgtDb), cgiEncode(position), connectVar);
+/* The source's own hub goes in the link too, not only into the cart.
+ *
+ * Everything carried over is read from the source assembly, and the alignment
+ * differences need its DNA, so that assembly has to be among the hubs loaded
+ * on the target's page.  Writing the cart variable here is not enough to
+ * guarantee it:  the name we put in quickLiftDb is the decorated hub_<id>_<db>
+ * form, and hgTracks can only resolve that when the hub is loaded in the
+ * process doing the drawing.  Where it was not, hNibForChrom fell through to
+ * /gbdb/<decorated name>/<decorated name>.2bit, which does not exist, and the
+ * page came up with no tracks at all and "Can't open ... .2bit to read".
+ * Naming it in the link is how the lifted hub itself is attached, and it
+ * leaves nothing to chance. */
+if (srcHubId != 0)
+    dyStringPrintf(url, "&%s%u=1", hgHubConnectHubVarPrefix, srcHubId);
 if (hideTracks)
     dyStringAppend(url, "&hideTracks=on");
 
