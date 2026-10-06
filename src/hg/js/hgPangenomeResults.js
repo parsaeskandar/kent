@@ -32,6 +32,10 @@ function pgrJobId() {
     return (typeof pangenomeJobId === "string") ? pangenomeJobId : "";
 }
 
+function pgrMinIdentity() {
+    return (typeof pangenomeMinIdentity === "number") ? pangenomeMinIdentity : 90;
+}
+
 // ---- small helpers ---------------------------------------------------------
 
 function pgrEsc(s) {
@@ -196,9 +200,26 @@ function pgrBuildRows(results) {
                 });
             }
 
-            (aln.haplotype_coverage || []).forEach(function (c) { add(c.haplotype, c); });
+            var floor = pgrMinIdentity();
+            (aln.haplotype_coverage || []).forEach(function (c) {
+                // Below the floor is incidental repeat matching, not a place the
+                // sequence is.  The tail of the graded list is most of it.
+                if (c.identity != null && c.identity < floor) { return; }
+                add(c.haplotype, c);
+            });
             // A carrier the graded list never mentioned still belongs here.
             Object.keys(carriers).forEach(function (k) { add(carriers[k], null); });
+
+            // The mapping already surjected against the representative, so that
+            // one row is placed without asking for anything.
+            if (aln.surjection && repKey) {
+                rows.forEach(function (r) {
+                    if (r.placement === index && r.query === res.name &&
+                        pgrHapKey(r.hap) === repKey) {
+                        pgrApplySurjection(r, { surjection: aln.surjection });
+                    }
+                });
+            }
         });
     });
     return rows;
@@ -232,28 +253,32 @@ function pgrApplySurjection(row, resp) {
     row.identity = s.identity == null ? null : s.identity * 100;
 }
 
-function pgrPlaceRows(rows, onBatch, onDone) {
-    // Carriers first, then by identity: the order the user reads the table in.
-    var order = rows.slice().sort(function (a, b) {
-        if (a.isCarrier !== b.isCarrier) { return a.isCarrier ? -1 : 1; }
-        var ia = a.listIdentity == null ? -1 : a.listIdentity;
-        var ib = b.listIdentity == null ? -1 : b.listIdentity;
-        return ib - ia;
+// Place only the rows the user is actually looking at.
+//
+// A position is the one thing a surjection buys - coverage, identity, covered
+// and matched bases all come free with the mapping - and there can be several
+// hundred rows.  Doing them all up front cost about seven seconds of work
+// nobody asked for, most of it for rows that are never read.  So a draw places
+// what is on screen, which is fifty rows at most and arrives in well under a
+// second; sorting or paging places the next lot.
+function pgrPlaceVisible(table, onChange) {
+    var pending = [];
+    table.rows({ page: "current" }).every(function () {
+        var row = this.data();
+        if (row && row.contig == null && !row.placeFailed && !row.placing) {
+            row.placing = true;
+            pending.push(row);
+        }
     });
-    var done = 0;
-    return pgrPool(order.map(function (row) {
+    if (!pending.length) { return; }
+    pgrPool(pending.map(function (row) {
         return function () {
             return pgrSurject(row.hap, row.query, row.placement)
                 .then(function (resp) { pgrApplySurjection(row, resp); })
                 .catch(function () { row.placeFailed = true; })
-                .then(function () {
-                    done++;
-                    // Redrawing on every arrival would be hundreds of redraws;
-                    // a batch keeps the table responsive while it fills.
-                    if (done % 40 === 0) { onBatch(done, order.length); }
-                });
+                .then(function () { row.placing = false; });
         };
-    }), 6).then(function () { onDone(order.length); });
+    }), 6).then(onChange);
 }
 
 // ---- cell renderers --------------------------------------------------------
@@ -271,24 +296,25 @@ function pgrPositionCell(row) {
         return row.placeFailed
             ? '<span class="pgrNoPos" title="The graph scored this haplotype but ' +
               'could not place it on a contig">not placed</span>'
-            : '<span class="pgrPending">placing…</span>';
+            : '<span class="pgrNoPos">…</span>';
     }
     var text = pgrEsc(row.contig) + ":" + pgrFmt(row.start + 1) + "-" + pgrFmt(row.end);
     if (!row.db) {
         return '<span class="pgrNoPos" title="No browser assembly is known for this ' +
                'haplotype">' + text + "</span>";
     }
-    return '<a class="pgrPos" href="#" data-rank="' + row.rank + '" ' +
+    return '<a class="blatPos" href="#" data-rank="' + row.rank + '" ' +
            'title="Open the Genome Browser here, with your sequence drawn on it">' +
            text + "</a>";
 }
 
+// hgBlat.css's own bar (.blatCov), so coverage reads the same on both pages.
 function pgrBarCell(pct, label) {
     if (pct == null) { return ""; }
     var w = Math.max(0, Math.min(100, pct));
-    return '<span class="pgrBar" title="' + pgrEsc(label) + '">' +
-           '<i style="width:' + w.toFixed(1) + '%"></i></span>' +
-           '<span class="pgrBarVal">' + pct.toFixed(1) + "%</span>";
+    return '<span class="blatCov" title="' + pgrEsc(label) + '">' +
+           '<i style="left:0;width:' + w.toFixed(1) + '%"></i></span>' +
+           '<span class="pgrPctVal">' + pct.toFixed(1) + "%</span>";
 }
 
 function pgrCoverageCell(row) {
@@ -302,7 +328,7 @@ function pgrCoverageCell(row) {
 function pgrIdentityCell(row) {
     var id = row.identity == null ? row.listIdentity : row.identity;
     if (id == null) { return ""; }
-    return '<span class="pgrIdPct" style="color:' + pgrIdColor(id) + '">' +
+    return '<span class="blatIdPct" style="color:' + pgrIdColor(id) + '">' +
            id.toFixed(1) + "%</span>";
 }
 
@@ -382,25 +408,39 @@ function pgrNote(msg, isError) {
     el.insertBefore(div, el.firstChild);
 }
 
+// hgBlat's summary strip, built the same way blatSummaryStrip() builds it:
+// label/value pairs separated by thin dividers, actions pushed to the right.
 function pgrSummary(results, rows) {
+    var stat = function (k, v) {
+        return '<div class="gbStat"><span class="k">' + k + '</span>' +
+               '<span class="v">' + v + "</span></div>";
+    };
+    var div = '<span class="gbDiv"></span>';
     var queries = (results || []).length;
     var placements = (results || []).reduce(function (n, r) {
-        return n + ((r.alignments || []).length);
-    }, 0);
+        return n + ((r.alignments || []).length); }, 0);
     var carriers = rows.filter(function (r) { return r.isCarrier; }).length;
-    return '<div class="pgrSummary">' +
-        '<span><b>' + queries + "</b> " + (queries === 1 ? "sequence" : "sequences") + "</span>" +
-        '<span><b>' + placements + "</b> " +
-        (placements === 1 ? "placement" : "placements") + "</span>" +
-        '<span><b>' + rows.length + "</b> " +
-        (rows.length === 1 ? "haplotype" : "haplotypes") + "</span>" +
-        '<span><b>' + carriers + "</b> exact " +
-        (carriers === 1 ? "carrier" : "carriers") + "</span>" +
-        '<label class="pgrOnlyCarriers"><input type="checkbox" id="pgrCarrierOnly"> ' +
-        "exact carriers only</label>" +
-        '<span id="pgrProgress" class="pgrProgress"></span>' +
-        '<span class="pgrBackLink"><a href="' + pgrSelf + '">New search</a></span>' +
-        "</div>";
+
+    var stats;
+    if (queries === 1) {
+        var only = results[0];
+        stats = stat("Query", pgrEsc(only.name)) + div +
+                stat("Length", pgrFmt(only.query_length) + " bp") + div;
+    } else {
+        stats = stat("Queries", pgrFmt(queries)) + div;
+    }
+    stats += stat("Placements", pgrFmt(placements)) + div +
+             stat("Haplotypes", pgrFmt(rows.length)) + div +
+             stat("Exact carriers", pgrFmt(carriers));
+
+    var actions =
+        '<label class="gbPill" title="Show only haplotypes that follow every node ' +
+        'of your sequence"><input type="checkbox" id="pgrCarrierOnly"> ' +
+        "Exact carriers only</label>" +
+        '<a class="gbPill" href="' + pgrSelf + '">New search</a>';
+
+    return '<div class="gbStrip">' + stats +
+           '<span class="gbStripActions">' + actions + "</span></div>";
 }
 
 function pgrRender(results, rows) {
@@ -425,9 +465,9 @@ function pgrRender(results, rows) {
     th.push('<th title="Mapping quality of the placement">MAPQ</th>');
 
     document.getElementById("pgrResults").innerHTML =
-        pgrSummary(results, rows) +
+        '<div class="gbCard">' + pgrSummary(results, rows) +
         '<table id="pgrTable" class="display"><thead><tr>' + th.join("") +
-        "</tr></thead></table>";
+        "</tr></thead></table></div>";
 
     var columns = [];
     var identCol = -1;
@@ -459,10 +499,16 @@ function pgrRender(results, rows) {
     columns.push({ data: null, className: "pgrDiffCol", orderable: false,
         render: function (d, type, row) {
             return type === "display" ? pgrDiffCell(row) : ""; } });
-    columns.push({ data: null, className: "pgrScoreCol",
+    var maxScore = rows.reduce(function (m, r) {
+        return Math.max(m, r.score || r.placementScore || 0); }, 0);
+    columns.push({ data: null, className: "scoreCol",
         render: function (d, type, row) {
             var v = row.score == null ? row.placementScore : row.score;
-            return type === "display" ? pgrFmt(v) : (v == null ? -1 : v); } });
+            if (type !== "display") { return v == null ? -1 : v; }
+            var pct = maxScore > 0 ? (v / maxScore * 100) : 0;
+            return '<span class="blatScoreWrap"><span class="blatScoreVal">' +
+                   pgrFmt(v) + '</span><span class="blatScoreBar"><i style="width:' +
+                   pct.toFixed(1) + '%"></i></span></span>'; } });
     columns.push({ data: null, className: "pgrMapqCol",
         render: function (d, type, row) {
             var v = row.surjMapq == null ? row.mapq : row.surjMapq;
@@ -494,7 +540,22 @@ function pgrRender(results, rows) {
 
     // One handler for the whole table rather than one per row, so it survives
     // sorting, filtering and paging without being rewired.
-    $("#pgrTable tbody").on("click", "a.pgrPos", function (ev) {
+    // Every draw - first paint, sort, filter, page - places whatever is now on
+    // screen and has no position yet.  A redraw after they land would recurse,
+    // so the refresh only repaints the cells.
+    var placing = false;
+    function placeNow() {
+        if (placing) { return; }
+        placing = true;
+        pgrPlaceVisible(table, function () {
+            placing = false;
+            table.rows({ page: "current" }).invalidate("data").draw(false);
+        });
+    }
+    table.on("draw", function () { placeNow(); });
+    placeNow();
+
+    $("#pgrTable tbody").on("click", "a.blatPos", function (ev) {
         ev.preventDefault();
         var rank = parseInt(this.getAttribute("data-rank"), 10);
         var row = pgrRows[rank];
@@ -535,18 +596,8 @@ function pgrStart() {
         }
         // Draw at once from the graded list - coverage and identity are already
         // in hand - and let the positions arrive into the table afterwards.
-        var table = pgrRender(resp.results, rows);
-        var progress = document.getElementById("pgrProgress");
-        function show(done, total) {
-            if (progress) {
-                progress.textContent = "finding positions… " + done + " of " + total;
-            }
-            table.rows().invalidate().draw(false);
-        }
-        return pgrPlaceRows(rows, show, function () {
-            if (progress) { progress.textContent = ""; }
-            table.rows().invalidate().draw(false);
-        });
+        pgrRender(resp.results, rows);
+        return null;
     }).catch(function (err) {
         // A job that has aged out of the server's cache is the common case here,
         // and it is not a failure worth an alarming message.

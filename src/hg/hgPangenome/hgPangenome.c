@@ -2591,11 +2591,20 @@ if (sameOk(cgiOptionalString("page"), "results"))
     cartWebStart(cart, NULL, "Pangenome Mapping Results");
     if (issueBotWarning)
         botDelayMessage(getenv("REMOTE_ADDR"), botDelayMillis);
+    /* The same two stylesheets hgBlat's results page uses: the shared house
+     * style (.gbCard, .gbStrip, .gbPill) and BLAT's own table rules.  This page
+     * is the same kind of thing and should not look like a second house. */
+    webIncludeResourceFile("gbModern.css");
+    webIncludeResourceFile("hgBlat.css");
     webIncludeResourceFile("hgPangenome.css");
-    printf("<div id='pgrResults' class='pgResults'></div>\n");
+    printf("<div id='pgrResults'></div>\n");
     injectConfig();
     jsInlineF("var pangenomeJobId = '%s';\n",
               jsonStringEscape(cgiUsualString("job_id", "")));
+    /* Haplotypes below this identity are not worth a row: the graded list runs
+     * to the whole panel, and most of its tail is incidental repeat matching. */
+    jsInlineF("var pangenomeMinIdentity = %s;\n",
+              cfgOr("pangenome.resultsMinIdentity", "90"));
     jsIncludeDataTablesLibs();
     jsIncludeFile("hgPangenomeAssemblies.js", NULL);
     jsIncludeFile("hgPangenomeResults.js", NULL);
