@@ -132,7 +132,11 @@ function load(options) {
         module: { exports: {} }
     };
     sandbox.window = {
-        location: { pathname: '/cgi-bin/hgPangenome' },
+        // Assigning window.location is how the page navigates; keep the
+        // assigned URL readable so a test can assert on where it went.
+        location: Object.assign(
+            Object.create({ toString: function () { return this.href || this.pathname; } }),
+            { pathname: '/cgi-bin/hgPangenome', href: '' }),
         setTimeout: setTimeout,
         clearTimeout: clearTimeout,
         URL: { createObjectURL: function () { return 'blob:test'; }, revokeObjectURL: function () {} }

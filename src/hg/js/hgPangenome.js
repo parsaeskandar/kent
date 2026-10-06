@@ -1136,7 +1136,12 @@ function onSubmit() {
     // reset render state
     clear(resultsEl);
     cardsByName = {};
-    parsed.sequences.forEach(function (s) { ensureCard(s.name); });
+    // A placeholder card per sequence, so the user can see the work starting -
+    // but not when the results have a page of their own, where the cards would
+    // appear for a moment and then be thrown away by the redirect.
+    if (CFG.resultsPage === false) {
+        parsed.sequences.forEach(function (s) { ensureCard(s.name); });
+    }
 
     lastPayload = {
         sequences: parsed.sequences.map(function (s) {
@@ -1178,14 +1183,20 @@ function run() {
 function pollJob(jobId, total) {
     var seen = {};      // names already rendered
     var errCount = 0;
+    // When the results have a page of their own there is no point drawing them
+    // here: the cards appeared for an instant and were then thrown away by the
+    // redirect, which read as the page flickering.
+    var handingOff = (CFG.resultsPage !== false);
 
     function tick() {
         api.poll(jobId).then(function (job) {
             errCount = 0;
-            (job.results || []).forEach(function (r) {
-                if (!seen[r.name]) { seen[r.name] = true; renderResult(r); }
-                else renderResult(r);   // idempotent update
-            });
+            if (!handingOff) {
+                (job.results || []).forEach(function (r) {
+                    if (!seen[r.name]) { seen[r.name] = true; renderResult(r); }
+                    else renderResult(r);   // idempotent update
+                });
+            }
             var prog = job.progress || { completed: Object.keys(seen).length, total: total };
 
             if (job.status === "error") {
@@ -1193,15 +1204,17 @@ function pollJob(jobId, total) {
                 return;
             }
             if (job.status === "done") {
-                // render any stragglers, then finish
-                (job.results || []).forEach(renderResult);
+                if (!handingOff) {
+                    // render any stragglers, then finish
+                    (job.results || []).forEach(renderResult);
+                }
                 hideStatus();
                 // Hand off to the results table, the way hgBlat moves from the
                 // search form to its hit list.  The job id is the whole of the
                 // page's state, so the results URL survives a reload and can be
                 // passed to someone else - neither of which worked while the
                 // results lived only in this page's variables.
-                if (CFG.resultsPage !== false) {
+                if (handingOff) {
                     window.location = window.location.pathname + "?page=results" +
                         "&job_id=" + encodeURIComponent(jobId) +
                         (HGSID ? "&hgsid=" + encodeURIComponent(HGSID) : "");

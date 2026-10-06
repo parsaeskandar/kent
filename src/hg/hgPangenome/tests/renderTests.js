@@ -56,7 +56,7 @@ function result(over) {
 // Load a page, render one canned result, and return handles for assertions.
 function renderOne(res) {
     var c = loader.load({ ids: PAGE_IDS, readyState: 'loading' });
-    c.window.pangenomeConfig = { useMock: true, transport: 'job', pollIntervalMs: 5 };
+    c.window.pangenomeConfig = { useMock: true, transport: 'job', pollIntervalMs: 5, resultsPage: false };
     c.fireReady();
     c.api.renderResult(res);
     return c;
@@ -394,7 +394,7 @@ t.test('a null surjection after asking for one is not mislabelled "not requested
                     { job_id: 'j', status: 'queued' }); },
                 text: function () { return Promise.resolve('{}'); } });
         } });
-    c.window.pangenomeConfig = { useMock: false, transport: 'job', pollIntervalMs: 5 };
+    c.window.pangenomeConfig = { useMock: false, transport: 'job', pollIntervalMs: 5, resultsPage: false };
     c.fireReady();
     c.el.pgSeq.value = '>r1\nACGTACGTACGT';
     c.el.pgSubmit.dispatch('click');          // records what we asked for
@@ -535,7 +535,7 @@ var COV = [
 
 function rowsFor(coverage, names) {
     var c = loader.load({ ids: PAGE_IDS, readyState: 'loading' });
-    c.window.pangenomeConfig = { useMock: true };
+    c.window.pangenomeConfig = { useMock: true, resultsPage: false };
     c.fireReady();
     return c.api.haplotypeRows({ names: names || [], representative: null }, coverage);
 }
@@ -745,7 +745,10 @@ function startWithFetch(responses, cfg, seqText) {
             });
         }
     });
-    c.window.pangenomeConfig = cfg || { useMock: false, transport: 'job', pollIntervalMs: 5 };
+    // These suites drive the in-page card renderer, which is what the search
+    // page does when it is not handing the results to their own page.
+    c.window.pangenomeConfig = cfg ||
+        { useMock: false, transport: 'job', pollIntervalMs: 5, resultsPage: false };
     c.fireReady();
     c.el.pgSeq.value = seqText || '>r1\nACGTACGTACGTACGTACGT';
     c.el.pgSubmit.dispatch('click');
@@ -798,6 +801,30 @@ setTimeout(function () {
     t.test('the card is not duplicated by repeated polls', function () {
         t.eq(jobPage.el.pgResults.children.length, 1, 'still one card');
     });
+
+    // ---- handing the results to their own page (the default) ----
+    var handoff = startWithFetch({
+        submit: { job_id: 'j9', status: 'queued', n_sequences: 1 },
+        poll: [{ status: 'done', job_id: 'j9', n_sequences: 1,
+                 results: [result({ name: 'r1' })] }]
+    }, { useMock: false, transport: 'job', pollIntervalMs: 5, hgsid: 'sess9' });
+
+    setTimeout(function () {
+        t.suite('transport: handing off to the results page');
+
+        t.test('a finished job goes to the results page, carrying the job id', function () {
+            var url = String(handoff.window.location);
+            t.contains(url, 'page=results', 'results page');
+            t.contains(url, 'job_id=j9', 'job id carried');
+            t.contains(url, 'hgsid=sess9', 'session carried');
+        });
+
+        t.test('no cards are drawn on the way out', function () {
+            // They were drawn for an instant and then discarded by the
+            // redirect, which read as the page flickering.
+            t.eq(handoff.el.pgResults.children.length, 0, 'nothing rendered');
+        });
+    }, 120);
 
     // ---- sync transport ----
     var syncPage = startWithFetch({
@@ -871,7 +898,7 @@ setTimeout(function () {
                 // transport (hgPangenomeMock.js, used when no apiBase is set).
                 var mockPage = loader.load({ ids: PAGE_IDS, readyState: 'loading' });
                 mockPage.window.pangenomeConfig = { useMock: true, transport: 'job',
-                                                   pollIntervalMs: 10 };
+                                                   pollIntervalMs: 10, resultsPage: false };
                 mockPage.fireReady();
                 mockPage.el.pgSeq.value = '>mockRead\nACGTACGTACGTACGTACGT';
                 mockPage.el.pgSubmit.dispatch('click');
@@ -881,7 +908,7 @@ setTimeout(function () {
                 t.test('invalid input blocks submission and explains why', function () {
                     var bad = loader.load({ ids: PAGE_IDS, readyState: 'loading' });
                     bad.window.pangenomeConfig = { useMock: true, transport: 'job',
-                                                  pollIntervalMs: 10 };
+                                                  pollIntervalMs: 10, resultsPage: false };
                     bad.fireReady();
                     bad.el.pgSeq.value = 'ACGTX\nACGT';
                     bad.el.pgSubmit.dispatch('click');

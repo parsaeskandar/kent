@@ -52,6 +52,25 @@ function pgrMinRows() {
 // sequence, whatever identity the grader put on them.
 //
 // Takes the list already sorted by identity, so topping up takes the best.
+// The figure to rank and show a row by: the surjection's where we have one,
+// the graded list's otherwise.
+function pgrIdentityOf(row) {
+    return row.identity == null ? row.listIdentity : row.identity;
+}
+
+function pgrByIdentity(a, b) {
+    var ia = pgrIdentityOf(a), ib = pgrIdentityOf(b);
+    ia = (ia == null) ? -1 : ia;
+    ib = (ib == null) ? -1 : ib;
+    if (ib !== ia) { return ib - ia; }
+    // An exact carrier follows every node of the sequence, so it outranks a
+    // haplotype that merely scored the same.
+    if (a.isCarrier !== b.isCarrier) { return a.isCarrier ? -1 : 1; }
+    var ca = a.coverage == null ? -1 : a.coverage;
+    var cb = b.coverage == null ? -1 : b.coverage;
+    return cb - ca;
+}
+
 function pgrSelectRows(sorted) {
     var floor = pgrMinIdentity();
     var kept = [], keptSet = [];
@@ -289,8 +308,16 @@ function pgrApplySurjection(row, resp) {
     row.deleted = s.deleted;
     row.alignedBases = s.aligned_bases;
     // The surjection reports identity as a fraction where the graded list uses
-    // a percentage.
+    // a percentage.  These two do not agree, and the surjection's is the one to
+    // believe: the graded figure scores the haplotype's walk through the graph,
+    // while this one scores the alignment actually drawn on that assembly.
     row.identity = s.identity == null ? null : s.identity * 100;
+    // Coverage likewise - how much of the query the drawn alignment accounts
+    // for.  Only when the query length is known; otherwise the graded figure
+    // stands.
+    if (s.aligned_bases != null && row.queryLength) {
+        row.coverage = s.aligned_bases / row.queryLength * 100;
+    }
 }
 
 // ---- the table -------------------------------------------------------------
@@ -379,7 +406,7 @@ function pgrTableHtml(rows, opt) {
         line += pgrPad(pgrEsc(r.hap), w.hap) + " ";
         line += pgrPad(pgrEsc(pgrAssemblyLabel(r.db)), w.asm) + " ";
 
-        var id = r.identity == null ? r.listIdentity : r.identity;
+        var id = pgrIdentityOf(r);
         line += pgrLPad(id == null ? "" : id.toFixed(1) + "%", 8) + " ";
         line += pgrLPad(r.coverage == null ? "" : r.coverage.toFixed(1) + "%", 8) + "  ";
 
@@ -513,34 +540,35 @@ function pgrStart() {
         // panel in the table an unsorted list buries the useful rows.  Carriers
         // break a tie, since they match every node rather than merely scoring
         // the same.
-        rows.sort(function (a, b) {
-            var ia = a.listIdentity == null ? -1 : a.listIdentity;
-            var ib = b.listIdentity == null ? -1 : b.listIdentity;
-            if (ib !== ia) { return ib - ia; }
-            if (a.isCarrier !== b.isCarrier) { return a.isCarrier ? -1 : 1; }
-            var ca = a.coverage == null ? -1 : a.coverage;
-            var cb = b.coverage == null ? -1 : b.coverage;
-            return cb - ca;
-        });
+        rows.sort(pgrByIdentity);
         rows = pgrSelectRows(rows);
         rows.forEach(function (r, i) { r.rank = i; });
         pgrRows = rows;
 
-        // Draw at once from the mapping, which already carries identity and
-        // coverage for every haplotype, then place the top few.  A surjection
-        // buys nothing but a position, so doing all of them would be several
-        // seconds of work for rows nobody reads.
-        pgrDraw(resp.results, rows, null);
+        // Place the best few before drawing anything.  Drawing first and letting
+        // the positions arrive afterwards showed one row placed and the rest a
+        // second later, which reads as the page correcting itself; and the
+        // surjection's identity differs from the graded one, so the order would
+        // visibly change under the reader.  Ten placements take well under a
+        // second, so there is nothing to gain by showing a table that is about
+        // to be rewritten.
         var top = rows.filter(function (r) { return r.contig == null; })
                       .slice(0, pgrSurjectCount());
-        if (!top.length) { return null; }
+        el.innerHTML = "<P>Placing the best " + top.length + " matches&#8230;</P>";
         return pgrPool(top.map(function (row) {
             return function () {
                 return pgrSurject(row.hap, row.query, row.placement)
                     .then(function (r) { pgrApplySurjection(row, r); })
                     .catch(function () { row.placeFailed = true; });
             };
-        }), 6).then(function () { pgrDraw(resp.results, rows, null); });
+        }), 6).then(function () {
+            // Re-sort now that the placed rows carry their own identity, which
+            // is the figure the table is ordered on.
+            rows.sort(pgrByIdentity);
+            rows.forEach(function (r, i) { r.rank = i; });
+            pgrRows = rows;
+            pgrDraw(resp.results, rows, null);
+        });
     }).catch(function (err) {
         // A job that has aged out of the server's cache is the common case, and
         // not a failure worth an alarming message.
