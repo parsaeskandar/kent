@@ -479,6 +479,41 @@ function pgrAct(row, what, link) {
     });
 }
 
+// ---- remembering the finished table ----------------------------------------
+//
+// Coming back from the Genome Browser is an ordinary load of this URL, so
+// without this the page polls and surjects all over again and the reader waits
+// through it a second time for a table they have already seen.  sessionStorage
+// is the right size of memory for that: it belongs to this tab, it survives
+// back and forward, and it is gone when the tab is.
+//
+// Every read and write is guarded.  A private window, blocked site data or a
+// full quota all throw, and none of them is a reason to fail: the page just
+// does the work again.
+function pgrCacheKey(job) {
+    return "hgPangenomeResults:" + job;
+}
+
+function pgrCacheRead(job) {
+    try {
+        var raw = window.sessionStorage.getItem(pgrCacheKey(job));
+        if (!raw) { return null; }
+        var saved = JSON.parse(raw);
+        return (saved && saved.rows && saved.rows.length) ? saved : null;
+    } catch (e) { return null; }
+}
+
+function pgrCacheWrite(job, results, rows) {
+    try {
+        window.sessionStorage.setItem(pgrCacheKey(job), JSON.stringify({
+            // Only what the table is drawn from.  The mapping response itself is
+            // far larger and nothing here reads it again.
+            rows: rows,
+            queries: (results || []).length
+        }));
+    } catch (e) { /* no memory to spare; the page will just rebuild it */ }
+}
+
 // ---- page ------------------------------------------------------------------
 
 function pgrFail(msg) {
@@ -489,8 +524,8 @@ function pgrFail(msg) {
     el.insertBefore(div, el.firstChild);
 }
 
-function pgrDraw(results, rows, note) {
-    var multiQuery = (results || []).length > 1;
+function pgrDraw(queries, rows, note) {
+    var multiQuery = queries > 1;
     var multiPlace = rows.some(function (r) { return r.placements > 1; });
     var placed = rows.filter(function (r) { return r.contig != null; }).length;
 
@@ -521,6 +556,13 @@ function pgrStart() {
     if (!job) {
         el.innerHTML = "<P>No job was named in this link. " +
             '<A HREF="' + pgrSelf + '">Start a new search</A>.</P>';
+        return;
+    }
+    // Already been here in this tab - draw it straight back.
+    var cached = pgrCacheRead(job);
+    if (cached) {
+        pgrRows = cached.rows;
+        pgrDraw(cached.queries, cached.rows, null);
         return;
     }
     el.innerHTML = "<P>Loading results&#8230;</P>";
@@ -559,7 +601,6 @@ function pgrStart() {
         // to be rewritten.
         var top = rows.filter(function (r) { return r.contig == null; })
                       .slice(0, pgrSurjectCount());
-        el.innerHTML = "<P>Placing the best " + top.length + " matches&#8230;</P>";
         return pgrPool(top.map(function (row) {
             return function () {
                 return pgrSurject(row.hap, row.query, row.placement)
@@ -572,7 +613,8 @@ function pgrStart() {
             rows.sort(pgrByIdentity);
             rows.forEach(function (r, i) { r.rank = i; });
             pgrRows = rows;
-            pgrDraw(resp.results, rows, null);
+            pgrCacheWrite(job, resp.results, rows);
+            pgrDraw((resp.results || []).length, rows, null);
         });
     }).catch(function (err) {
         // A job that has aged out of the server's cache is the common case, and
