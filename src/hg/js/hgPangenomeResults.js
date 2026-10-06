@@ -153,82 +153,107 @@ function pgrPool(thunks, width) {
 
 // ---- row assembly ----------------------------------------------------------
 
-// One row per (query sequence, placement, carrier haplotype).  The placement is
-// what the user is really choosing between when a sequence maps more than once
-// - the carriers under one placement are the same locus seen in different
-// samples - so the placement number travels with every row and the table can
-// be grouped by it.
+// One row per (query sequence, placement, haplotype) - every haplotype the
+// graph scored against this placement, not just the ones that carry it
+// exactly.  The graded list is the interesting one: an exact carrier visits
+// every node of the read and so has nothing to sort by, while a haplotype that
+// differs at one variant is absent from the carrier list but sits near the top
+// here.  Carriers are flagged rather than being the only rows.
 function pgrBuildRows(results) {
-    var jobs = [];
+    var rows = [];
     (results || []).forEach(function (res) {
         (res.alignments || []).forEach(function (aln, index) {
-            var haps = (aln.haplotypes && aln.haplotypes.names) || [];
-            var covBy = Object.create(null);
-            (aln.haplotype_coverage || []).forEach(function (c) {
-                covBy[pgrHapKey(c.haplotype)] = c;
+            var carriers = Object.create(null);
+            ((aln.haplotypes && aln.haplotypes.names) || []).forEach(function (n) {
+                carriers[pgrHapKey(n)] = n;
             });
             var representative = aln.haplotypes && aln.haplotypes.representative;
-            haps.forEach(function (hapName) {
-                var cov = covBy[pgrHapKey(hapName)] || {};
-                jobs.push({
+            var repKey = representative ? pgrHapKey(representative) : null;
+            var seen = Object.create(null);
+
+            function add(hapName, cov) {
+                var key = pgrHapKey(hapName);
+                if (seen[key]) { return; }
+                seen[key] = true;
+                rows.push({
                     query: res.name,
                     queryLength: res.query_length,
                     placement: index,
                     placements: (res.alignments || []).length,
-                    hapFull: hapName,
                     hap: pgrHapShort(hapName),
                     db: pgrAssembly(hapName),
-                    isRepresentative: hapName === representative,
+                    isCarrier: !!carriers[key],
+                    isRepresentative: key === repKey,
                     isReference: !!(aln.haplotypes &&
                                     aln.haplotypes.representative_is_reference) &&
-                                 hapName === representative,
-                    fullyCovered: aln.haplotypes ? aln.haplotypes.fully_covered : null,
+                                 key === repKey,
                     placementScore: aln.score,
                     mapq: aln.mapping_quality,
-                    coverage: pgrPct(cov.coverage),
-                    coveredBp: cov.covered_bp == null ? null : cov.covered_bp,
-                    listIdentity: pgrPct(cov.identity),
-                    matchedBp: cov.matched_bp == null ? null : cov.matched_bp
+                    coverage: pgrPct(cov && cov.coverage),
+                    coveredBp: (cov && cov.covered_bp != null) ? cov.covered_bp : null,
+                    listIdentity: pgrPct(cov && cov.identity),
+                    matchedBp: (cov && cov.matched_bp != null) ? cov.matched_bp : null
                 });
-            });
+            }
+
+            (aln.haplotype_coverage || []).forEach(function (c) { add(c.haplotype, c); });
+            // A carrier the graded list never mentioned still belongs here.
+            Object.keys(carriers).forEach(function (k) { add(carriers[k], null); });
         });
     });
-    return jobs;
+    return rows;
 }
 
-// Place every row on its own assembly.  Without this a row has a haplotype but
-// no coordinates, which is the one thing the old card UI made the user click
-// for.  A surjection is a few tens of milliseconds, and there are usually under
-// a couple of dozen rows, so they are all fetched up front.
-function pgrPlaceRows(rows) {
-    return pgrPool(rows.map(function (row) {
+// Fill in coordinates.  There can be several hundred rows, and a surjection
+// costs about 13ms at this concurrency, so waiting for all of them before
+// showing anything would mean several blank seconds.  The table is drawn first
+// from the graded list, which already carries coverage and identity, and the
+// positions arrive into it afterwards - best match first, so the rows a user
+// is actually going to click are filled in within the first moment.
+function pgrApplySurjection(row, resp) {
+    var s = resp && resp.surjection;
+    if (!s || s.status !== "ok") { row.placeFailed = true; return; }
+    var tgt = pgrSplitTarget(s.target);
+    if (tgt === null) { row.placeFailed = true; return; }
+    row.contig = tgt.contig;
+    row.start = tgt.offset + s.position;
+    row.end = row.start + pgrCigarSpan(s.cigar);
+    row.strand = s.strand;
+    row.cigar = s.cigar;
+    row.score = s.score;
+    row.surjMapq = s.mapping_quality;
+    row.matches = s.matches;
+    row.mismatches = s.mismatches;
+    row.inserted = s.inserted;
+    row.deleted = s.deleted;
+    row.alignedBases = s.aligned_bases;
+    // The surjection reports identity as a fraction where the graded list uses
+    // a percentage.
+    row.identity = s.identity == null ? null : s.identity * 100;
+}
+
+function pgrPlaceRows(rows, onBatch, onDone) {
+    // Carriers first, then by identity: the order the user reads the table in.
+    var order = rows.slice().sort(function (a, b) {
+        if (a.isCarrier !== b.isCarrier) { return a.isCarrier ? -1 : 1; }
+        var ia = a.listIdentity == null ? -1 : a.listIdentity;
+        var ib = b.listIdentity == null ? -1 : b.listIdentity;
+        return ib - ia;
+    });
+    var done = 0;
+    return pgrPool(order.map(function (row) {
         return function () {
             return pgrSurject(row.hap, row.query, row.placement)
-                .then(function (resp) {
-                    var s = resp && resp.surjection;
-                    if (!s || s.status !== "ok") { return row; }
-                    var tgt = pgrSplitTarget(s.target);
-                    if (tgt === null) { return row; }
-                    row.contig = tgt.contig;
-                    row.start = tgt.offset + s.position;
-                    row.end = row.start + pgrCigarSpan(s.cigar);
-                    row.strand = s.strand;
-                    row.cigar = s.cigar;
-                    row.score = s.score;
-                    row.surjMapq = s.mapping_quality;
-                    row.matches = s.matches;
-                    row.mismatches = s.mismatches;
-                    row.inserted = s.inserted;
-                    row.deleted = s.deleted;
-                    row.alignedBases = s.aligned_bases;
-                    // The surjection's identity is the alignment's own, and is a
-                    // fraction here where the coverage list is a percentage.
-                    row.identity = s.identity == null ? null : s.identity * 100;
-                    return row;
-                })
-                .catch(function () { return row; });
+                .then(function (resp) { pgrApplySurjection(row, resp); })
+                .catch(function () { row.placeFailed = true; })
+                .then(function () {
+                    done++;
+                    // Redrawing on every arrival would be hundreds of redraws;
+                    // a batch keeps the table responsive while it fills.
+                    if (done % 40 === 0) { onBatch(done, order.length); }
+                });
         };
-    }), 6).then(function () { return rows; });
+    }), 6).then(function () { onDone(order.length); });
 }
 
 // ---- cell renderers --------------------------------------------------------
@@ -243,8 +268,10 @@ function pgrIdColor(id) {
 
 function pgrPositionCell(row) {
     if (row.contig == null || row.start == null) {
-        return '<span class="pgrNoPos" title="This haplotype carries the sequence, ' +
-               'but it could not be placed on a contig">not placed</span>';
+        return row.placeFailed
+            ? '<span class="pgrNoPos" title="The graph scored this haplotype but ' +
+              'could not place it on a contig">not placed</span>'
+            : '<span class="pgrPending">placing…</span>';
     }
     var text = pgrEsc(row.contig) + ":" + pgrFmt(row.start + 1) + "-" + pgrFmt(row.end);
     if (!row.db) {
@@ -277,6 +304,13 @@ function pgrIdentityCell(row) {
     if (id == null) { return ""; }
     return '<span class="pgrIdPct" style="color:' + pgrIdColor(id) + '">' +
            id.toFixed(1) + "%</span>";
+}
+
+function pgrCarrierCell(row) {
+    return row.isCarrier
+        ? '<span class="pgrCarrier" title="This haplotype follows every node of ' +
+          'your sequence - an exact carrier">&#10003;</span>'
+        : "";
 }
 
 function pgrHapCell(row) {
@@ -353,14 +387,18 @@ function pgrSummary(results, rows) {
     var placements = (results || []).reduce(function (n, r) {
         return n + ((r.alignments || []).length);
     }, 0);
-    var placed = rows.filter(function (r) { return r.contig != null; }).length;
+    var carriers = rows.filter(function (r) { return r.isCarrier; }).length;
     return '<div class="pgrSummary">' +
         '<span><b>' + queries + "</b> " + (queries === 1 ? "sequence" : "sequences") + "</span>" +
         '<span><b>' + placements + "</b> " +
         (placements === 1 ? "placement" : "placements") + "</span>" +
-        '<span><b>' + rows.length + "</b> carrier " +
+        '<span><b>' + rows.length + "</b> " +
         (rows.length === 1 ? "haplotype" : "haplotypes") + "</span>" +
-        '<span><b>' + placed + "</b> placed on an assembly</span>" +
+        '<span><b>' + carriers + "</b> exact " +
+        (carriers === 1 ? "carrier" : "carriers") + "</span>" +
+        '<label class="pgrOnlyCarriers"><input type="checkbox" id="pgrCarrierOnly"> ' +
+        "exact carriers only</label>" +
+        '<span id="pgrProgress" class="pgrProgress"></span>' +
         '<span class="pgrBackLink"><a href="' + pgrSelf + '">New search</a></span>' +
         "</div>";
 }
@@ -376,6 +414,7 @@ function pgrRender(results, rows) {
     if (multiQuery) { th.push("<th>Query</th>"); }
     if (multiPlace) { th.push('<th title="Which of this sequence\'s placements in ' +
                               'the graph this row belongs to">Placement</th>'); }
+    th.push('<th title="An exact carrier follows every node of your sequence">&#10003;</th>');
     th.push("<th>Haplotype</th>");
     th.push("<th>Position</th>");
     th.push("<th>Strand</th>");
@@ -391,11 +430,15 @@ function pgrRender(results, rows) {
         "</tr></thead></table>";
 
     var columns = [];
+    var identCol = -1;
     if (multiQuery) { columns.push({ data: "query", className: "pgrQueryCol" }); }
     if (multiPlace) {
         columns.push({ data: null, className: "pgrPlaceCol",
             render: function (d, type, row) { return row.placement + 1; } });
     }
+    columns.push({ data: null, className: "pgrCarrierCol",
+        render: function (d, type, row) {
+            return type === "display" ? pgrCarrierCell(row) : (row.isCarrier ? 1 : 0); } });
     columns.push({ data: null, className: "pgrHapCol",
         render: function (d, type, row) {
             return type === "display" ? pgrHapCell(row) : row.hap; } });
@@ -408,6 +451,7 @@ function pgrRender(results, rows) {
         render: function (d, type, row) {
             return type === "display" ? pgrCoverageCell(row)
                                       : (row.coverage == null ? -1 : row.coverage); } });
+    identCol = columns.length;
     columns.push({ data: null, className: "pgrIdCol",
         render: function (d, type, row) {
             var id = row.identity == null ? row.listIdentity : row.identity;
@@ -429,12 +473,24 @@ function pgrRender(results, rows) {
         columns: columns,
         paging: rows.length > 50,
         pageLength: 50,
-        info: false,
-        // Best match first, which is what the user is looking for; ties keep the
-        // order the engine reported.
-        order: [],
+        info: rows.length > 50,
+        // Best match first.  With every scored haplotype in the table rather
+        // than only the exact carriers, an unsorted list opens on whatever
+        // order the engine happened to report, which buries the useful rows.
+        order: identCol >= 0 ? [[identCol, "desc"]] : [],
         language: { search: "", searchPlaceholder: "Filter by haplotype, sample, contig…" }
     });
+
+    // "Exact carriers only" is a row filter rather than a separate table, so
+    // sorting and the search box keep working across the switch.
+    var carrierOnly = document.getElementById("pgrCarrierOnly");
+    if (carrierOnly) {
+        $.fn.dataTable.ext.search.push(function (settings, data, index, row) {
+            if (settings.nTable.id !== "pgrTable") { return true; }
+            return !carrierOnly.checked || !!(row && row.isCarrier);
+        });
+        carrierOnly.addEventListener("change", function () { table.draw(false); });
+    }
 
     // One handler for the whole table rather than one per row, so it survives
     // sorting, filtering and paging without being rewired.
@@ -477,10 +533,19 @@ function pgrStart() {
                 "any haplotype. " + '<a href="' + pgrSelf + '">New search</a>.</div>';
             return null;
         }
-        el.innerHTML = '<div class="pgrNote">Placing ' + rows.length +
-                       " haplotypes…</div>";
-        return pgrPlaceRows(rows).then(function (placed) {
-            pgrRender(resp.results, placed);
+        // Draw at once from the graded list - coverage and identity are already
+        // in hand - and let the positions arrive into the table afterwards.
+        var table = pgrRender(resp.results, rows);
+        var progress = document.getElementById("pgrProgress");
+        function show(done, total) {
+            if (progress) {
+                progress.textContent = "finding positions… " + done + " of " + total;
+            }
+            table.rows().invalidate().draw(false);
+        }
+        return pgrPlaceRows(rows, show, function () {
+            if (progress) { progress.textContent = ""; }
+            table.rows().invalidate().draw(false);
         });
     }).catch(function (err) {
         // A job that has aged out of the server's cache is the common case here,

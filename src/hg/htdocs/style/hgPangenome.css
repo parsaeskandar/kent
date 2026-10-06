@@ -255,3 +255,10 @@
 #pgrTable .pgrScoreCol,
 #pgrTable .pgrMapqCol { font-variant-numeric: tabular-nums; text-align: right; }
 #pgrTable .pgrStrandCol { text-align: center; }
+
+.pgrPending { color: #999; font-style: italic; }
+.pgrCarrier { color: #1f7a34; font-weight: bold; }
+#pgrTable .pgrCarrierCol { text-align: center; }
+.pgrOnlyCarriers { white-space: nowrap; cursor: pointer; }
+.pgrOnlyCarriers input { vertical-align: middle; margin-right: 0.3em; }
+.pgrProgress { color: #666; font-style: italic; }
