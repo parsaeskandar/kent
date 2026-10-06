@@ -1112,18 +1112,89 @@ if (status != 0 || !fileExists(outFile))
 return TRUE;
 }
 
-static boolean pgLiftableType(char *type)
-/* Types quickLift can carry across a chain.  Mirrors validateOneTdb() in
- * trackHub.c: anything it cannot remap (BAM, VCF, MAF, wig, PSL...) has to be
- * left behind rather than drawn in the wrong place. */
+static boolean pgIsAlignmentType(char *type)
+/* Mirrors isAlignmentType() in trackHub.c.  These lift only when hg.conf turns
+ * them on, which quickLiftAlignmentsEnabled() decides. */
 {
-if (isEmpty(type))
+return startsWithNoCase("bigPsl", type) ||
+       startsWithNoCase("bigChain", type) ||
+       startsWithNoCase("bigMaf", type) ||
+       startsWithNoCase("wigMaf", type) ||
+       sameWord("chain", type) ||
+       startsWithNoCase("chain ", type) ||
+       sameWord("psl", type) ||
+       startsWithNoCase("psl ", type);
+}
+
+static boolean pgLiftableTdb(char *srcDb, struct trackDb *tdb)
+/* Can quickLift carry this track across a chain?
+ *
+ * Deliberately a line-for-line mirror of validateOneTdb() in trackHub.c, which
+ * is the gate quickLift's own hub writer uses.  We are reusing quickLift's
+ * display path, so anything it will draw we should offer, and anything it
+ * refuses we must not: a shorter list of our own silently drops tracks that
+ * quickLift itself would have carried, which is what it used to do.  It should
+ * be replaced by a call to trackHub.c's own check as soon as that is exported -
+ * keeping a copy in step by hand is exactly the kind of thing that rots.
+ *
+ * The two gated types read their switches through the same exported helpers
+ * trackHub.c uses, so a machine that enables them for quickLift enables them
+ * here at the same moment. */
+{
+if (isEmpty(tdb->type))
     return FALSE;
-return startsWithWord("bigBed", type) || startsWithWord("bigGenePred", type) ||
-       startsWithWord("bigWig", type) || startsWithWord("bigDbSnp", type) ||
-       startsWithWord("bigLolly", type) || startsWithWord("genePred", type) ||
-       startsWithWord("narrowPeak", type) || startsWithWord("gvf", type) ||
-       startsWithWord("bed", type);
+/* The ideogram describes the source's own chromosomes, so it means nothing on
+ * the target.  trackHub.c rejects it here rather than by type. */
+if (sameString("cytoBandIdeo", trackHubSkipHubName(tdb->track)))
+    return FALSE;
+/* Matched without regard to case because that is how the rest of the browser
+ * reads trackDb: some stanzas say "bigbed" rather than "bigBed". */
+if (!(startsWithNoCase("bigBed", tdb->type) ||
+      startsWithNoCase("bigWig", tdb->type) ||
+      startsWithNoCase("bigDbSnp", tdb->type) ||
+      startsWithNoCase("bigGenePred", tdb->type) ||
+      startsWithNoCase("gvf", tdb->type) ||
+      startsWithNoCase("genePred", tdb->type) ||
+      startsWithNoCase("narrowPeak", tdb->type) ||
+      startsWithNoCase("broadPeak", tdb->type) ||
+      startsWithNoCase("bigLolly", tdb->type) ||
+      (startsWithNoCase("bigNet", tdb->type) && trackHubBigNetEnabled()) ||
+      (pgIsAlignmentType(tdb->type) && quickLiftAlignmentsEnabled(cart)) ||
+      sameWord("bed", tdb->type) ||
+      startsWithNoCase("bed ", tdb->type)))
+    return FALSE;
+
+/* A big* track may name its file in a table rather than in trackDb, and the
+ * stanza we write has to carry the resolved name or the hub has nothing to
+ * open.  trackHub.c resolves it in this same place.  Only a native assembly
+ * keeps its filenames in a table; a hub-served one always states bigDataUrl,
+ * and asking for a MySQL connection to it would abort. */
+if ((startsWithNoCase("bigBed", tdb->type) ||
+     startsWithNoCase("bigNet", tdb->type) ||
+     startsWithNoCase("bigPsl", tdb->type) ||
+     startsWithNoCase("bigChain", tdb->type) ||
+     startsWithNoCase("bigMaf", tdb->type) ||
+     startsWithNoCase("bigWig", tdb->type)) &&
+    trackDbSetting(tdb, "bigDataUrl") == NULL && !trackHubDatabase(srcDb))
+    {
+    struct errCatch *errCatch = errCatchNew();
+    if (errCatchStart(errCatch))
+        {
+        struct sqlConnection *conn = hAllocConnTrack(srcDb, tdb);
+        char *fileName = bbiNameFromSettingOrTable(tdb, conn, tdb->table);
+        if (fileName != NULL)
+            hashAdd(tdb->settingsHash, "bigDataUrl", fileName);
+        hFreeConn(&conn);
+        }
+    errCatchEnd(errCatch);
+    boolean failed = errCatch->gotError;
+    errCatchFree(&errCatch);
+    /* No filename means nothing to draw, so leave it behind rather than write
+     * a stanza the hub reader will reject. */
+    if (failed || trackDbSetting(tdb, "bigDataUrl") == NULL)
+        return FALSE;
+    }
+return TRUE;
 }
 
 /* Settings that would either fight the lift or describe the source's own
@@ -1475,9 +1546,8 @@ if (pgIsContainer(tdb))
     }
 
 hashAdd(written, bare, NULL);
-/* Type is the only filter on a leaf: quickLift lifts bigWig too, and a wiggle
- * that is showing on the source is one the user chose to look at. */
-if (!pgLiftableType(tdb->type))
+/* Type is the only filter on a leaf: whatever quickLift will draw, we offer. */
+if (!pgLiftableTdb(srcDb, tdb))
     {
     if (report)
         pgNote(skipped, tdb);
