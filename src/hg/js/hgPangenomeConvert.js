@@ -1,4 +1,4 @@
-/* hgPangenomeConvert.js - client for TagAlong, the coordinate-conversion page.
+/* hgPangenomeConvert.js - client for PanLift, the coordinate-conversion page.
  *
  * Translates a region from one haplotype's coordinates to another's through the
  * pangenome graph, in the spirit of hgConvert's "In Other Genomes" - but between

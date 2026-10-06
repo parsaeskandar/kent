@@ -145,9 +145,10 @@
 .pgcAnnot .pgDlBtn {
     margin-right: 6px;
 }
+/* The second option is not subordinate to the first - both are choices about
+ * the same conversion - so it sits on the same margin. */
 #pgcHideRow {
     margin-top: 4px;
-    margin-left: 18px;
 }
 
 /* The "?" beside an option, and the note it reveals. */

@@ -796,7 +796,7 @@ if (pg != NULL)
           cgiEncode(fromPos), cgiEncode(pg->hap),
           wantAnnot ? "on" : "off", wantHide ? "on" : "off");
     cartSetString(cart, "position", fromPos);
-    hPrintf("<p>Handing off to TagAlong&#8230; "
+    hPrintf("<p>Handing off to PanLift&#8230; "
             "<a href='%s'>continue</a> if you are not redirected.</p>\n", url);
     /* The nonce has to be on the tag.  Written as a bare <script> this never
      * ran: the Content-Security-Policy header names a nonce, and naming one

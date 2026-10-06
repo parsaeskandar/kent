@@ -2634,12 +2634,12 @@ printf("<p style='font-size:0.9em;color:#555'>Up to %d sequences per submission.
 printf("</form>\n");
 
 printf("<p>Already have coordinates?  "
-       "<a href='hgPangenome?page=convert'>TagAlong</a> "
+       "<a href='hgPangenome?page=convert'>PanLift</a> "
        "translates a region from one assembly to another through the graph.</p>\n");
 }
 
 static void drawConvertPage()
-/* TagAlong, the coordinate-translation page, in the spirit of hgConvert's "In Other
+/* PanLift, the coordinate-translation page, in the spirit of hgConvert's "In Other
  * Genomes".  The source assembly and position are inherited from the cart, so
  * arriving from a track view pre-fills them with whatever the user was looking
  * at - but both stay editable.  Destination haplotypes come from the live graph
@@ -2651,7 +2651,7 @@ char *db = cartUsualString(cart, "db", "");
 char *position = cartUsualString(cart, "position", "");
 
 printf("<form id='pgcForm' onsubmit='return false;'>\n");
-printf("<h2>TagAlong</h2>\n");
+printf("<h2>PanLift</h2>\n");
 printf("<p>Translate a region from one assembly's coordinates to another's "
        "through the pangenome graph, and bring the source's annotations "
        "along with it.</p>\n");
@@ -2703,7 +2703,7 @@ if (quickLiftEnabled(cart))
     printf("<td><label for='pgcQuickLift' title='Display tracks from the "
            "source assembly mapped onto the target assembly'>"
            "<input type='checkbox' id='pgcQuickLift' %s> "
-           "QuickLift tracks</label>\n",
+           "PanLift tracks</label>\n",
            on ? "checked" : "");
     printf("<div id='pgcHideRow'><label for='pgcHideTracks' title='Hide all of "
            "the target assembly default tracks, showing only the QuickLifted "
@@ -2811,7 +2811,7 @@ if (sameOk(cgiOptionalString("page"), "results"))
 /* The coordinate-translation page is a separate view of this CGI. */
 if (sameOk(cgiOptionalString("page"), "convert"))
     {
-    cartWebStart(cart, NULL, "TagAlong");
+    cartWebStart(cart, NULL, "PanLift");
     if (issueBotWarning)
         botDelayMessage(getenv("REMOTE_ADDR"), botDelayMillis);
     webIncludeResourceFile("hgPangenome.css");
