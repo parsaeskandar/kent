@@ -181,3 +181,13 @@
     font-size: 0.85em;
     padding-left: 2px;
 }
+
+/* A caution on the conversion form: something the user can still fix before
+ * they submit, so it reads as advice rather than as an error. */
+.pgWarn {
+    margin-top: 0.5em;
+    padding: 0.4em 0.6em;
+    background: #fdf6e3;
+    border-left: 3px solid #d9a520;
+    font-size: 0.9em;
+}

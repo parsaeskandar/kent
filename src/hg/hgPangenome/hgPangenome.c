@@ -1783,6 +1783,74 @@ emitJson(out->string);
 dyStringFree(&out);
 }
 
+static void doLiftCheck()
+/* Can this assembly's annotations be carried over at all?
+ *
+ * Asked by the conversion page before the user submits, so that "nothing is
+ * showing on this assembly" is said while they can still do something about
+ * it, rather than after the conversion has run.  It is the same question
+ * doQuickLift answers, so it is answered by the same code: trackHubBuild picks
+ * the tracks, and we count what it wrote.
+ *
+ * Needs the cart - that is where the visibilities are - so it comes through
+ * the cart shell and writes its own JSON header. */
+{
+char *db = cgiOptionalString("db");
+if (!pgValidDb(db))
+    {
+    emitJsonError("missing or malformed assembly name");
+    return;
+    }
+char *savedDb = cloneString(cartUsualString(cart, "db", ""));
+char *srcName = pgAttachAssembly(db);
+cartSetString(cart, "db", srcName);
+
+struct trackDb *badList = NULL;
+char *built = NULL;
+struct errCatch *errCatch = errCatchNew();
+if (errCatchStart(errCatch))
+    built = trackHubBuild(srcName, cart, &badList);
+errCatchEnd(errCatch);
+boolean failed = errCatch->gotError;
+errCatchFree(&errCatch);
+pgRestoreDb(savedDb);
+
+if (failed || isEmpty(built))
+    {
+    /* Not an answer, but not a reason to stop the user either: the conversion
+     * itself will report whatever is really wrong. */
+    emitJson("{\"status\":\"ok\",\"tracks\":null}");
+    return;
+    }
+
+/* One "track" line per stanza.  Counting them is enough: the question is only
+ * whether anything at all came through. */
+int count = 0;
+struct lineFile *lf = lineFileMayOpen(built, TRUE);
+if (lf != NULL)
+    {
+    char *line;
+    while (lineFileNext(lf, &line, NULL))
+        if (startsWith("track ", skipLeadingSpaces(line)))
+            count++;
+    lineFileClose(&lf);
+    }
+
+struct dyString *skipped = dyStringNew(256);
+struct trackDb *bad;
+for (bad = badList; bad != NULL; bad = bad->next)
+    pgNote(skipped, bad);
+
+struct dyString *out = dyStringNew(300);
+dyStringPrintf(out, "{\"status\":\"ok\",\"tracks\":%d", count);
+if (skipped->stringSize > 0)
+    dyStringPrintf(out, ",\"skipped\":\"%s\"", jsonStringEscape(skipped->string));
+dyStringAppend(out, "}");
+emitJson(out->string);
+dyStringFree(&out);
+dyStringFree(&skipped);
+}
+
 static void doQuickLift(boolean wide)
 /* Build a chain from the blocks the page already has, wrap the source's
  * annotation tracks in a hub that points at it, and hand back a Genome Browser
@@ -2621,6 +2689,10 @@ if (quickLiftEnabled(cart))
     printf("<div id='pgcHideRow'><label for='pgcHideTracks'>"
            "<input type='checkbox' id='pgcHideTracks' checked> "
            "Hide the target's own default tracks</label></div>\n");
+    /* Filled in by the page once it has asked what the source has showing.
+     * Saying "nothing to carry over" here, before the Submit, is the whole
+     * point: said afterwards it is a wasted conversion. */
+    printf("<div id='pgcLiftWarn' class='pgWarn' style='display:none'></div>\n");
     printf("</td></tr>\n");
     }
 
@@ -2643,6 +2715,13 @@ void doMiddle(struct cart *theCart)
 /* Write the page. */
 {
 cart = theCart;
+
+/* Asked before a conversion is submitted, so it needs the cart too. */
+if (sameOk(cgiOptionalString("cmd"), "liftCheck"))
+    {
+    doLiftCheck();
+    return;
+    }
 
 /* Building a quickLift hub needs the cart, so unlike the other commands this
  * one comes through the cart shell.  It writes its own JSON header. */
@@ -2851,7 +2930,7 @@ if (sameOk(cmd, "alignTrack"))
     return 0;
     }
 
-if (sameOk(cmd, "quickLift") || sameOk(cmd, "extendChain"))
+if (sameOk(cmd, "quickLift") || sameOk(cmd, "extendChain") || sameOk(cmd, "liftCheck"))
     {
     struct errCatch *errCatch = errCatchNew();
     if (errCatchStart(errCatch))
