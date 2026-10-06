@@ -389,7 +389,7 @@ function pgrTableHtml(rows, opt) {
         w.asm = Math.max(w.asm, pgrAssemblyLabel(r.db).length);
         w.query = Math.max(w.query, String(r.query || "").length);
         if (r.contig != null) {
-            w.contig = Math.max(w.contig, r.contig.length + 2);
+            w.contig = Math.max(w.contig, r.contig.length);
             w.start = Math.max(w.start, pgrFmt(r.start + 1).length);
             w.end = Math.max(w.end, pgrFmt(r.end).length);
             w.span = Math.max(w.span, pgrFmt(r.end - r.start).length);
@@ -400,7 +400,7 @@ function pgrTableHtml(rows, opt) {
     if (opt.multiQuery) { head += pgrPad("QUERY", w.query) + " "; }
     if (opt.multiPlace) { head += pgrPad("PLACE", w.place) + " "; }
     head += pgrPad("HAPLOTYPE", w.hap) + " " + pgrPad("ASSEMBLY", w.asm) +
-            " IDENTITY COVERAGE  " + pgrPad("CONTIG", w.contig) +
+            " IDENTITY COVERAGE MAPQ  " + pgrPad("CONTIG", w.contig) +
             " STRAND " + pgrLPad("START", w.start) + " " + pgrLPad("END", w.end) +
             " " + pgrLPad("SPAN", w.span);
     var rule = new Array(head.length + 1).join("-");
@@ -418,7 +418,13 @@ function pgrTableHtml(rows, opt) {
 
         var id = pgrIdentityOf(r);
         line += pgrLPad(id == null ? "" : id.toFixed(1) + "%", 8) + " ";
-        line += pgrLPad(r.coverage == null ? "" : r.coverage.toFixed(1) + "%", 8) + "  ";
+        line += pgrLPad(r.coverage == null ? "" : r.coverage.toFixed(1) + "%", 8) + " ";
+        // The mapper's own confidence that it picked the right copy of a
+        // repeated region.  Shown as the number rather than as a flag: a reader
+        // who knows what MAPQ is can weigh it, and one who does not is told
+        // below the table what a low value means.
+        var mapq = (r.surjMapq == null) ? r.mapq : r.surjMapq;
+        line += pgrLPad(mapq == null ? "" : String(mapq), 4) + "  ";
 
         if (r.contig == null) {
             // Not placed.  Usually that just means it fell outside the batch,
@@ -429,18 +435,12 @@ function pgrTableHtml(rows, opt) {
             else if (r.placeStatus === "surjection_failed") { line += "no alignment"; }
             out.push(line.replace(/\s+$/, ""));
             return;
-        } else {
-            // In near-identical duplications the mapper cannot tell the copies
-            // apart.  It says so with a low MAPQ, and every surjection follows
-            // whichever copy it picked, so mark those rather than letting them
-            // read as settled.
-            var amb = (r.surjMapq != null && r.surjMapq < 10);
-            line += pgrPad(pgrEsc(r.contig) + (amb ? " ?" : ""), w.contig) + "   " +
-                    pgrPad(r.strand || "", 4) + " " +
-                    pgrLPad(pgrFmt(r.start + 1), w.start) + " " +
-                    pgrLPad(pgrFmt(r.end), w.end) + " " +
-                    pgrLPad(pgrFmt(r.end - r.start), w.span);
         }
+        line += pgrPad(pgrEsc(r.contig), w.contig) + "   " +
+                pgrPad(r.strand || "", 4) + " " +
+                pgrLPad(pgrFmt(r.start + 1), w.start) + " " +
+                pgrLPad(pgrFmt(r.end), w.end) + " " +
+                pgrLPad(pgrFmt(r.end - r.start), w.span);
         out.push(line);
     });
     return "<TT><PRE>" + out.join("\n") + "\n</PRE></TT>";
@@ -559,13 +559,14 @@ function pgrDraw(queries, rows, note) {
     html += " <A HREF=\"" + pgrSelf + "\">New search</A>.</P>\n";
     if (note) { html += "<P>" + note + "</P>\n"; }
     html += pgrTableHtml(rows, { multiQuery: multiQuery, multiPlace: multiPlace });
-    // The "?" is meaningless without this, and it is on every row of a query
-    // that landed in a segmental duplication.
-    if (rows.some(function (r) { return r.surjMapq != null && r.surjMapq < 10; })) {
-        html += "<P><B>?</B> marks an ambiguous placement. In near-identical " +
-                "duplications the mapper cannot tell the copies apart, and " +
-                "every haplotype is surjected onto whichever copy it chose, so " +
-                "the position may belong to the other one.</P>\n";
+    // Worth saying only when it applies, which on a clean query it does not.
+    if (rows.some(function (r) {
+            var q = (r.surjMapq == null) ? r.mapq : r.surjMapq;
+            return q != null && q < 10; })) {
+        html += "<P>A low <B>MAPQ</B> means the mapper could not tell which " +
+                "copy of a duplicated region the sequence came from. Every " +
+                "haplotype is surjected onto whichever copy it chose, so those " +
+                "positions may belong to the other one.</P>\n";
     }
 
     var el = document.getElementById("pgrResults");
