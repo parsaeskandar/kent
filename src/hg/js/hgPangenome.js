@@ -1196,6 +1196,16 @@ function pollJob(jobId, total) {
                 // render any stragglers, then finish
                 (job.results || []).forEach(renderResult);
                 hideStatus();
+                // Hand off to the results table, the way hgBlat moves from the
+                // search form to its hit list.  The job id is the whole of the
+                // page's state, so the results URL survives a reload and can be
+                // passed to someone else - neither of which worked while the
+                // results lived only in this page's variables.
+                if (CFG.resultsPage !== false) {
+                    window.location = window.location.pathname + "?page=results" +
+                        "&job_id=" + encodeURIComponent(jobId) +
+                        (HGSID ? "&hgsid=" + encodeURIComponent(HGSID) : "");
+                }
                 return;
             }
             showProgress(prog.completed, prog.total || total);

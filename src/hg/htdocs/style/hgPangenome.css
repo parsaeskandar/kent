@@ -181,3 +181,77 @@
     font-size: 0.85em;
     padding-left: 2px;
 }
+
+/* ---- results table (page=results) ---------------------------------------
+ * Visual rules borrowed from hgBlat.css so the two results pages read alike:
+ * the same identity colours, the same idea of a bar behind a percentage. */
+
+.pgrSummary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.5em;
+    align-items: baseline;
+    margin: 0 0 0.8em 0;
+    padding: 0.6em 0.9em;
+    background: #f5f5f0;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+}
+.pgrSummary b { font-size: 1.15em; }
+.pgrSummary .pgrBackLink { margin-left: auto; }
+
+.pgrNote, .pgrError {
+    margin: 0.6em 0;
+    padding: 0.6em 0.9em;
+    border-radius: 4px;
+}
+.pgrNote  { background: #f5f5f0; border: 1px solid #ddd; }
+.pgrError { background: #fdf0ef; border: 1px solid #e3b5b0; }
+
+/* A percentage with a bar behind it.  The bar is the thing the eye sorts on;
+ * the number is there to be read once a row has been picked. */
+.pgrBar {
+    display: inline-block;
+    position: relative;
+    width: 60px;
+    height: 9px;
+    background: #e6e6e6;
+    border-radius: 2px;
+    vertical-align: middle;
+    overflow: hidden;
+}
+.pgrBar > i {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    background: #6b8cae;
+    display: block;
+}
+.pgrBarVal {
+    display: inline-block;
+    margin-left: 0.5em;
+    font-variant-numeric: tabular-nums;
+}
+.pgrIdPct { font-weight: bold; font-variant-numeric: tabular-nums; }
+
+/* The assembly a haplotype can be browsed in, under its name: secondary
+ * information, so it is smaller and grey rather than a second column. */
+.pgrAsm { color: #666; font-size: 0.85em; }
+
+.pgrTag {
+    display: inline-block;
+    padding: 0 0.4em;
+    font-size: 0.75em;
+    border-radius: 3px;
+    background: #e6e6e6;
+    color: #444;
+    vertical-align: middle;
+}
+.pgrTagRef { background: #1f7a34; color: #fff; }
+
+.pgrNoPos { color: #888; font-style: italic; }
+.pgrExact { color: #1f7a34; }
+
+#pgrTable td { vertical-align: top; }
+#pgrTable .pgrScoreCol,
+#pgrTable .pgrMapqCol { font-variant-numeric: tabular-nums; text-align: right; }
+#pgrTable .pgrStrandCol { text-align: center; }

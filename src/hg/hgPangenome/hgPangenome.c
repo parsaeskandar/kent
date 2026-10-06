@@ -288,6 +288,64 @@ for (p = s; *p != '\0'; ++p)
 return TRUE;
 }
 
+static void pgJobFaPath(char *jobId, char *buf, int bufSize)
+/* Where this job's query sequences are kept.  One file per job, named after it
+ * rather than by a fresh trash name, so any later request can find it knowing
+ * only the job id. */
+{
+safef(buf, bufSize, "../trash/pangenomeSs/pangenomeJob_%s.fa", jobId);
+}
+
+static boolean pgValidJobId(char *jobId);
+
+static void pgStashQuerySeqs(char *payload, char *response)
+/* Write the submitted sequences to a FASTA named after the job.
+ *
+ * BLAT does the same thing at search time, and for the same reason: the page
+ * that draws a result needs the query sequence to colour mismatched bases, and
+ * it should not have to carry the sequence through every link to get it.  The
+ * results page is reached by an ordinary URL that names only the job, so this
+ * is the only copy it can use.
+ *
+ * Best effort.  A mapping that worked must not be reported as failed because
+ * the copy could not be written; the only thing lost is base colouring. */
+{
+struct errCatch *errCatch = errCatchNew();
+if (errCatchStart(errCatch))
+    {
+    struct jsonElement *resp = jsonParse(response);
+    char *jobId = jsonOptionalStringField(resp, "job_id", NULL);
+    if (pgValidJobId(jobId))
+        {
+        char path[PATH_LEN];
+        pgJobFaPath(jobId, path, sizeof(path));
+        struct jsonElement *root = jsonParse(payload);
+        struct jsonElement *seqsEl = jsonFindNamedField(root, "", "sequences");
+        if (seqsEl != NULL)
+            {
+            makeDirsOnPath("../trash/pangenomeSs");
+            FILE *f = mustOpen(path, "w");
+            struct slRef *ref;
+            for (ref = jsonListVal(seqsEl, "sequences"); ref != NULL; ref = ref->next)
+                {
+                struct jsonElement *el = ref->val;
+                char *name = jsonOptionalStringField(el, "name", "query");
+                char *seq = jsonOptionalStringField(el, "sequence", NULL);
+                if (!isEmpty(seq))
+                    fprintf(f, ">%s\n%s\n", name, seq);
+                }
+            carefulClose(&f);
+            chmod(path, 0666);
+            }
+        }
+    }
+errCatchEnd(errCatch);
+if (errCatch->gotError)
+    fprintf(stderr, "hgPangenome: could not stash query sequences: %s\n",
+            trimSpaces(errCatch->message->string));
+errCatchFree(&errCatch);
+}
+
 static char *pgValidatePayload(char *payload, int maxSeqs, int maxSeqLen,
                                int maxMultimaps)
 /* Server-side enforcement of the input caps (the browser's checks are
@@ -649,7 +707,12 @@ else if (r.code >= 400)
         emitJsonError("mapping server returned HTTP %ld", r.code);
     }
 else
+    {
+    /* Keep the query sequences where the results page can find them again. */
+    if (sameString(cmd, "map"))
+        pgStashQuerySeqs(cgiOptionalString("payload"), r.body->string);
     emitJson(r.body->string);   /* success: pass the middleware answer through verbatim */
+    }
 
 dyStringFree(&r.body);
 freez(&r.errMsg);
@@ -2104,6 +2167,47 @@ if (strlen(clean) > 255)
 return isEmpty(clean) ? "query" : clean;
 }
 
+static char *pgSeqFromJobFa(char *jobId, char *name)
+/* The named query sequence from the FASTA stashed when the job was submitted,
+ * or NULL.  The results page is reached by a plain URL that carries only the
+ * job, so this is how it gets the sequence it never saw. */
+{
+if (!pgValidJobId(jobId) || isEmpty(name))
+    return NULL;
+char path[PATH_LEN];
+pgJobFaPath(jobId, path, sizeof(path));
+char *seq = NULL;
+struct errCatch *errCatch = errCatchNew();
+if (errCatchStart(errCatch))
+    {
+    struct lineFile *lf = lineFileMayOpen(path, TRUE);
+    if (lf != NULL)
+        {
+        struct dyString *dy = dyStringNew(1024);
+        boolean want = FALSE;
+        char *line;
+        while (lineFileNext(lf, &line, NULL))
+            {
+            if (line[0] == '>')
+                {
+                if (want)
+                    break;
+                want = sameString(trimSpaces(line + 1), name);
+                }
+            else if (want)
+                dyStringAppend(dy, trimSpaces(line));
+            }
+        lineFileClose(&lf);
+        if (dy->stringSize > 0)
+            seq = cloneString(dy->string);
+        dyStringFree(&dy);
+        }
+    }
+errCatchEnd(errCatch);
+errCatchFree(&errCatch);
+return seq;
+}
+
 static void doAlignTrack()
 /* Write the PSL/FASTA pair BLAT uses, and hand back a browser URL that draws
  * the read on the target.  Runs with the cart: "ss" has to be put there
@@ -2134,6 +2238,11 @@ char *db = jsonOptionalStringField(root, "db", NULL);
 char *contig = jsonOptionalStringField(root, "contig", NULL);
 char *name = pgSafeName(jsonOptionalStringField(root, "name", "query"));
 char *seq = jsonOptionalStringField(root, "sequence", NULL);
+/* The results page has only the job id - the sequence itself was left on the
+ * search page.  Read it back from the copy taken at submit time. */
+if (isEmpty(seq))
+    seq = pgSeqFromJobFa(jsonOptionalStringField(root, "job_id", NULL),
+                         jsonOptionalStringField(root, "name", NULL));
 char *cigar = jsonOptionalStringField(root, "cigar", NULL);
 char *strand = jsonOptionalStringField(root, "strand", "+");
 struct jsonElement *startEl = jsonFindNamedField(root, "", "start");
@@ -2259,7 +2368,11 @@ jsInlineF("window.pangenomeConfig = {\n"
           "  maxLiftTargets: %d,\n"
           "  hgsid: \"%s\",\n"
           "  quickLiftEnabled: %s,\n"
-          "  quickLift: %s\n"
+          "  quickLift: %s,\n"
+          /* The search page hands off to the results table when a job
+           * finishes.  hg.conf can turn that off to get the old in-page
+           * cards back without a rebuild. */
+          "  resultsPage: %s\n"
           "};\n",
           useMock ? "true" : "false",
           jsonStringEscape(transport),
@@ -2283,7 +2396,8 @@ jsInlineF("window.pangenomeConfig = {\n"
           atoi(cfgOr("pangenome.maxLiftTargets", "5")),
           cartSessionId(cart),
           quickLiftEnabled(cart) ? "true" : "false",
-          sameString(cfgOr("pangenome.quickLift", "off"), "on") ? "true" : "false");
+          sameString(cfgOr("pangenome.quickLift", "off"), "on") ? "true" : "false",
+          sameString(cfgOr("pangenome.resultsPage", "on"), "on") ? "true" : "false");
 }
 
 static void drawForm(int maxSeq, int maxMultimaps, int maxMultimapsLimit)
@@ -2467,6 +2581,27 @@ if (sameOk(cgiOptionalString("cmd"), "alignTrack"))
  * the user is here, and the dead entry is what puts a red error group on every
  * hgTracks page. */
 pgForgetStaleHubs(NULL, TRUE);
+
+/* The results of one mapping job, as a sortable table.  Reached by an ordinary
+ * URL naming only the job, the way hgBlat's results page is: reloading it
+ * works, and it can be handed to someone else for as long as the job is still
+ * cached upstream. */
+if (sameOk(cgiOptionalString("page"), "results"))
+    {
+    cartWebStart(cart, NULL, "Pangenome Mapping Results");
+    if (issueBotWarning)
+        botDelayMessage(getenv("REMOTE_ADDR"), botDelayMillis);
+    webIncludeResourceFile("hgPangenome.css");
+    printf("<div id='pgrResults' class='pgResults'></div>\n");
+    injectConfig();
+    jsInlineF("var pangenomeJobId = '%s';\n",
+              jsonStringEscape(cgiUsualString("job_id", "")));
+    jsIncludeDataTablesLibs();
+    jsIncludeFile("hgPangenomeAssemblies.js", NULL);
+    jsIncludeFile("hgPangenomeResults.js", NULL);
+    cartWebEnd();
+    return;
+    }
 
 /* The coordinate-translation page is a separate view of this CGI. */
 if (sameOk(cgiOptionalString("page"), "convert"))
