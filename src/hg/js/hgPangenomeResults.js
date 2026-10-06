@@ -458,17 +458,22 @@ function pgrArm(row) {
 }
 
 function pgrAct(row, what, link) {
-    var was = link ? link.textContent : null;
-    if (link && what !== "newtab") { link.textContent = "opening…"; }
+    // Only the link that is about to sit there waiting says so.  "new tab" is
+    // never touched: its label carries the little new-tab icon as an <svg>, and
+    // restoring it through textContent would write back the plain words and
+    // take the icon with it - the row then no longer lines up with the others.
+    var busy = !!link && what !== "newtab";
+    var was = busy ? link.innerHTML : null;
+    if (busy) { link.innerHTML = "opening&#8230;"; }
     // A new tab has to be opened in the click itself or the popup blocker takes
     // it, so it is opened now and pointed at the answer when it arrives.
     var tab = (what === "newtab") ? window.open("", "_blank") : null;
     pgrArm(row).then(function (resp) {
-        if (link && was !== null) { link.textContent = was; }
+        if (busy) { link.innerHTML = was; }
         var url = (what === "details") ? resp.details : resp.url;
         if (tab) { tab.location = url; } else { window.location = url; }
     }).catch(function (err) {
-        if (link && was !== null) { link.textContent = was; }
+        if (busy) { link.innerHTML = was; }
         if (tab) { tab.close(); }
         pgrFail("Could not open this match: " + err.message);
     });
