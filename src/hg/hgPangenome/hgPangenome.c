@@ -2644,19 +2644,25 @@ printf("<p>Translate a region from one assembly's coordinates to another's "
 
 printf("<table class='hgPangenomeTable' border=0>\n");
 
-/* ---- source ---- */
-printf("<tr><td><label for='pgcSrcHap'><b>Source assembly</b></label></td>\n");
-printf("<td><select id='pgcSrcHap' class='pgcSrcHap'></select>\n");
+/* ---- source ----
+ *
+ * Shown, not asked for.  The user arrives here from a position in the Genome
+ * Browser, which is the region they mean, and hgConvert - the page this one
+ * stands beside - does the same: it states the source and only asks where to
+ * send it.  Offering a picker and a free-text position made the form look like
+ * a query builder and invited the two mistakes it could not catch, a contig
+ * that is not on the chosen assembly and a position left over from a different
+ * one.  Both values are still here as hidden inputs, because they are what
+ * gets submitted. */
+printf("<tr><td><b>Source</b></td>\n");
+printf("<td><div id='pgcSrcLabel' class='pgcCurrent'></div>\n");
+printf("<input type='hidden' id='pgcSrcHap'>\n");
 printf("<input type='hidden' id='pgcSrcDb' value='%s'>\n", db);
-printf("<div id='pgcSrcNote' class='pgMuted'></div></td></tr>\n");
-
-printf("<tr><td><label for='pgcPos'><b>Source position</b></label></td>\n");
-printf("<td><input type='text' id='pgcPos' size='40' value='%s' list='pgcContigs' "
-       "placeholder='contig:start-end, e.g. chr10:19,114-19,137'>\n", position);
-printf("<datalist id='pgcContigs'></datalist>\n");
-printf("<div id='pgcContigHint' class='pgMuted'></div>\n");
-printf("<div class='pgMuted'>Positions are 1-based and inclusive, as shown in "
-       "the Genome Browser.</div></td></tr>\n");
+printf("<input type='hidden' id='pgcPos' value='%s'>\n", position);
+printf("<div id='pgcSrcNote' class='pgMuted'></div>\n");
+printf("<div class='pgMuted'>To convert a different region, go to it in the "
+       "<a href='../cgi-bin/hgTracks'>Genome Browser</a> and come back.</div>"
+       "</td></tr>\n");
 
 /* ---- destination ---- */
 printf("<tr><td><label for='pgcTargets'><b>Target assemblies</b></label></td>\n");

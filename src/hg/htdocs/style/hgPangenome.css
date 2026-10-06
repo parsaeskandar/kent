@@ -191,3 +191,10 @@
     border-left: 3px solid #d9a520;
     font-size: 0.9em;
 }
+
+/* The source, stated rather than asked for.  Reads as a heading for the row,
+ * the way hgConvert's current-selection line does. */
+.pgcCurrent {
+    font-weight: bold;
+    font-size: 1.05em;
+}

@@ -14,9 +14,10 @@
 var t = require('./testLib.js');
 var loader = require('./loadClient.js');
 
-var PAGE_IDS = ['pgcForm', 'pgcSrcHap', 'pgcSrcDb', 'pgcSrcNote', 'pgcPos', 'pgcFilter',
+var PAGE_IDS = ['pgcForm', 'pgcSrcHap', 'pgcSrcDb', 'pgcSrcNote', 'pgcSrcLabel',
+                'pgcPos', 'pgcFilter',
                 'pgcTargetCount', 'pgcTargets', 'pgcSubmit', 'pgcClear',
-                'pgcReachable', 'pgcAllHaps', 'pgcContigs', 'pgcContigHint',
+                'pgcReachable', 'pgcAllHaps',
                 'pgcStatus', 'pgcResults', 'pgcQuickLift', 'pgcHideTracks'];
 
 // Load the convert page's client with a stubbed fetch.
@@ -395,44 +396,29 @@ setTimeout(function () {
         t.contains(page.el.pgcTargetCount.textContent, 'source haplotype is excluded', 'explained');
     });
 
-    t.suite('choosing the source haplotype');
+    t.suite('the source, stated rather than chosen');
 
-    t.test('the source is a picker listing every haplotype in the graph', function () {
-        var opts = page.el.pgcSrcHap.children.map(function (o) { return o.textContent; });
-        t.eq(opts.length, 5, 'all of them, including the current one');
-        t.ok(opts.indexOf('CHM13') >= 0, 'others selectable');
+    t.test('the source line names the haplotype and the position', function () {
+        t.contains(page.el.pgcSrcLabel.textContent, 'HG00097 hap1', 'haplotype named');
+        t.contains(page.el.pgcSrcLabel.textContent, 'CM094066.1:1-100', 'position named');
     });
 
-    t.test('it starts on the haplotype the page was opened for', function () {
+    t.test('the haplotype is carried in a hidden field, not a picker', function () {
+        // Nothing to choose: the assembly is the one the user came from.  The
+        // value still has to be there, because it is what gets submitted.
         t.eq(page.el.pgcSrcHap.value, 'HG00097#1', 'seeded from the inherited assembly');
+        t.eq(page.el.pgcSrcHap.children.length, 0, 'no options to pick from');
     });
 
-    t.test('the note warns that the contig must belong to the chosen source', function () {
+    t.test('the note warns that the contig must belong to the source', function () {
         t.contains(page.el.pgcSrcNote.textContent, "contig must be one of this haplotype's",
                    'caveat stated');
     });
 
-    t.test('choosing a different source is used for the next conversion', function () {
-        var c = altSource;
-        c.el.pgcSrcHap.value = 'CHM13#0';
-        c.el.pgcSrcHap.dispatch('change');
-        c.el.pgcPos.value = 'chr9:101-200';
-        c.el.pgcTargets.children.forEach(function (o) {
-            o.selected = (o.value || o.textContent) === 'GRCh38#0'; });
-        c.el.pgcSubmit.dispatch('click');
-        var p = payloadOf(c);
-        t.ok(p, 'a request was sent');
-        if (p) t.eq(p.src, 'CHM13#0#chr9', 'built from the chosen source, not the inherited one');
+    t.test('the source is excluded from its own target list', function () {
+        var targets = page.el.pgcTargets.children.map(function (o) { return o.value; });
+        t.notOk(targets.indexOf('HG00097#1') >= 0, 'no self-conversion');
     });
-
-    t.test('the chosen source is excluded from its own target list', function () {
-        var c = altSource2;
-        c.el.pgcSrcHap.value = 'CHM13#0';
-        c.el.pgcSrcHap.dispatch('change');
-        var targets = c.el.pgcTargets.children.map(function (o) { return o.value; });
-        t.notOk(targets.indexOf('CHM13#0') >= 0, 'no self-conversion');
-    });
-
 
     // ---- chain padding ------------------------------------------------------
     //
@@ -519,21 +505,16 @@ setTimeout(function () {
         }, 0);
     }, 0);
 
-    t.suite('telling the user which contigs exist');
+    t.suite('checking the inherited position');
 
-    t.test('the hint names the largest sequences of the chosen source', function () {
-        // Named the way the browser names them: an accession the user has never
-        // seen is no help when they are copying a position out of hgTracks.
-        var h = page.el.pgcContigHint.textContent;
-        t.contains(h, '4 sequences', 'count');
-        t.contains(h, 'chr1 (252 Mb)', 'largest first, with size');
-        t.contains(h, 'start typing', 'says how to use it');
-    });
-
-    t.test('they are offered as autocomplete on the position box', function () {
-        var opts = page.el.pgcContigs.children.map(function (o) { return o.value; });
-        t.deepEq(opts, ['chr1', 'chr2', 'chr7', 'chrUn_JBIREP010000009v1'],
-                 'biggest first, in the browser\'s names');
+    // The position is not typed any more, but it is still inherited, and an
+    // inherited one can be stale - the browser's spelling of a contig, or a
+    // position left over from another assembly.  So the source's sequence list
+    // is still fetched, and still used to judge it.
+    t.test('the source sequences are loaded for checking', function () {
+        t.ok(page.api.contigsForSource(), 'list fetched');
+        t.deepEq(page.api.contigsForSource().slice(0, 2),
+                 ['CM094060.1', 'CM094061.1'], 'in the graph\'s own names');
     });
 
     t.test('a contig from the wrong haplotype is caught before the request', function () {

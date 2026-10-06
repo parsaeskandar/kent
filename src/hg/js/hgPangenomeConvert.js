@@ -444,29 +444,35 @@ function currentSourceHap() {
 
 // Fill the source picker from the graph and select the best starting point:
 // the haplotype for the assembly we arrived from, else the configured default.
+// Settle what the source is and say so.  There is nothing to choose: the
+// assembly is the one the user came from, and the position is the region they
+// were looking at.  Both are carried in hidden inputs; this writes the line
+// that tells the user what they are.
 function fillSources() {
-    var sel = $("pgcSrcHap");
-    if (!sel) return;
-    var want = String(hapForDb(($("pgcSrcDb") || {}).value || "") || "").toLowerCase();
-    clear(sel);
-    // Track the choice explicitly rather than reading sel.value back: the
-    // property only follows a child's "selected" in a real browser, and relying
-    // on that silently picked the wrong haplotype.
+    var box = $("pgcSrcHap");
+    if (!box) { return; }
+    var want = String(hapForDb(($("pgcSrcDb") || {}).value || "") || "");
     var chosen = null;
+    var lower = want.toLowerCase();
     allHaplotypes.forEach(function (h) {
-        var o = el("option", { text: hapLabel(h) });
-        sel.appendChild(o);
-        o.value = h;
-        if (chosen === null && h.toLowerCase() === want) {
-            o.selected = true;
-            chosen = h;
-        }
+        if (chosen === null && h.toLowerCase() === lower) { chosen = h; }
     });
-    if (chosen === null && sel.children.length > 0) {
-        sel.children[0].selected = true;
-        chosen = sel.children[0].value;
-    }
-    sel.value = chosen || "";
+    // The graph's list may not have arrived, or may not know this assembly;
+    // the name we worked out from the db is still the right answer.
+    box.value = chosen || want || "";
+    showSourceLabel();
+}
+
+// "HG01258 maternal — CM088139.1:7,100,001-7,140,000", or as much of it as is
+// known yet.
+function showSourceLabel() {
+    var el2 = $("pgcSrcLabel");
+    if (!el2) { return; }
+    var hap = currentSourceHap();
+    var pos = (($("pgcPos") || {}).value || "").trim();
+    var text = hap ? hapLabel(hap) : "";
+    if (pos) { text += (text ? " \u2014 " : "") + pos; }
+    el2.textContent = text;
 }
 
 // Changing the source invalidates anything computed for the previous one.
@@ -513,6 +519,7 @@ function applySourceFallback() {
     var tookPosition = false;
     if (!havePos) {
         $("pgcPos").value = CFG.defaultPosition || "";
+        showSourceLabel();
         tookPosition = true;
     }
     return { why: why, tookPosition: tookPosition };
@@ -558,7 +565,6 @@ function loadContigs() {
     var hap = currentSourceHap();
     var assembly = hap ? assemblyForHap(hap) : null;
     contigsForSource = null;
-    setContigHint("");
     // Hub-URL assemblies are not ours to query, and an unknown haplotype has no
     // assembly at all; in both cases just stay quiet and let the server judge.
     if (!assembly || /^https?:/.test(assembly)) return;
@@ -606,31 +612,14 @@ function nameBoth(info, n) {
     return (shown === n) ? n : (shown + " (" + n + ")");
 }
 
+// The source's sequence names, kept for one purpose now that the position is
+// not typed: checking that the position we inherited actually names a sequence
+// of this assembly.  An inherited position can be stale - the browser's own
+// spelling of a contig, or one left from another assembly - and contigProblem()
+// says so in terms the user can act on.
 function applyContigs(info) {
     contigsForSource = info.names;
     nativeForSource = info.nativeOf || null;
-    var dl = $("pgcContigs");
-    if (dl) {
-        clear(dl);
-        info.names.forEach(function (n) {
-            var shown = nameShown(info, n);
-            var o = el("option", { value: shown });
-            dl.appendChild(o);
-            o.value = shown;
-        });
-    }
-    var examples = info.names.slice(0, 3).map(function (n) {
-        return nameShown(info, n) + " (" +
-               Math.round(info.sizes[n] / 1e6) + " Mb)";
-    }).join(", ");
-    setContigHint(info.names.length + " sequences in this haplotype; largest: " +
-                  examples + (info.names.length > 3 ? ", …" : "") +
-                  " \u2014 start typing in the box to pick one");
-}
-
-function setContigHint(text) {
-    var h = $("pgcContigHint");
-    if (h) h.textContent = text;
 }
 
 // The accession the graph knows this sequence by, whatever the user called it.
@@ -1044,7 +1033,8 @@ function init() {
     $("pgcFilter").addEventListener("input", function () {
         fillTargets($("pgcFilter").value);
     });
-    $("pgcSrcHap").addEventListener("change", onSourceChange);
+    // No listener on the source: it is not a control any more.  onSourceChange
+    // still runs once, from fillSources, to set up everything derived from it.
     // Ticking Annotations asks the question for the first time; unticking it
     // makes the answer irrelevant.
     if ($("pgcQuickLift")) {
@@ -1055,9 +1045,7 @@ function init() {
     });
     $("pgcReachable").addEventListener("click", showReachable);
     $("pgcAllHaps").addEventListener("click", showAllHaplotypes);
-    $("pgcPos").addEventListener("keydown", function (e) {
-        if (e.key === "Enter") { e.preventDefault(); doConvert(); }
-    });
+
     loadHaplotypes();
     // Ask on the way in as well as on a change: arriving here from a browser
     // page whose tracks were hidden is exactly the case worth warning about,
@@ -1081,6 +1069,8 @@ if (typeof module !== "undefined" && module.exports)
         contigProblem: contigProblem,
         nativeContig: nativeContig,
         applyContigs: applyContigs,
+        contigsForSource: function () { return contigsForSource; },
+        showSourceLabel: showSourceLabel,
         showReachable: showReachable,
         applySourceFallback: applySourceFallback,
         preselectDefaultTarget: preselectDefaultTarget,
