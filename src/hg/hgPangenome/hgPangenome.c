@@ -2007,7 +2007,27 @@ if (buildFailed || hubFile == NULL)
     }
 if (shown->stringSize == 0)
     {
-    emitJsonError("%s has no gene or mRNA tracks that can be lifted", srcDb);
+    /* Two quite different reasons, and the user can only act on one of them.
+     *
+     * Tracks were showing but none could come across: say which, so the answer
+     * is about those tracks rather than about the assembly.
+     *
+     * Nothing was showing at all: almost always this is the second leg of two
+     * conversions.  Arriving here with "hide other tracks" checked - which is
+     * the default - turns off everything the assembly has of its own, and the
+     * annotations carried in are skipped deliberately, since lifting an already
+     * lifted track would compound the error.  So there is nothing left to carry
+     * onward, and the fix is to turn something on. */
+    if (skipped->stringSize > 0)
+        emitJsonError("none of the tracks showing on %s can be carried over "
+                      "(%s). Turn on a track the browser can lift - genes, "
+                      "bigBed or bigWig - and convert again.",
+                      srcDb, skipped->string);
+    else
+        emitJsonError("no tracks are showing on %s, so there is nothing to "
+                      "carry over. This is usually because \"hide other tracks\" "
+                      "was checked on the way in; turn some tracks on in the "
+                      "browser and convert again.", srcDb);
     return;
     }
 
