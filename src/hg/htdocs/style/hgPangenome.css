@@ -199,3 +199,12 @@
     font-weight: bold;
     font-size: 1.05em;
 }
+
+/* The reachability filter, beside the assembly search box. */
+.pgcToggle {
+    margin-left: 0.6em;
+    white-space: nowrap;
+    cursor: pointer;
+}
+.pgcToggle input { vertical-align: middle; margin-right: 0.3em; }
+.pgcToggle.pgcBusy { opacity: 0.6; cursor: progress; }

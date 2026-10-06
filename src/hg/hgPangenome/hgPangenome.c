@@ -2682,9 +2682,13 @@ printf("<div class='pgMuted'>To convert a different region, go to it in the "
 printf("<tr><td><label for='pgcTargets'><b>Target assemblies</b></label></td>\n");
 printf("<td>\n");
 printf("<input type='search' id='pgcFilter' size='24' placeholder='filter assemblies…'>\n");
-printf("<input type='button' id='pgcReachable' value='Only assemblies with this region' "
-       "title='Ask the graph which assemblies this region exists on, and list only those'>\n");
-printf("<input type='button' id='pgcAllHaps' value='All assemblies' style='display:none'>\n");
+/* One checkbox rather than two buttons that swapped places.  The pair looked
+ * like two separate actions and gave no sign of which state the list was in;
+ * a checkbox says both what it does and whether it is on. */
+printf("<label for='pgcReachableOnly' class='pgcToggle' title='Ask the graph "
+       "which assemblies this region exists on, and list only those'>"
+       "<input type='checkbox' id='pgcReachableOnly'> "
+       "Only assemblies with this region</label>\n");
 printf("<div class='pgMuted' id='pgcTargetCount'></div>\n");
 printf("<select id='pgcTargets' multiple size='10' class='pgcTargets'></select>\n");
 printf("<div class='pgMuted'>Hold Ctrl (Cmd on a Mac) to pick several, "

@@ -248,6 +248,11 @@ var allHaplotypes = [];
 var hapExactByLower = null;
 var reachable = null;          // lower name -> coverage (or null), else not filtered
 var reachableScored = false;   // true when the server ranked them
+// What the graph last said for this source region.  Kept so that turning the
+// filter off and on again does not ask a second time; cleared whenever the
+// region changes, because then it is an answer to a different question.
+var reachableCache = null;
+var reachableCacheScored = false;
 var autoRan = false;           // the hand-off from hgConvert converts once
 var sourceIsExample = false;   // the position on screen is ours, not the user's
 
@@ -345,9 +350,35 @@ function fillTargets(filter) {
 // Ask the graph which haplotypes this region exists on, and narrow the picker to
 // those.  Saves guessing among hundreds of haplotypes that may have no
 // equivalent region at all.
+// The reachability filter is one checkbox, so turning it on and off is one
+// function.  The answer is kept once fetched: it only depends on the source
+// region, so flipping the box back on does not ask again.
+function setToggleBusy(busy) {
+    var lab = $("pgcReachableOnly") && $("pgcReachableOnly").parentNode;
+    if (lab && lab.classList) {
+        if (busy) { lab.classList.add("pgcBusy"); }
+        else { lab.classList.remove("pgcBusy"); }
+    }
+    if ($("pgcReachableOnly")) { $("pgcReachableOnly").disabled = !!busy; }
+}
+
+function onReachableToggle() {
+    var box = $("pgcReachableOnly");
+    if (!box || !box.checked) { showAllHaplotypes(); return; }
+    if (reachableCache) {        // already asked for this region
+        reachable = reachableCache;
+        reachableScored = reachableCacheScored;
+        fillTargets($("pgcFilter").value);
+        hideStatus();
+        return;
+    }
+    showReachable();
+}
+
 function showReachable() {
     var src = buildSource();
-    if (src.error) { showError(src.error); return; }
+    if (src.error) { showError(src.error); untick(); return; }
+    setToggleBusy(true);
     showBusy("Asking which assemblies contain " +
              fmtPos(src.contig, src.start, src.end) + "…");
     var req = { src: src.src, start: src.start, end: src.end, scored: true };
@@ -383,26 +414,34 @@ function showReachable() {
                     reachable[String(h).toLowerCase()] = null;
                 }
             });
+            reachableCache = reachable;
+            reachableCacheScored = reachableScored;
+            setToggleBusy(false);
             fillTargets($("pgcFilter").value);
-            $("pgcReachable").style.display = "none";
-            $("pgcAllHaps").style.display = "";
             if (Object.keys(reachable).length === 0)
                 showError("No assembly in the graph contains this region.");
             else
                 hideStatus();
         })
         .catch(function (err) {
+            setToggleBusy(false);
+            untick();
             showError("Could not check which assemblies contain this region: " +
-                      err.message, showReachable);
+                      err.message, onReachableToggle);
         });
+}
+
+// The filter did not take, so the box must not claim it did.
+function untick() {
+    if ($("pgcReachableOnly")) { $("pgcReachableOnly").checked = false; }
+    reachable = null;
+    reachableScored = false;
 }
 
 function showAllHaplotypes() {
     reachable = null;
     reachableScored = false;
     fillTargets($("pgcFilter").value);
-    $("pgcReachable").style.display = "";
-    $("pgcAllHaps").style.display = "none";
     hideStatus();
 }
 
@@ -479,8 +518,9 @@ function showSourceLabel() {
 function onSourceChange() {
     reachable = null;
     reachableScored = false;
-    if ($("pgcReachable")) $("pgcReachable").style.display = "";
-    if ($("pgcAllHaps")) $("pgcAllHaps").style.display = "none";
+    reachableCache = null;
+    reachableCacheScored = false;
+    if ($("pgcReachableOnly")) { $("pgcReachableOnly").checked = false; }
     fillTargets($("pgcFilter").value);
     describeSource(null);
     loadContigs();
@@ -1005,8 +1045,9 @@ function onClear() {
     $("pgcFilter").value = "";
     reachable = null;
     reachableScored = false;
-    $("pgcReachable").style.display = "";
-    $("pgcAllHaps").style.display = "none";
+    reachableCache = null;
+    reachableCacheScored = false;
+    if ($("pgcReachableOnly")) { $("pgcReachableOnly").checked = false; }
     fillTargets("");
     clear($("pgcResults"));
     hideStatus();
@@ -1046,8 +1087,7 @@ function init() {
     $("pgcTargets").addEventListener("change", function () {
         fillTargets($("pgcFilter").value);      // refresh the "N selected" line
     });
-    $("pgcReachable").addEventListener("click", showReachable);
-    $("pgcAllHaps").addEventListener("click", showAllHaplotypes);
+    $("pgcReachableOnly").addEventListener("change", onReachableToggle);
 
     loadHaplotypes();
     // Ask on the way in as well as on a change: arriving here from a browser

@@ -17,7 +17,7 @@ var loader = require('./loadClient.js');
 var PAGE_IDS = ['pgcForm', 'pgcSrcHap', 'pgcSrcDb', 'pgcSrcNote', 'pgcSrcLabel',
                 'pgcPos', 'pgcFilter',
                 'pgcTargetCount', 'pgcTargets', 'pgcSubmit', 'pgcClear',
-                'pgcReachable', 'pgcAllHaps',
+                'pgcReachableOnly',
                 'pgcStatus', 'pgcResults', 'pgcQuickLift', 'pgcHideTracks'];
 
 // Load the convert page's client with a stubbed fetch.
@@ -667,7 +667,8 @@ setTimeout(function () {
         var reach = startPage();
         setTimeout(function () {
             reach.el.pgcPos.value = 'CM094066.1:19114-19137';
-            reach.el.pgcReachable.dispatch('click');
+            reach.el.pgcReachableOnly.checked = true;
+            reach.el.pgcReachableOnly.dispatch('change');
             setTimeout(function () {
                 t.suite('narrowing the picker to reachable haplotypes');
 
@@ -698,11 +699,23 @@ setTimeout(function () {
                     t.eq(reach.el.pgcTargets.children.length, 2, 'matched case-insensitively');
                 });
 
-                t.test('"show all" restores the full list', function () {
-                    reach.el.pgcAllHaps.dispatch('click');
+                t.test('unticking it restores the full list', function () {
+                    reach.el.pgcReachableOnly.checked = false;
+                    reach.el.pgcReachableOnly.dispatch('change');
                     t.ok(reach.el.pgcTargets.children.length > 2, 'full list back');
                     t.notOk(/contain this region/.test(reach.el.pgcTargetCount.textContent),
                             'filter note cleared');
+                });
+
+                t.test('ticking it again does not ask the graph twice', function () {
+                    // The answer depends only on the source region, which has
+                    // not moved, so the second tick is free.
+                    reach.el.pgcReachableOnly.checked = true;
+                    reach.el.pgcReachableOnly.dispatch('change');
+                    var asks = reach.calls.filter(function (x) {
+                        return (x.opts.body || '').indexOf('cmd=liftoverTargets') >= 0; });
+                    t.eq(asks.length, 1, 'still one request');
+                    t.eq(reach.el.pgcTargets.children.length, 2, 'and the filter is back on');
                 });
 
                 runRenderCases();
@@ -812,7 +825,8 @@ setTimeout(function () {
                     { haplotype: 'chm13#0', coverage: 99.1, covered_bp: 991 }] } });
                 setTimeout(function () {
                     scored.el.pgcPos.value = 'CM094066.1:1-1000';
-                    scored.el.pgcReachable.dispatch('click');
+                    scored.el.pgcReachableOnly.checked = true;
+                    scored.el.pgcReachableOnly.dispatch('change');
                     setTimeout(function () {
                         t.suite('ranked destinations');
 
