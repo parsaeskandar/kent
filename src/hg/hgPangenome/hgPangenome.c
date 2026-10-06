@@ -1112,196 +1112,9 @@ if (status != 0 || !fileExists(outFile))
 return TRUE;
 }
 
-static boolean pgIsAlignmentType(char *type)
-/* Mirrors isAlignmentType() in trackHub.c.  These lift only when hg.conf turns
- * them on, which quickLiftAlignmentsEnabled() decides. */
-{
-return startsWithNoCase("bigPsl", type) ||
-       startsWithNoCase("bigChain", type) ||
-       startsWithNoCase("bigMaf", type) ||
-       startsWithNoCase("wigMaf", type) ||
-       sameWord("chain", type) ||
-       startsWithNoCase("chain ", type) ||
-       sameWord("psl", type) ||
-       startsWithNoCase("psl ", type);
-}
 
-static boolean pgLiftableTdb(char *srcDb, struct trackDb *tdb)
-/* Can quickLift carry this track across a chain?
- *
- * Deliberately a line-for-line mirror of validateOneTdb() in trackHub.c, which
- * is the gate quickLift's own hub writer uses.  We are reusing quickLift's
- * display path, so anything it will draw we should offer, and anything it
- * refuses we must not: a shorter list of our own silently drops tracks that
- * quickLift itself would have carried, which is what it used to do.  It should
- * be replaced by a call to trackHub.c's own check as soon as that is exported -
- * keeping a copy in step by hand is exactly the kind of thing that rots.
- *
- * The two gated types read their switches through the same exported helpers
- * trackHub.c uses, so a machine that enables them for quickLift enables them
- * here at the same moment. */
-{
-if (isEmpty(tdb->type))
-    return FALSE;
-/* The ideogram describes the source's own chromosomes, so it means nothing on
- * the target.  trackHub.c rejects it here rather than by type. */
-if (sameString("cytoBandIdeo", trackHubSkipHubName(tdb->track)))
-    return FALSE;
-/* Matched without regard to case because that is how the rest of the browser
- * reads trackDb: some stanzas say "bigbed" rather than "bigBed". */
-if (!(startsWithNoCase("bigBed", tdb->type) ||
-      startsWithNoCase("bigWig", tdb->type) ||
-      startsWithNoCase("bigDbSnp", tdb->type) ||
-      startsWithNoCase("bigGenePred", tdb->type) ||
-      startsWithNoCase("gvf", tdb->type) ||
-      startsWithNoCase("genePred", tdb->type) ||
-      startsWithNoCase("narrowPeak", tdb->type) ||
-      startsWithNoCase("broadPeak", tdb->type) ||
-      startsWithNoCase("bigLolly", tdb->type) ||
-      (startsWithNoCase("bigNet", tdb->type) && trackHubBigNetEnabled()) ||
-      (pgIsAlignmentType(tdb->type) && quickLiftAlignmentsEnabled(cart)) ||
-      sameWord("bed", tdb->type) ||
-      startsWithNoCase("bed ", tdb->type)))
-    return FALSE;
 
-/* A big* track may name its file in a table rather than in trackDb, and the
- * stanza we write has to carry the resolved name or the hub has nothing to
- * open.  trackHub.c resolves it in this same place.  Only a native assembly
- * keeps its filenames in a table; a hub-served one always states bigDataUrl,
- * and asking for a MySQL connection to it would abort. */
-if ((startsWithNoCase("bigBed", tdb->type) ||
-     startsWithNoCase("bigNet", tdb->type) ||
-     startsWithNoCase("bigPsl", tdb->type) ||
-     startsWithNoCase("bigChain", tdb->type) ||
-     startsWithNoCase("bigMaf", tdb->type) ||
-     startsWithNoCase("bigWig", tdb->type)) &&
-    trackDbSetting(tdb, "bigDataUrl") == NULL && !trackHubDatabase(srcDb))
-    {
-    struct errCatch *errCatch = errCatchNew();
-    if (errCatchStart(errCatch))
-        {
-        struct sqlConnection *conn = hAllocConnTrack(srcDb, tdb);
-        char *fileName = bbiNameFromSettingOrTable(tdb, conn, tdb->table);
-        if (fileName != NULL)
-            hashAdd(tdb->settingsHash, "bigDataUrl", fileName);
-        hFreeConn(&conn);
-        }
-    errCatchEnd(errCatch);
-    boolean failed = errCatch->gotError;
-    errCatchFree(&errCatch);
-    /* No filename means nothing to draw, so leave it behind rather than write
-     * a stanza the hub reader will reject. */
-    if (failed || trackDbSetting(tdb, "bigDataUrl") == NULL)
-        return FALSE;
-    }
-return TRUE;
-}
 
-/* Settings that would either fight the lift or describe the source's own
- * layout, so they are not copied into the stanza. */
-static char *pgSkipSettings[] = {"track", "type", "shortLabel", "longLabel",
-    "visibility", "parent", "subTrack", "priority", "group", "html",
-    "quickLiftUrl", "quickLiftDb", "quickLifted", "avoidHandler",
-    /* Never copied.  trackDbSuperMarkup() leaves a bare "superTrack on" on
-     * every member of a superTrack as well as on the container, so copying it
-     * wrote members that declared themselves superTracks.  A real container
-     * gets the setting written for it below; a member is placed by "parent". */
-    "superTrack"};
-
-static void pgWriteTrackStanza(struct dyString *dy, struct trackDb *tdb, char *srcDb,
-                               char *chainRel, int priority, boolean isChild,
-                               char *parentName)
-/* One stanza for a track we are carrying over.
- *
- * Names go in with the source hub's prefix stripped, the way
- * dumpTdbAndChildren() writes them for quickLift: our hub's own prefix is added
- * to "track" and "parent" alike when the file is read, so the two only line up
- * if neither carries a prefix of its own going in. */
-{
-dyStringPrintf(dy, "\ntrack %s\n", trackHubSkipHubName(tdb->track));
-dyStringPrintf(dy, "shortLabel %s\n",
-               isEmpty(tdb->shortLabel) ? tdb->track : tdb->shortLabel);
-dyStringPrintf(dy, "longLabel %s\n",
-        isEmpty(tdb->longLabel) ? (isEmpty(tdb->shortLabel) ? tdb->track
-                                                            : tdb->shortLabel)
-                                : tdb->longLabel);
-if (!isEmpty(tdb->type))
-    dyStringPrintf(dy, "type %s\n", tdb->type);
-/* How the container names this track tells us what kind of container it is.
- * "parent <name> on|off" is a composite or a view, which owns its subtracks'
- * visibility; a bare "parent <name>" is a superTrack, whose members each keep
- * a visibility of their own. */
-char *parentKey = "parent";
-char *parentVal = trackDbLocalSetting(tdb, "parent");
-if (parentVal == NULL)
-    {
-    parentKey = "subTrack";
-    parentVal = trackDbLocalSetting(tdb, "subTrack");
-    }
-char parentBuf[512];
-boolean ownsVisibility = FALSE;      /* true when the container decides for us */
-if (isChild && parentVal != NULL)
-    {
-    /* Only the on/off flag is read from the setting.  The name comes from the
-     * stanza we actually wrote for the container, because the two can differ:
-     * a track served from a hub has the dots in its name rewritten to
-     * underscores, while the "parent" setting still carries the dotted form it
-     * was declared with.  Trusting the setting wrote children pointing at a
-     * container that does not exist, and the hub reader rejects the whole
-     * group with "Parent ... doesn't exist in hub".  Only bites where the
-     * container's name has a dot in it, which is why it stayed hidden until
-     * the GCA_*-named chain composites became eligible. */
-    safef(parentBuf, sizeof(parentBuf), "%s",
-          (parentName != NULL) ? parentName : trackHubSkipHubName(parentVal));
-    char *sp = skipToSpaces(parentBuf);
-    if (sp != NULL)
-        *sp = '\0';
-    /* The setting is "<name> on|off" for a composite or view, a bare name for
-     * a superTrack member; only the first owns its children's visibility. */
-    ownsVisibility = (skipToSpaces(parentVal) != NULL);
-    }
-/* Group and priority place a track in the browser's track list, which only
- * top-level tracks appear in; a subtrack is placed by its container. */
-if (!isChild)
-    {
-    dyStringPrintf(dy, "group genes\n");
-    dyStringPrintf(dy, "priority %d\n", priority);
-    }
-if (!ownsVisibility)
-    dyStringPrintf(dy, "visibility %s\n", hStringFromTv(tdb->visibility));
-/* A superTrack has to say so, and has to say "show" or the browser draws
- * nothing under it.  We only ever get here for one the user has showing on the
- * source, so "show" is always right - and the source's own setting is no use,
- * since it carries whatever trackDb declared rather than what the user chose. */
-if (tdbIsSuperTrack(tdb))
-    dyStringPrintf(dy, "superTrack on show\n");
-/* Marks the track as one this hub is lifting.  "quickLifted" also relaxes the
- * hub's type check, which is what lets a plain genePred through. */
-dyStringPrintf(dy, "quickLifted on\n");
-dyStringPrintf(dy, "avoidHandler on\n");
-dyStringPrintf(dy, "quickLiftUrl %s\n", chainRel);
-dyStringPrintf(dy, "quickLiftDb %s\n", srcDb);
-/* Point at the container by the same name we wrote for it.  Where the setting
- * carries an on/off flag it becomes "on": we only get here for a subtrack the
- * user has left selected, whatever trackDb defaulted it to. */
-if (isChild && parentVal != NULL)
-    dyStringPrintf(dy, "%s %s%s\n", parentKey, parentBuf, ownsVisibility ? " on" : "");
-/* Everything else the source track declared - filters, colours, label fields,
- * the subGroup and composite declarations that hold the container together,
- * and bigDataUrl where there is one. */
-struct hashEl *el, *list = hashElListHash(tdb->settingsHash);
-slSort(&list, hashElCmp);
-for (el = list; el != NULL; el = el->next)
-    {
-    if (stringArrayIx(el->name, pgSkipSettings, ArraySize(pgSkipSettings)) >= 0)
-        continue;
-    char *val = (char *)el->val;
-    if (val == NULL || strchr(val, '\n') != NULL)  /* multi-line will not survive */
-        continue;
-    dyStringPrintf(dy, "%s %s\n", el->name, val);
-    }
-hashElFreeList(&list);
-}
 
 static char *pgHubName(char *srcDb, char *tgtDb)
 /* Path of the hub file for this source/target pair, reused across conversions.
@@ -1385,110 +1198,10 @@ slPairFreeList(&vars);
 hDisconnectCentral(&conn);
 }
 
-static boolean pgVisibleInCart(struct trackDb *tdb)
-/* Is this track showing for this user?  The cart wins and trackDb is only the
- * fallback - the same rule as checkCartVisibility() in trackHub.c, which is how
- * quickLift decides what to carry over.  Reading tdb->visibility alone gives
- * the trackDb default and ignores everything the user switched on or off in the
- * browser, which is exactly what they expect to come with them. */
-{
-char *cartVis = cartOptionalString(cart, tdb->track);
-if (cartVis != NULL)
-    {
-    /* A superTrack is stored as "show"/"hide" rather than as a visibility, and
-     * hTvFromString() aborts on anything it does not recognise. */
-    if (sameWord(cartVis, "show"))
-        return TRUE;
-    enum trackVisibility vis = hTvFromStringNoAbort(cartVis);
-    if ((int)vis >= 0)
-        tdb->visibility = vis;
-    }
-return (tdb->visibility != tvHide);
-}
 
-static boolean pgSubtrackOn(struct trackDb *tdb)
-/* Has this subtrack been left selected?  Mirrors isSubtrackVisible(): the
- * "<track>_sel" cart variable, defaulting to whether trackDb declared the
- * subtrack on or off.  An explicit visibility for the subtrack overrides. */
-{
-if (cartOptionalString(cart, tdb->track) != NULL)
-    return TRUE;
-boolean enabled = TRUE;
-char *setting = trackDbLocalSetting(tdb, "parent");
-if (setting != NULL)
-    {
-    char *words[2];
-    if (chopLine(cloneString(setting), words) >= 2 && sameString(words[1], "off"))
-        enabled = FALSE;
-    }
-else
-    enabled = (tdb->visibility != tvHide);
-char option[1024];
-safef(option, sizeof(option), "%s_sel", tdb->track);
-return cartUsualBoolean(cart, option, enabled);
-}
 
-static char *pgParentName(struct trackDb *tdb)
-/* The container this track belongs to, or NULL.  The setting is "<track> on"
- * or "<track> off", so take the first word. */
-{
-char *setting = trackDbSetting(tdb, "parent");
-if (isEmpty(setting))
-    setting = trackDbSetting(tdb, "subTrack");
-if (isEmpty(setting))
-    {
-    /* A superTrack member is linked by trackDbSuperMarkup() rather than by a
-     * "parent" setting, and the name it was declared with is kept in
-     * parentName.  Do not try to read it back out of the "superTrack" setting:
-     * markup rewrites a member's copy to a bare "on", the same text the
-     * container itself carries, so the setting cannot tell the two apart. */
-    if (tdbIsSuperTrackChild(tdb) && !isEmpty(tdb->parentName))
-        return tdb->parentName;
-    }
-if (isEmpty(setting))
-    return NULL;
-static char buf[256];
-safef(buf, sizeof(buf), "%s", setting);
-char *sp = skipToSpaces(buf);
-if (sp != NULL)
-    *sp = '\0';
-return buf;
-}
 
-static boolean pgIsContainer(struct trackDb *tdb)
-/* Does this track hold other tracks rather than data of its own?  Test the
- * declarations rather than tdbIsContainer(): the track list we are handed is
- * flat, so a composite or a view often arrives with an empty subtracks list and
- * would otherwise look like a leaf - which is how "table
- * wgEncodeGencodeV50ViewGenes doesn't exist" got onto the page. */
-{
-/* Local settings only.  trackDbSetting() inherits from the container, so a
- * plain subtrack of a composite answers "yes" to compositeTrack and to view,
- * and every leaf under NCBI RefSeq and T2T Encode was descended into as though
- * it held tracks of its own - finding none, and dropping the lot. */
-/* "superTrack" is not usable as a container test:  trackDbSuperMarkup()
- * rewrites a *member's* copy of the setting to a bare "on", which is exactly
- * what the container says, so testing the setting calls every member a
- * container of its own.  Having no children, each was then dropped - that is
- * how Long-read SVs and MPRAs could be showing on the source and never arrive.
- * tdbIsSuperTrack() reads the flag that markup sets, which does distinguish
- * them. */
-return tdbIsContainer(tdb) ||
-    trackDbLocalSetting(tdb, "compositeTrack") != NULL ||
-    tdbIsSuperTrack(tdb) ||
-    trackDbLocalSetting(tdb, "container") != NULL ||
-    trackDbLocalSetting(tdb, "view") != NULL;
-}
 
-static boolean pgIsSuperTrack(struct trackDb *tdb)
-/* Is this a superTrack rather than a composite?  The declaration reads
- * "superTrack on" or "superTrack on show"; a member of one reads
- * "superTrack <containerName>". */
-{
-/* The flag set by trackDbSuperMarkup(), not the setting:  a member's copy of
- * the setting is rewritten to the container's own "on". */
-return tdbIsSuperTrack(tdb);
-}
 
 static void pgNote(struct dyString *into, struct trackDb *tdb)
 /* Add a track's label to one of the lists we report back. */
@@ -1500,127 +1213,71 @@ if (into->stringSize > 0)
 dyStringAppend(into, isEmpty(tdb->shortLabel) ? tdb->track : tdb->shortLabel);
 }
 
-static struct dyString *pgEmitTree(struct trackDb *tdb, char *srcDb, char *chainRel,
-                                   struct hash *written, struct hash *children,
-                                   struct dyString *shown, struct dyString *skipped,
-                                   int *pPriority, boolean isChild, boolean report,
-                                   char *parentName)
-/* Stanzas for this track and everything selected underneath it, or NULL if it
- * carries nothing.
- *
- * Containers are kept, not flattened.  Emitting only the leaves loses a
- * composite whose children are not individually selected in this session -
- * NCBI RefSeq and CHM13 unique both went missing that way - and it loses the
- * grouping the user is used to on the source.  quickLift's dumpTdbAndChildren()
- * writes the container and recurses; so do we.
- *
- * The stanzas are built up in memory rather than written straight out because a
- * container is only worth writing once we know something came back from below
- * it: a stanza for an empty composite is a track the browser draws as a broken
- * heading. */
+
+static void pgNoteLabel(struct dyString *into, char *label)
+/* Add one label to a list we report back. */
 {
-char *bare = trackHubSkipHubName(tdb->track);
-/* Compare undecorated: an assembly served from a hub offers the same track
- * both natively and as hub_<id>_<track>, and those are one track to the user. */
-if (hashLookup(written, bare) != NULL)
-    return NULL;
+if (into == NULL || isEmpty(label))
+    return;
+if (into->stringSize > 0)
+    dyStringAppend(into, ", ");
+dyStringAppend(into, label);
+}
 
-if (pgIsContainer(tdb))
-    {
-    /* Only a top-level container answers for its own visibility.  A view has
-     * none of its own - it is a heading inside a composite - so testing it
-     * threw away every leaf under T2T Encode's four views.  For anything below
-     * the top the container loop has already applied the right test, either
-     * subtrack selection or, under a superTrack, visibility. */
-    if (!isChild && !pgVisibleInCart(tdb))
-        return NULL;
-    hashAdd(written, bare, NULL);
-    /* A superTrack is only a heading: its members each stand on their own in
-     * the browser's track list, so they are what we report, and each keeps its
-     * own visibility.  A composite is the opposite - it is the track the user
-     * turned on, and its subtracks are its parts. */
-    boolean isSuper = pgIsSuperTrack(tdb);
-    struct dyString *kids = dyStringNew(0);
-    /* Children reach us two ways: nested under subtracks when the list came
-     * built as a tree, and as their own top-level entries with a "parent"
-     * setting when it did not. */
-    struct slRef *refs = NULL, *ref;
-    struct hashEl *hel;
-    for (hel = hashLookup(children, tdb->track); hel != NULL; hel = hashLookupNext(hel))
-        refAdd(&refs, hel->val);
-    struct trackDb *child;
-    for (child = tdb->subtracks; child != NULL; child = child->next)
-        refAdd(&refs, child);
-    slReverse(&refs);
-    for (ref = refs; ref != NULL; ref = ref->next)
-        {
-        child = ref->val;
-        if (isSuper ? !pgVisibleInCart(child) : !pgSubtrackOn(child))
-            continue;
-        struct dyString *sub = pgEmitTree(child, srcDb, chainRel, written, children,
-                                          shown, skipped, pPriority, TRUE,
-                                          report && isSuper, bare);
-        if (sub != NULL)
-            {
-            dyStringAppend(kids, sub->string);
-            dyStringFree(&sub);
-            }
-        }
-    slFreeList(&refs);
-    if (kids->stringSize == 0)
-        {
-        /* Showing on the source, nothing to show on the target.  Say so rather
-         * than letting it disappear: a track the user can see on the source and
-         * cannot find afterwards needs an explanation.  That holds for a
-         * superTrack too.  Normally its members are what we report, each on its
-         * own, but when not one of them came across there is nothing else left
-         * to speak for it. */
-        dyStringFree(&kids);
-        if (report)
-            pgNote(skipped, tdb);
-        return NULL;
-        }
-    struct dyString *dy = dyStringNew(0);
-    pgWriteTrackStanza(dy, tdb, srcDb, chainRel, (*pPriority)++, isChild, parentName);
-    dyStringAppend(dy, kids->string);
-    dyStringFree(&kids);
-    if (report && !isSuper)
-        pgNote(shown, tdb);
-    return dy;
-    }
-
-hashAdd(written, bare, NULL);
-/* Type is the only filter on a leaf: whatever quickLift will draw, we offer. */
-if (!pgLiftableTdb(srcDb, tdb))
-    {
-    if (report)
-        pgNote(skipped, tdb);
-    return NULL;
-    }
-struct dyString *dy = dyStringNew(0);
-pgWriteTrackStanza(dy, tdb, srcDb, chainRel, (*pPriority)++, isChild, parentName);
-if (report)
-    pgNote(shown, tdb);
-return dy;
+static void pgCloseStanza(FILE *f, char *chainRel, char *srcDb)
+/* Finish a track stanza with the settings that say this track is being lifted.
+ * "quickLifted" also relaxes the hub reader's type check, which is what lets a
+ * plain genePred through. */
+{
+fprintf(f, "quickLifted on\n");
+fprintf(f, "avoidHandler on\n");
+fprintf(f, "quickLiftUrl %s\n", chainRel);
+fprintf(f, "quickLiftDb %s\n", srcDb);
 }
 
 static char *pgWriteQuickLiftHub(char *srcDb, char *srcHap, char *tgtDb, char *chainBb,
                                  struct dyString *shown, struct dyString *skipped)
-/* Write a hub that offers the source's gene annotations to the destination
- * assembly, and return its path.
+/* Write a hub that offers the source's annotations to the destination assembly,
+ * and return its path.
  *
- * hgConvert gets here differently: it registers the chain in hgcentral and
- * passes quickLift.<hubId>.<toDb>=<chainId>, which makes hubConnect rename the
- * hub's genome and stamp quickLiftUrl/quickLiftDb onto every stanza at attach
- * time.  A chain that exists only for this one request cannot be registered
- * that way, so the hub names the destination genome itself and carries those
- * settings in the file.  What hgTracks ends up with is the same.
+ * Which tracks come across, and what each stanza says, is trackHubBuild()'s
+ * answer rather than ours.  That is the same function quickLift calls from
+ * hgConvert, so whatever the browser decides to carry, we carry, and a change
+ * to how it decides reaches these tools without anyone editing this file.  We
+ * used to work it out ourselves, in about four hundred lines, and every one of
+ * the four bugs that came out of that was a rule about track visibility the
+ * browser already knew.
+ *
+ * What is left here is the one part trackHubBuild cannot do for us.  hgConvert
+ * registers its chain in hgcentral and lets hubConnect rename the hub's genome
+ * and stamp quickLiftUrl/quickLiftDb onto each stanza when the hub is attached.
+ * A chain built for a single request cannot be registered that way, so we take
+ * the file trackHubBuild wrote, name the destination genome ourselves, and put
+ * those settings into each stanza as we copy it.  What hgTracks ends up with is
+ * the same either way.
  *
  * The cart's "db" must already be the source assembly. */
 {
-struct trackDb *tdbList = NULL, *tdb;
-struct grp *grpList = NULL;
-cartTrackDbInit(cart, &tdbList, &grpList, FALSE);
+struct trackDb *badList = NULL;
+char *built = NULL;
+struct errCatch *errCatch = errCatchNew();
+if (errCatchStart(errCatch))
+    built = trackHubBuild(srcDb, cart, &badList);
+errCatchEnd(errCatch);
+if (errCatch->gotError || isEmpty(built))
+    {
+    fprintf(stderr, "hgPangenome: trackHubBuild(%s) failed: %s\n", srcDb,
+            errCatch->gotError ? trimSpaces(errCatch->message->string) : "no hub written");
+    errCatchFree(&errCatch);
+    return NULL;
+    }
+errCatchFree(&errCatch);
+
+/* The tracks the browser refused, in its own words, so a track the user can
+ * see on the source and cannot find afterwards still gets an explanation. */
+struct trackDb *bad;
+for (bad = badList; bad != NULL; bad = bad->next)
+    pgNote(skipped, bad);
 
 char *hubPath = pgHubName(trackHubSkipHubName(srcDb), tgtDb);
 /* Write to one side and rename into place.  The wider chain is fetched while
@@ -1639,8 +1296,6 @@ chmod(hubTmp, 0666);
 char *chainRel = strrchr(chainBb, '/');
 chainRel = (chainRel == NULL) ? chainBb : chainRel + 1;
 
-/* The label is what puts these tracks in their own green group on the target:
- * grpFromHub() keys off a hub shortLabel beginning "Quick". */
 /* The label is what the user reads.  Name the haplotype they converted from -
  * that is how they think of the source - rather than the accession, let alone
  * the hub_<id>_ form the browser knows an attached GenArk hub by. */
@@ -1656,71 +1311,65 @@ fprintf(f, "longLabel Annotations translated from %s through the pangenome\n",
         srcLabel);
 fprintf(f, "useOneFile on\n");
 fprintf(f, "email genome-www@soe.ucsc.edu\n\n");
+/* The destination, where trackHubBuild named the source: its caller renames
+ * the genome at attach time and we have no attach-time hook to do it in. */
 fprintf(f, "genome %s\n", tgtDb);
 
-/* The same track can reach us more than once - the hubs are loaded again when
- * we attach the assemblies, and the track list grows a second copy - and a
- * repeated stanza would be a repeated track in the browser. */
-struct hash *written = hashNew(8);
-/* Name index, so a subtrack can find the container it belongs to and a
- * container the subtracks that belong to it.  Containers have to be gathered
- * by walking tdb->parent as well as by reading the list: a superTrack's members
- * are hoisted to the top of the list and the superTrack itself never appears
- * there, so looking only at list members loses it and treats every member as a
- * track of its own. */
-struct hash *byName = hashNew(12);
-struct hash *children = hashNew(12);
-struct trackDb *ix, *up;
-for (ix = tdbList; ix != NULL; ix = ix->next)
-    for (up = ix; up != NULL; up = up->parent)
-        if (hashLookup(byName, up->track) == NULL)
-            hashAdd(byName, up->track, up);
-for (ix = tdbList; ix != NULL; ix = ix->next)
+/* Copy the stanzas across.  A hub stanza runs from its "track" line to the
+ * next blank line.  Each is held until its end so we can see the whole of it
+ * before writing: whether it is a top-level track decides if the user is told
+ * about it, and that is settled by a "parent" line which may come anywhere. */
+struct lineFile *lf = lineFileOpen(built, TRUE);
+struct dyString *stanza = dyStringNew(512);
+char label[256];
+boolean inTrack = FALSE, isChild = FALSE;
+char *line;
+label[0] = '\0';
+while (lineFileNext(lf, &line, NULL))
     {
-    char *parent = pgParentName(ix);
-    if (parent != NULL && hashLookup(byName, parent) != NULL)
-        hashAdd(children, parent, ix);
-    }
-int priority = 10;
-for (tdb = tdbList; tdb != NULL; tdb = tdb->next)
-    {
-    /* Carry across what the user is actually looking at on the source - the
-     * set the browser lists as "Visible Tracks".  No group filter: quickLift
-     * carries whatever is showing, and so do we.  Filtering by group as well
-     * dropped tracks that were plainly on whenever they were on by trackDb
-     * default rather than by a click, which is not a distinction the user
-     * makes or sees. */
-    if (!pgVisibleInCart(tdb))
-        continue;
-    /* The ideogram describes the source's own chromosomes, so it means nothing
-     * on the target.  trackHub.c's validateOneTdb() leaves it out for the same
-     * reason. */
-    if (sameString(trackHubSkipHubName(tdb->track), "cytoBandIdeo"))
-        continue;
-    /* Start from the top of whatever this track hangs off, so the container
-     * comes out above its children rather than the children standing alone. */
-    struct trackDb *root = tdb;
-    int depth = 0;
-    while (depth++ < 10)
+    char *trimmed = skipLeadingSpaces(line);
+    boolean starts = startsWith("track ", trimmed);
+    if (starts || (inTrack && isEmpty(trimmed)))
         {
-        struct trackDb *above = root->parent;
-        if (above == NULL)
+        if (inTrack)
             {
-            char *name = pgParentName(root);
-            above = (name == NULL) ? NULL : hashFindVal(byName, name);
+            fprintf(f, "\n%s", stanza->string);
+            pgCloseStanza(f, chainRel, srcDb);
+            /* Subtracks are the parts of a track, not tracks the user chose;
+             * naming every one of them turns the report into a wall of text. */
+            if (!isChild)
+                pgNoteLabel(shown, label);
             }
-        if (above == NULL)
-            break;
-        root = above;
+        dyStringClear(stanza);
+        label[0] = '\0';
+        isChild = FALSE;
+        inTrack = starts;
+        if (starts)
+            dyStringPrintf(stanza, "%s\n", trimmed);
+        continue;
         }
-    struct dyString *dy = pgEmitTree(root, srcDb, chainRel, written, children,
-                                     shown, skipped, &priority, FALSE, TRUE, NULL);
-    if (dy != NULL)
-        {
-        fputs(dy->string, f);
-        dyStringFree(&dy);
-        }
+    if (!inTrack)
+        continue;                       /* trackHubBuild's own header and genome */
+    /* Every hub track is put in one group by trackHubAddGroupName anyway, so
+     * the source's group would only be noise. */
+    if (startsWith("group ", trimmed))
+        continue;
+    if (startsWith("parent ", trimmed) || startsWith("subTrack ", trimmed))
+        isChild = TRUE;
+    if (startsWith("shortLabel ", trimmed))
+        safef(label, sizeof(label), "%s",
+              skipLeadingSpaces(trimmed + strlen("shortLabel")));
+    dyStringPrintf(stanza, "%s\n", trimmed);
     }
+if (inTrack)
+    {
+    fprintf(f, "\n%s", stanza->string);
+    pgCloseStanza(f, chainRel, srcDb);
+    if (!isChild)
+        pgNoteLabel(shown, label);
+    }
+dyStringFree(&stanza);
+lineFileClose(&lf);
 
 /* The track that draws the insertion, deletion and mismatch marks.  Same
  * stanza hubConnect.c synthesizes for a registered quickLift chain. */
