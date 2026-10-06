@@ -36,26 +36,11 @@ function pgrSurjectCount() {
     return (typeof pangenomeSurjectTop === "number") ? pangenomeSurjectTop : 10;
 }
 
-function pgrMinIdentity() {
-    return (typeof pangenomeMinIdentity === "number") ? pangenomeMinIdentity : 90;
-}
 
 function pgrMinCoverage() {
     return (typeof pangenomeMinCoverage === "number") ? pangenomeMinCoverage : 50;
 }
 
-function pgrMinRows() {
-    return (typeof pangenomeMinRows === "number") ? pangenomeMinRows : 10;
-}
-
-// Which haplotypes get a row.  Everything at or above the identity floor, since
-// the tail of the graded list is incidental repeat matching rather than a place
-// the sequence is - but never fewer than pgrMinRows().  A query that matches
-// nothing well should still come back with the best few to look at, not an
-// empty table.  Exact carriers are always kept: they follow every node of the
-// sequence, whatever identity the grader put on them.
-//
-// Takes the list already sorted by identity, so topping up takes the best.
 // The figure to rank and show a row by: the surjection's where we have one,
 // the graded list's otherwise.
 function pgrIdentityOf(row) {
@@ -75,24 +60,6 @@ function pgrByIdentity(a, b) {
     return cb - ca;
 }
 
-function pgrSelectRows(sorted) {
-    var floor = pgrMinIdentity();
-    var kept = [], keptSet = [];
-    sorted.forEach(function (r) {
-        if (r.isCarrier || r.listIdentity == null || r.listIdentity >= floor) {
-            kept.push(r);
-            keptSet.push(r);
-        }
-    });
-    if (kept.length >= pgrMinRows()) { return kept; }
-    sorted.forEach(function (r) {
-        if (kept.length >= pgrMinRows()) { return; }
-        if (keptSet.indexOf(r) < 0) { kept.push(r); keptSet.push(r); }
-    });
-    // Topping up appended out of order; put it back in identity order.
-    kept.sort(function (a, b) { return sorted.indexOf(a) - sorted.indexOf(b); });
-    return kept;
-}
 
 // ---- small helpers ---------------------------------------------------------
 
@@ -228,74 +195,70 @@ function pgrPool(thunks, width) {
 
 // ---- row assembly ----------------------------------------------------------
 
-// One row per (query sequence, placement, haplotype) - every haplotype the
-// graph scored against this placement, not just the ones that carry it
-// exactly.  The graded list is the interesting one: an exact carrier visits
-// every node of the read and so has nothing to sort by, while a haplotype that
-// differs at one variant is absent from the carrier list but sits near the top
-// here.  Carriers are flagged rather than being the only rows.
-function pgrBuildRows(results) {
-    var rows = [];
-    (results || []).forEach(function (res) {
-        (res.alignments || []).forEach(function (aln, index) {
-            var carriers = Object.create(null);
-            ((aln.haplotypes && aln.haplotypes.names) || []).forEach(function (n) {
-                carriers[pgrHapKey(n)] = n;
-            });
-            var representative = aln.haplotypes && aln.haplotypes.representative;
-            var repKey = representative ? pgrHapKey(representative) : null;
-            var seen = Object.create(null);
-
-            function add(hapName, cov) {
-                var key = pgrHapKey(hapName);
-                if (seen[key]) { return; }
-                seen[key] = true;
-                rows.push({
-                    query: res.name,
-                    queryLength: res.query_length,
-                    placement: index,
-                    placements: (res.alignments || []).length,
-                    hap: pgrHapShort(hapName),
-                    db: pgrAssembly(hapName),
-                    isCarrier: !!carriers[key],
-                    isRepresentative: key === repKey,
-                    isReference: !!(aln.haplotypes &&
-                                    aln.haplotypes.representative_is_reference) &&
-                                 key === repKey,
-                    placementScore: aln.score,
-                    mapq: aln.mapping_quality,
-                    coverage: pgrPct(cov && cov.coverage),
-                    coveredBp: (cov && cov.covered_bp != null) ? cov.covered_bp : null,
-                    listIdentity: pgrPct(cov && cov.identity),
-                    matchedBp: (cov && cov.matched_bp != null) ? cov.matched_bp : null
-                });
-            }
-
-            (aln.haplotype_coverage || []).forEach(function (c) { add(c.haplotype, c); });
-            // A carrier the graded list never mentioned still belongs here.
-            Object.keys(carriers).forEach(function (k) { add(carriers[k], null); });
-
-            // The mapping already surjected against the representative, so that
-            // one row is placed without asking for anything.
-            if (aln.surjection && repKey) {
-                rows.forEach(function (r) {
-                    if (r.placement === index && r.query === res.name &&
-                        pgrHapKey(r.hap) === repKey) {
-                        pgrApplySurjection(r, { surjection: aln.surjection });
-                    }
-                });
-            }
-        });
+// One row per record that surject_all returned, for one placement of one
+// query sequence.
+//
+// The rows used to be built from the mapping's graded haplotype list and then
+// filtered - an identity floor, a minimum row count - because placing a row
+// cost a request and only a handful could be afforded.  The batch call removed
+// that constraint: it selects the best max_targets by coverage itself and
+// returns each one fully described, so the table is simply what it gave back.
+function pgrRowsFromBatch(res, aln, index, placements, batch) {
+    var carriers = Object.create(null);
+    ((aln.haplotypes && aln.haplotypes.names) || []).forEach(function (n) {
+        carriers[pgrHapKey(n)] = true;
     });
-    return rows;
+    var representative = aln.haplotypes && aln.haplotypes.representative;
+    var repKey = representative ? pgrHapKey(representative) : null;
+
+    return (batch.haplotypes || []).map(function (rec) {
+        var key = pgrHapKey(rec.requested);
+        var row = {
+            query: res.name,
+            queryLength: res.query_length,
+            placement: index,
+            placements: placements,
+            hap: pgrHapShort(rec.requested),
+            db: pgrAssembly(rec.requested),
+            isCarrier: !!carriers[key],
+            isRepresentative: key === repKey,
+            isReference: !!(aln.haplotypes &&
+                            aln.haplotypes.representative_is_reference) &&
+                         key === repKey,
+            placementScore: aln.score,
+            mapq: aln.mapping_quality
+        };
+        pgrApplyRecord(row, rec);
+        return row;
+    });
 }
 
-// Fill in coordinates.  There can be several hundred rows, and a surjection
-// costs about 13ms at this concurrency, so waiting for all of them before
-// showing anything would mean several blank seconds.  The table is drawn first
-// from the graded list, which already carries coverage and identity, and the
-// positions arrive into it afterwards - best match first, so the rows a user
-// is actually going to click are filled in within the first moment.
+// When the batch call fails there is still the graded list, which the mapping
+// carried all along.  Those rows have no position, but a table of haplotypes
+// with their identity and coverage is better than an error.
+function pgrRowsFromMapping(res, aln, index, placements) {
+    var representative = aln.haplotypes && aln.haplotypes.representative;
+    var repKey = representative ? pgrHapKey(representative) : null;
+    return (aln.haplotype_coverage || []).map(function (c) {
+        return {
+            query: res.name,
+            queryLength: res.query_length,
+            placement: index,
+            placements: placements,
+            hap: pgrHapShort(c.haplotype),
+            db: pgrAssembly(c.haplotype),
+            isCarrier: false,
+            isRepresentative: pgrHapKey(c.haplotype) === repKey,
+            isReference: false,
+            placementScore: aln.score,
+            mapq: aln.mapping_quality,
+            coverage: pgrPct(c.coverage),
+            listIdentity: pgrPct(c.identity)
+        };
+    });
+}
+
+
 // One record from surject_all onto its row.
 //
 // The record carries both identities and the server's own coverage, so nothing
@@ -355,32 +318,15 @@ function pgrApplySurjection(row, resp) {
     row.identity = s.identity == null ? null : s.identity * 100;
 }
 
-// Records are keyed by "requested", the haplotype name as it was asked for,
-// which is the name the rows carry.  "haplotype" is the fragment it landed on
-// and is for coordinates only.
+// Records are keyed by "requested", the haplotype name as it was asked for.
+// "haplotype" is the fragment it landed on and is for coordinates only.
 var pgrTruncated = 0;
-
-function pgrApplyBatch(rows, job, batch) {
-    if (!batch || !batch.haplotypes) { return; }
-    if (batch.truncated) {
-        pgrTruncated = Math.max(pgrTruncated, batch.candidates || 0);
-    }
-    var byHap = Object.create(null);
-    batch.haplotypes.forEach(function (rec) {
-        if (rec && rec.requested) { byHap[pgrHapKey(rec.requested)] = rec; }
-    });
-    rows.forEach(function (row) {
-        if (row.query !== job.name || row.placement !== job.index) { return; }
-        var rec = byHap[pgrHapKey(row.hap)];
-        if (rec) { pgrApplyRecord(row, rec); }
-    });
-}
 
 function pgrTruncNote() {
     if (!pgrTruncated) { return null; }
-    return "More haplotypes carry this sequence than were placed (" +
-           pgrFmt(pgrTruncated) + " in all). The rest are listed with their " +
-           "identity and coverage, but without a position.";
+    return "This is the best " + pgrFmt(pgrSurjectCount()) + " of " +
+           pgrFmt(pgrTruncated) + " haplotypes that carry the sequence, by " +
+           "coverage.";
 }
 
 
@@ -575,13 +521,14 @@ function pgrCacheRead(job) {
     } catch (e) { return null; }
 }
 
-function pgrCacheWrite(job, results, rows) {
+function pgrCacheWrite(job, results, rows, note) {
     try {
         window.sessionStorage.setItem(pgrCacheKey(job), JSON.stringify({
             // Only what the table is drawn from.  The mapping response itself is
             // far larger and nothing here reads it again.
             rows: rows,
-            queries: (results || []).length
+            queries: (results || []).length,
+            note: note || null
         }));
     } catch (e) { /* no memory to spare; the page will just rebuild it */ }
 }
@@ -602,11 +549,14 @@ function pgrDraw(queries, rows, note) {
     var placed = rows.filter(function (r) { return r.contig != null; }).length;
 
     var html = "<H2>Pangenome Mapping Results</H2>\n";
-    html += "<P>Your sequence was found in " + rows.length + " haplotype" +
-            (rows.length === 1 ? "" : "s") + ", listed by identity. " +
-            "The best " + placed + " have been placed on their assembly; the rest " +
-            "show how well they match. " +
-            "<A HREF=\"" + pgrSelf + "\">New search</A>.</P>\n";
+    html += "<P>Your sequence was placed on " + rows.length + " haplotype" +
+            (rows.length === 1 ? "" : "s") + ", listed by identity.";
+    if (placed < rows.length) {
+        // Only when the batch call failed and the graded list stood in for it.
+        html += " " + pgrFmt(rows.length - placed) + " could not be placed, and " +
+                "show only how well they match.";
+    }
+    html += " <A HREF=\"" + pgrSelf + "\">New search</A>.</P>\n";
     if (note) { html += "<P>" + note + "</P>\n"; }
     html += pgrTableHtml(rows, { multiQuery: multiQuery, multiPlace: multiPlace });
     // The "?" is meaningless without this, and it is on every row of a query
@@ -642,7 +592,7 @@ function pgrStart() {
     var cached = pgrCacheRead(job);
     if (cached) {
         pgrRows = cached.rows;
-        pgrDraw(cached.queries, cached.rows, null);
+        pgrDraw(cached.queries, cached.rows, cached.note || null);
         return;
     }
     el.innerHTML = "<P>Loading results&#8230;</P>";
@@ -657,48 +607,59 @@ function pgrStart() {
                 '<A HREF="">Reload</A> in a moment.</P>';
             return null;
         }
-        var rows = pgrBuildRows(resp.results);
-        if (!rows.length) {
+        // One batch call per placement of per sequence.  Each returns the
+        // haplotypes it carries, best coverage first, already surjected - so
+        // the rows are built from what comes back rather than from the graded
+        // list and then whittled down.
+        var jobs = [];
+        (resp.results || []).forEach(function (res) {
+            (res.alignments || []).forEach(function (aln, index) {
+                jobs.push({ res: res, aln: aln, index: index,
+                            placements: (res.alignments || []).length });
+            });
+        });
+        if (!jobs.length) {
             el.innerHTML = "<P>This sequence was not found in any haplotype. " +
                 '<A HREF="' + pgrSelf + '">New search</A>.</P>';
             return null;
         }
-        // Identity first: it is what the user is choosing on, and with the whole
-        // panel in the table an unsorted list buries the useful rows.  Carriers
-        // break a tie, since they match every node rather than merely scoring
-        // the same.
-        rows.sort(pgrByIdentity);
-        rows = pgrSelectRows(rows);
-        rows.forEach(function (r, i) { r.rank = i; });
-        pgrRows = rows;
-
-        // Place them before drawing anything.  One call per placement now
-        // does every haplotype that carries the read: the service anchors once
-        // and surjects in parallel, so fifty cost about what one used to,
-        // where asking one at a time cost a request per row.
-        var jobs = [];
-        (resp.results || []).forEach(function (res) {
-            (res.alignments || []).forEach(function (aln, index) {
-                jobs.push({ name: res.name, index: index });
-            });
-        });
         return pgrPool(jobs.map(function (j) {
             return function () {
-                return pgrSurjectAll(j.name, j.index, pgrSurjectCount(),
+                return pgrSurjectAll(j.res.name, j.index, pgrSurjectCount(),
                                      pgrMinCoverage())
-                    .then(function (batch) { pgrApplyBatch(rows, j, batch); })
-                    .catch(function () { /* rows simply stay unplaced */ });
+                    .then(function (batch) {
+                        if (batch && batch.haplotypes) {
+                            j.rows = pgrRowsFromBatch(j.res, j.aln, j.index,
+                                                      j.placements, batch);
+                            if (batch.truncated) {
+                                pgrTruncated = Math.max(pgrTruncated,
+                                                        batch.candidates || 0);
+                            }
+                        } else {
+                            j.rows = pgrRowsFromMapping(j.res, j.aln, j.index,
+                                                        j.placements);
+                        }
+                    })
+                    .catch(function () {
+                        j.rows = pgrRowsFromMapping(j.res, j.aln, j.index,
+                                                    j.placements);
+                    });
             };
         }), 3).then(function () {
-            // Re-sort now that the placed rows carry the surjected identity,
-            // which is the figure the table is ordered on.
+            var rows = [];
+            jobs.forEach(function (j) { rows = rows.concat(j.rows || []); });
+            if (!rows.length) {
+                el.innerHTML = "<P>This sequence was not found in any haplotype. " +
+                    '<A HREF="' + pgrSelf + '">New search</A>.</P>';
+                return;
+            }
             rows.sort(pgrByIdentity);
             rows.forEach(function (r, i) { r.rank = i; });
             pgrRows = rows;
-            pgrCacheWrite(job, resp.results, rows);
-            pgrDraw((resp.results || []).length, rows, pgrTruncNote());
+            var note = pgrTruncNote();
+            pgrCacheWrite(job, resp.results, rows, note);
+            pgrDraw((resp.results || []).length, rows, note);
         });
-
     }).catch(function (err) {
         // A job that has aged out of the server's cache is the common case, and
         // not a failure worth an alarming message.
@@ -708,6 +669,7 @@ function pgrStart() {
             '">Run the search again</A>.</P>';
     });
 }
+
 
 if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", pgrStart);

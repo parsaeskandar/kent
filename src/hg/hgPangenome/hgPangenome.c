@@ -2670,24 +2670,19 @@ if (sameOk(cgiOptionalString("page"), "results"))
     injectConfig();
     jsInlineF("var pangenomeJobId = '%s';\n",
               jsonStringEscape(cgiUsualString("job_id", "")));
-    /* Haplotypes below this identity are not worth a row: the graded list runs
-     * to the whole panel, and most of its tail is incidental repeat matching. */
-    jsInlineF("var pangenomeMinIdentity = %s;\n",
-              cfgOr("pangenome.resultsMinIdentity", "90"));
-    /* ...but never fewer rows than this, so a sequence that matches nothing
-     * well still comes back with the best few rather than an empty table. */
-    jsInlineF("var pangenomeMinRows = %s;\n",
-              cfgOr("pangenome.resultsMinRows", "10"));
+
     /* How many haplotypes the batch surjection places.  Everything else in the
      * table comes free with the mapping; these come in one request, so this can
      * be far larger than it was when each position cost a request of its own. */
     jsInlineF("var pangenomeSurjectTop = %s;\n",
               cfgOr("pangenome.resultsSurjectTop", "50"));
-    /* Coverage floor for the batch surjection, which is what the service
-     * selects its targets on - distinct from resultsMinIdentity, which decides
-     * which haplotypes get a row at all. */
+    /* Coverage floor for the batch surjection.  Left at zero: the service
+     * returns its targets best coverage first and stops at max_targets, so the
+     * floor only decides what is eligible, and a default of 50 quietly threw
+     * away every partial match - a read whose best other haplotype covers 42%
+     * came back with one row. */
     jsInlineF("var pangenomeMinCoverage = %s;\n",
-              cfgOr("pangenome.resultsMinCoverage", "50"));
+              cfgOr("pangenome.resultsMinCoverage", "0"));
     jsIncludeFile("hgPangenomeAssemblies.js", NULL);
     jsIncludeFile("hgPangenomeResults.js", NULL);
     cartWebEnd();
