@@ -146,6 +146,7 @@
 #include "chromAlias.h"
 #include "twoBit.h"
 #include "quickLift.h"
+#include "psl.h"
 #include "chain.h"
 #include "bigChain.h"
 #include "bigLink.h"
@@ -1245,10 +1246,18 @@ if (name == NULL)
 return name;
 }
 
-static void pgForgetStaleHubs(char *keepHubFile)
-/* Disconnect any pangenome quickLift hub this cart still holds other than the
- * one we are about to use.  Carts built before the name was reused can carry a
- * dozen of them, all pointing at swept files. */
+static void pgForgetStaleHubs(char *keepHubFile, boolean missingOnly)
+/* Disconnect pangenome quickLift hubs this cart is still holding.
+ *
+ * Two callers, two meanings.  Building a new lift passes the hub it is about to
+ * use and missingOnly=FALSE: everything else goes, which is how a cart built
+ * before the name was reused stops carrying a dozen of them.  A page load
+ * passes missingOnly=TRUE, which drops only hubs whose file is gone - trash is
+ * swept in about an hour, and the cart entry outlives it, so hgTracks goes on
+ * trying to open a dead path and draws a red "Couldn't open ..." group on every
+ * page until something takes the entry away.  Nothing did, because this only
+ * ran when a new lift was built - the one moment a user is not looking at the
+ * error. */
 {
 struct sqlConnection *conn = hConnectCentral();
 struct slPair *var, *vars = cartVarsWithPrefix(cart, hgHubConnectHubVarPrefix);
@@ -1260,8 +1269,17 @@ for (var = vars; var != NULL; var = var->next)
     char *url = sqlQuickString(conn, query);
     if (url == NULL)
         continue;
+    boolean gone = FALSE;
+    if (missingOnly)
+        {
+        int fd = open(url, O_RDONLY);
+        if (fd < 0)
+            gone = TRUE;
+        else
+            close(fd);
+        }
     if (strstr(url, "/pangenomeQuickLift/") != NULL &&
-        !sameOk(url, keepHubFile))
+        (missingOnly ? gone : !sameOk(url, keepHubFile)))
         {
         char prefix[256];
         cartRemove(cart, var->name);
@@ -2099,7 +2117,7 @@ unsigned hubId = 0;
 errCatch = errCatchNew();
 if (errCatchStart(errCatch))
     {
-    pgForgetStaleHubs(hubFile);
+    pgForgetStaleHubs(hubFile, FALSE);
     hubId = hubFindOrAddUrlInStatusTable(cart, hubFile, &hubErr);
     }
 errCatchEnd(errCatch);
@@ -2188,17 +2206,31 @@ static boolean pgWritePsl(char *path, char *qName, int qSize, char *cigar,
                           char *tName, int tSize, int tStart, char strand,
                           int qStart, int *retTEnd, char **retError)
 /* One PSL line for the alignment.  M/=/X advance both sides, I the query, D/N
- * the target - the same expansion a CIGAR gets anywhere else. */
+ * the target - the same expansion a CIGAR gets anywhere else.
+ *
+ * Expanding the CIGAR is ours; the record itself is kent's.  We fill in a
+ * struct psl and let pslTabOut() write it, rather than printing twenty-one
+ * tab-separated fields in an order we had to get right by hand. */
 {
 static char msg[256];
-struct dyString *sizes = dyStringNew(256);
-struct dyString *qStarts = dyStringNew(256);
-struct dyString *tStarts = dyStringNew(256);
 int q = qStart, t = tStart;
 int blocks = 0, aligned = 0;
 int qNumIns = 0, qBaseIns = 0, tNumIns = 0, tBaseIns = 0;
-char *p = cigar;
 
+/* Two passes: one to count the blocks so the arrays can be sized, one to fill
+ * them.  A CIGAR cannot have more blocks than it has operations. */
+int maxBlocks = 1;
+char *c;
+for (c = cigar; c != NULL && *c != '\0'; ++c)
+    if (!isdigit((unsigned char)*c))
+        ++maxBlocks;
+
+unsigned *blockSizes, *qStarts, *tStarts;
+AllocArray(blockSizes, maxBlocks);
+AllocArray(qStarts, maxBlocks);
+AllocArray(tStarts, maxBlocks);
+
+char *p = cigar;
 while (p != NULL && *p != '\0')
     {
     char *end;
@@ -2209,10 +2241,13 @@ while (p != NULL && *p != '\0')
     p = end + 1;
     if (op == 'M' || op == '=' || op == 'X')
         {
-        dyStringPrintf(sizes, "%ld,", n);
-        dyStringPrintf(qStarts, "%d,", q);
-        dyStringPrintf(tStarts, "%d,", t);
-        ++blocks;
+        if (blocks < maxBlocks)
+            {
+            blockSizes[blocks] = n;
+            qStarts[blocks] = q;
+            tStarts[blocks] = t;
+            ++blocks;
+            }
         aligned += n;
         q += n;
         t += n;
@@ -2229,22 +2264,40 @@ if (blocks == 0)
     {
     safef(msg, sizeof(msg), "the alignment has no aligned blocks to draw");
     *retError = msg;
-    dyStringFree(&sizes); dyStringFree(&qStarts); dyStringFree(&tStarts);
+    freeMem(blockSizes); freeMem(qStarts); freeMem(tStarts);
     return FALSE;
     }
 
+struct psl psl;
+ZeroVar(&psl);
+/* match is the aligned length: the mapping server does not tell us how many of
+ * those bases actually agree.  It only affects the numbers on the details page
+ * - the per-base mismatch colouring is done by hgTracks itself, from the FASTA
+ * against the assembly, so what is drawn is right either way. */
+psl.match = aligned;
+psl.qNumInsert = qNumIns;
+psl.qBaseInsert = qBaseIns;
+psl.tNumInsert = tNumIns;
+psl.tBaseInsert = tBaseIns;
+psl.strand[0] = strand;
+psl.qName = qName;
+psl.qSize = qSize;
+psl.qStart = qStart;
+psl.qEnd = q;
+psl.tName = tName;
+psl.tSize = tSize;
+psl.tStart = tStart;
+psl.tEnd = t;
+psl.blockCount = blocks;
+psl.blockSizes = blockSizes;
+psl.qStarts = qStarts;
+psl.tStarts = tStarts;
+
 FILE *f = mustOpen(path, "w");
-/* matches is the aligned length: the mapping server does not tell us how many
- * of those bases actually agree.  It only affects the numbers on the details
- * page - the per-base mismatch colouring is done by hgTracks itself, from the
- * FASTA against the assembly, so what is drawn is right either way. */
-fprintf(f, "%d\t0\t0\t0\t%d\t%d\t%d\t%d\t%c\t%s\t%d\t%d\t%d\t%s\t%d\t%d\t%d\t%d\t%s\t%s\t%s\n",
-        aligned, qNumIns, qBaseIns, tNumIns, tBaseIns, strand,
-        qName, qSize, qStart, q,
-        tName, tSize, tStart, t,
-        blocks, sizes->string, qStarts->string, tStarts->string);
+pslTabOut(&psl, f);
 carefulClose(&f);
-dyStringFree(&sizes); dyStringFree(&qStarts); dyStringFree(&tStarts);
+
+freeMem(blockSizes); freeMem(qStarts); freeMem(tStarts);
 if (retTEnd != NULL)
     *retTEnd = t;
 return TRUE;
@@ -2646,6 +2699,11 @@ if (sameOk(cgiOptionalString("cmd"), "alignTrack"))
     doAlignTrack();
     return;
     }
+
+/* Either page is a good moment to take away hubs whose files have been swept:
+ * the user is here, and the dead entry is what puts a red error group on every
+ * hgTracks page. */
+pgForgetStaleHubs(NULL, TRUE);
 
 /* The coordinate-translation page is a separate view of this CGI. */
 if (sameOk(cgiOptionalString("page"), "convert"))
