@@ -577,7 +577,7 @@ setTimeout(function () {
     t.suite('too many targets at once');
 
     t.test('the count line states the limit and how many are selected', function () {
-        t.contains(page.el.pgcTargetCount.textContent, 'up to 3 per conversion',
+        t.contains(page.el.pgcTargetCount.textContent, 'max 3',
                    'limit visible before submitting');
         t.contains(page.el.pgcTargetCount.textContent, 'selected', 'running count');
     });
@@ -689,7 +689,7 @@ setTimeout(function () {
                         return o.textContent; });
                     t.deepEq(opts.sort(), ['CHM13', 'HG01234 hap2'],
                              'narrowed, and shown by their readable names');
-                    t.contains(reach.el.pgcTargetCount.textContent, 'contain this region',
+                    t.contains(reach.el.pgcTargetCount.textContent, 'containing this region',
                                'count explains the filter');
                 });
 

@@ -208,3 +208,12 @@
 }
 .pgcToggle input { vertical-align: middle; margin-right: 0.3em; }
 .pgcToggle.pgcBusy { opacity: 0.6; cursor: progress; }
+
+/* The line between the filter and the list says how many assemblies are shown
+ * and why.  Ticking the filter lengthens it, which rewrapped it from one line
+ * to two and pushed the list down under the cursor.  Reserve both lines so
+ * nothing below moves. */
+#pgcTargetCount {
+    line-height: 1.3;
+    min-height: 2.6em;
+}

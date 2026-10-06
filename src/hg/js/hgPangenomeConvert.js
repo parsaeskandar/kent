@@ -338,13 +338,17 @@ function fillTargets(filter) {
         o.selected = chosen.indexOf(h) >= 0;
     });
     var chosenNow = selectedTargets().length;
+    // Kept short on purpose.  This line sits between the filter and the list,
+    // and the filter lengthens it; when it grew from one line to two the list
+    // moved down under the cursor that had just ticked the box.  The stylesheet
+    // reserves two lines, and this stays inside them.
     $("pgcTargetCount").textContent = list.length + " of " + allHaplotypes.length +
         " assembl" + (allHaplotypes.length === 1 ? "y" : "ies") +
-        (reachable ? (reachableScored ? " that share this region, best first"
-                                      : " that contain this region") : "") +
+        (reachable ? (reachableScored ? " sharing this region, best first"
+                                      : " containing this region") : "") +
         (srcHap ? " (the source haplotype is excluded)" : "") +
-        "; " + chosenNow + " selected, up to " + MAX_TARGETS + " per conversion" +
-        (chosenNow > MAX_TARGETS ? " \u2014 too many, please narrow it" : "");
+        "; " + chosenNow + " selected, max " + MAX_TARGETS +
+        (chosenNow > MAX_TARGETS ? " \u2014 too many" : "");
 }
 
 // Ask the graph which haplotypes this region exists on, and narrow the picker to
