@@ -16,10 +16,21 @@
 
 /* globals $, pangenomeJobId, pangenomeConfig, pangenomeAssemblies, pangenomeAssemblyNames */
 
-var pgrCfg = (typeof pangenomeConfig === "object" && pangenomeConfig) || {};
 var pgrSelf = window.location.pathname;
-var pgrJob = (typeof pangenomeJobId === "string") ? pangenomeJobId : "";
 var pgrRows = [];
+
+// The page's two globals are written by inline <script> blocks that the CGI
+// flushes at cartWebEnd(), which is after this file's own <script src> tag.  So
+// they do not exist while this file is being evaluated - read them when they
+// are needed, never at load time.  (Reading pangenomeJobId up here is what made
+// every results link say "No job was named in this link".)
+function pgrCfg() {
+    return (typeof pangenomeConfig === "object" && pangenomeConfig) || {};
+}
+
+function pgrJobId() {
+    return (typeof pangenomeJobId === "string") ? pangenomeJobId : "";
+}
 
 // ---- small helpers ---------------------------------------------------------
 
@@ -107,7 +118,7 @@ function pgrForm(obj) {
 }
 
 function pgrSurject(tgt, name, index) {
-    var payload = { tgt: tgt, job_id: pgrJob, name: name, index: index };
+    var payload = { tgt: tgt, job_id: pgrJobId(), name: name, index: index };
     return fetch(pgrSelf, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded",
@@ -304,11 +315,12 @@ function pgrOpen(row, link) {
     var was = link ? link.textContent : null;
     if (link) { link.textContent = was + " — opening…"; }
     var payload = {
-        db: row.db, contig: row.contig, name: row.query, job_id: pgrJob,
+        db: row.db, contig: row.contig, name: row.query, job_id: pgrJobId(),
         cigar: row.cigar, start: row.start, strand: row.strand
     };
     var body = { cmd: "alignTrack", payload: JSON.stringify(payload) };
-    if (pgrCfg.hgsid) { body.hgsid = pgrCfg.hgsid; }
+    var hgsid = pgrCfg().hgsid;
+    if (hgsid) { body.hgsid = hgsid; }
     fetch(pgrSelf, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded",
@@ -438,15 +450,16 @@ function pgrRender(results, rows) {
 function pgrStart() {
     var el = document.getElementById("pgrResults");
     if (!el) { return; }
-    if (!pgrJob) {
+    var job = pgrJobId();
+    if (!job) {
         el.innerHTML = '<div class="pgrError">No job was named in this link. ' +
             '<a href="' + pgrSelf + '">Start a new search</a>.</div>';
         return;
     }
     el.innerHTML = '<div class="pgrNote">Loading results for job ' +
-                   pgrEsc(pgrJob) + "…</div>";
+                   pgrEsc(job) + "…</div>";
 
-    pgrPoll(pgrJob).then(function (resp) {
+    pgrPoll(job).then(function (resp) {
         if (!resp || resp.status === "error") {
             throw new Error((resp && resp.error) || "the mapping server returned an error");
         }
