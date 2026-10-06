@@ -410,9 +410,12 @@ setTimeout(function () {
         t.eq(page.el.pgcSrcHap.children.length, 0, 'no options to pick from');
     });
 
-    t.test('the note warns that the contig must belong to the source', function () {
-        t.contains(page.el.pgcSrcNote.textContent, "contig must be one of this haplotype's",
-                   'caveat stated');
+    t.test('the note names the assembly and nothing else', function () {
+        // The caveat about contigs went with the text box it was advice for;
+        // a position that does not fit the source is caught by contigProblem()
+        // at the moment it matters.
+        t.contains(page.el.pgcSrcNote.textContent, 'GCA_044165215.1', 'assembly named');
+        t.notOk(/must be one of/.test(page.el.pgcSrcNote.textContent), 'no caveat');
     });
 
     t.test('the source is excluded from its own target list', function () {

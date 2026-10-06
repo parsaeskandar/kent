@@ -2696,19 +2696,19 @@ printf("</td></tr>\n");
 if (quickLiftEnabled(cart))
     {
     boolean on = sameString(cfgOr("pangenome.quickLift", "off"), "on");
-    printf("<tr><td><label for='pgcQuickLift'><b>Annotations</b></label></td>\n");
-    printf("<td><label for='pgcQuickLift'>"
+    /* Worded as hgConvert words it.  The explanation that used to sit under
+     * these two is in their tooltips, where it is available without taking up
+     * the form. */
+    printf("<tr><td><b>Annotations</b></td>\n");
+    printf("<td><label for='pgcQuickLift' title='Display tracks from the "
+           "source assembly mapped onto the target assembly'>"
            "<input type='checkbox' id='pgcQuickLift' %s> "
-           "Show this assembly's gene annotations on the target</label>\n",
+           "QuickLift tracks</label>\n",
            on ? "checked" : "");
-    printf("<div class='pgMuted'>Sample assemblies carry little annotation of "
-           "their own, so the source's gene tracks are carried across the "
-           "graph and drawn at their translated positions, alongside a track "
-           "marking the insertions, deletions and mismatches between the "
-           "two.</div>\n");
-    printf("<div id='pgcHideRow'><label for='pgcHideTracks'>"
-           "<input type='checkbox' id='pgcHideTracks' checked> "
-           "Hide the target's own default tracks</label></div>\n");
+    printf("<div id='pgcHideRow'><label for='pgcHideTracks' title='Hide all of "
+           "the target assembly default tracks, showing only the QuickLifted "
+           "tracks'><input type='checkbox' id='pgcHideTracks' checked> "
+           "Hide all default tracks on the target</label></div>\n");
     /* Filled in by the page once it has asked what the source has showing.
      * Saying "nothing to carry over" here, before the Submit, is the whole
      * point: said afterwards it is a wasted conversion. */

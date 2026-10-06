@@ -539,7 +539,10 @@ function describeSource(fallback) {
     var assembly = assemblyForHap(hap);
     var parts = [];
     if (assembly && !/^https?:/.test(assembly)) parts.push("assembly " + assembly);
-    parts.push("the position's contig must be one of this haplotype's sequences");
+    // The caveat about the contig belonging to this haplotype has gone with the
+    // text box it was advice for.  The position is inherited now, and when it
+    // does not fit the source, contigProblem() says so in those terms at the
+    // moment it matters.
     if (fallbackWhy && fallback.tookPosition)
         parts.push("shown as a starting example because " + fallbackWhy);
     else if (fallbackWhy)
