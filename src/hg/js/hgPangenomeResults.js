@@ -44,6 +44,11 @@ function pgrPclaiOn() {
            (typeof pgpInit === "function");
 }
 
+// ...and only once the query has been located on GRCh38.
+function pgrPclaiReady() {
+    return pgrPclaiOn() && pgrRefLoc !== null;
+}
+
 function pgrMinCoverage() {
     return (typeof pangenomeMinCoverage === "number") ? pangenomeMinCoverage : 50;
 }
@@ -162,6 +167,29 @@ function pgrForm(obj) {
     return Object.keys(obj).map(function (k) {
         return encodeURIComponent(k) + "=" + encodeURIComponent(obj[k]);
     }).join("&");
+}
+
+// The query's own GRCh38 position.  Every haplotype's ancestry is read at one
+// locus so that hits and the reference cloud are on the same ruler, and pcLAI
+// is published in GRCh38 coordinates.  GRCh38 is in the graph but is often not
+// among the hits - it was not for any of the 50 on the query this was built
+// against - so it is asked for directly rather than looked for in the table.
+function pgrSurjectRef(name, index) {
+    var payload = {tgt: "GRCh38#0", job_id: pgrJobId(), name: name, index: index};
+    return fetch(pgrSelf, {
+        method: "POST",
+        headers: {"Content-Type": "application/x-www-form-urlencoded",
+                  Accept: "application/json"},
+        body: pgrForm({cmd: "surject", payload: JSON.stringify(payload)})
+    }).then(pgrCheck).then(function (resp) {
+        var s = resp && resp.surjection;
+        if (!s || s.status !== "ok") { return null; }
+        var tgt = pgrSplitTarget(s.target);
+        if (tgt === null) { return null; }
+        var start = tgt.offset + s.position;
+        return {chrom: tgt.contig, start: start,
+                end: start + pgrCigarSpan(s.cigar)};
+    }).catch(function () { return null; });
 }
 
 function pgrSurjectAll(name, index, maxTargets, minCoverage) {
@@ -328,6 +356,9 @@ function pgrApplySurjection(row, resp) {
 // Records are keyed by "requested", the haplotype name as it was asked for.
 // "haplotype" is the fragment it landed on and is for coordinates only.
 var pgrTruncated = 0;
+// The query's GRCh38 locus, once known.  Without it there is no common ruler
+// for the ancestry plot, so neither the plot nor its checkboxes are offered.
+var pgrRefLoc = null;
 
 function pgrTruncNote() {
     if (!pgrTruncated) { return null; }
@@ -543,7 +574,8 @@ function pgrCacheWrite(job, results, rows, note) {
             // far larger and nothing here reads it again.
             rows: rows,
             queries: (results || []).length,
-            note: note || null
+            note: note || null,
+            refLoc: pgrRefLoc
         }));
     } catch (e) { /* no memory to spare; the page will just rebuild it */ }
 }
@@ -573,14 +605,14 @@ function pgrDraw(queries, rows, note) {
     }
     html += " <A HREF=\"" + pgrSelf + "\">New search</A>.</P>\n";
     if (note) { html += "<P>" + note + "</P>\n"; }
-    if (pgrPclaiOn()) {
+    if (pgrPclaiReady()) {
         html += '<P><A HREF="#" id="pgrPclaiBtn">Show ancestry plot</A> ' +
                 '<SPAN style="color:#6b6b67">\u2014 where these haplotypes sit in ' +
                 'the pcLAI reference space. Tick a row to pick it out.</SPAN></P>\n' +
                 '<DIV id="pgrPclaiPlot" style="display:none;margin:0.5em 0"></DIV>\n';
     }
     html += pgrTableHtml(rows, { multiQuery: multiQuery, multiPlace: multiPlace,
-                                 pclai: pgrPclaiOn() });
+                                 pclai: pgrPclaiReady() });
     // Worth saying only when it applies, which on a clean query it does not.
     if (rows.some(function (r) {
             var q = (r.surjMapq == null) ? r.mapq : r.surjMapq;
@@ -593,21 +625,10 @@ function pgrDraw(queries, rows, note) {
 
     var el = document.getElementById("pgrResults");
     el.innerHTML = html;
-    if (pgrPclaiOn()) {
-        // The query's own GRCh38 locus is what every haplotype's ancestry is read
-        // at, so that hits and the reference cloud are on one ruler.  GRCh38 is in
-        // the graph and is normally among the hits; without it there is no common
-        // locus and the plot is not offered.
-        var ref = pgrRows.filter(function (r) {
-            return /^GRCh38/i.test(r.hap) && r.contig != null; })[0];
+    if (pgrPclaiReady()) {
         var haps = pgrRows.filter(function (r) { return r.contig != null; })
                           .slice(0, 50).map(function (r) { return r.hap; });
-        if (ref && haps.length) {
-            pgpInit({chrom: ref.contig, start: ref.start, end: ref.end}, haps);
-        } else {
-            var b = document.getElementById("pgrPclaiBtn");
-            if (b) { b.parentNode.style.display = "none"; }
-        }
+        pgpInit(pgrRefLoc, haps);
     }
 
     el.onclick = function (ev) {
@@ -635,6 +656,7 @@ function pgrStart() {
     var cached = pgrCacheRead(job);
     if (cached) {
         pgrRows = cached.rows;
+        pgrRefLoc = cached.refLoc || null;
         pgrDraw(cached.queries, cached.rows, cached.note || null);
         return;
     }
@@ -691,6 +713,13 @@ function pgrStart() {
         }), 3).then(function () {
             var rows = [];
             jobs.forEach(function (j) { rows = rows.concat(j.rows || []); });
+            if (!rows.length || !pgrPclaiOn()) { return finish(rows, null); }
+            // One extra request, and only when the plot is switched on.
+            return pgrSurjectRef(jobs[0].res.name, jobs[0].index)
+                   .then(function (loc) { return finish(rows, loc); });
+        });
+
+        function finish(rows, refLoc) {
             if (!rows.length) {
                 el.innerHTML = "<P>This sequence was not found in any haplotype. " +
                     '<A HREF="' + pgrSelf + '">New search</A>.</P>';
@@ -699,10 +728,11 @@ function pgrStart() {
             rows.sort(pgrByIdentity);
             rows.forEach(function (r, i) { r.rank = i; });
             pgrRows = rows;
+            pgrRefLoc = refLoc;
             var note = pgrTruncNote();
             pgrCacheWrite(job, resp.results, rows, note);
             pgrDraw((resp.results || []).length, rows, note);
-        });
+        }
     }).catch(function (err) {
         // A job that has aged out of the server's cache is the common case, and
         // not a failure worth an alarming message.

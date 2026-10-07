@@ -9897,7 +9897,8 @@ if (modern)
     char pageTitle[256];
     char *asmLabel = blatAsmLabel(database);   // may carry a hub's genomes.txt organism string
     char *asmLabelHtml = htmlEncode(asmLabel);
-    safef(pageTitle, sizeof pageTitle, "BLAT Base Alignment: %s", asmLabelHtml);
+    safef(pageTitle, sizeof pageTitle, "%sBase Alignment: %s",
+          isEmpty(cartOptionalString(cart, "ssShortLabel")) ? "BLAT " : "", asmLabelHtml);
     webStartGbNoBanner(cart, database, pageTitle);   // menubar + <main>, no legacy section tables
     freeMem(asmLabelHtml);
     freeMem(asmLabel);
@@ -9934,7 +9935,14 @@ for (oSeq = oSeqList; oSeq != NULL; oSeq = oSeq->next)
 if (oSeq == NULL)  errAbort("%s is in %s but not in %s. Internal error.", qName, pslName, faName);
 if (modern)
     {
-    showSomeAlignmentModern(psl, oSeq, qt, 0, oSeq->size, NULL, 0, 0, TRUE);   // hgBlat context
+    /* Whether this really is a BLAT result decides the chrome: the title, and a
+     * "Back to results" button pointing at hgBlat.  The ss mechanism is not
+     * BLAT's alone - a tool that writes ss itself also names the track, with
+     * ssShortLabel, which hgBlat never sets (see hgTracks.c userPslTg).  Sending
+     * one of those users "back" to a BLAT search they never ran is a dead end,
+     * so they get the neutral chrome and a link to the browser instead. */
+    boolean blatContext = isEmpty(cartOptionalString(cart, "ssShortLabel"));
+    showSomeAlignmentModern(psl, oSeq, qt, 0, oSeq->size, NULL, 0, 0, blatContext);
     webEndGb();
     cartCheckout(&cart);   // exit(0) below skips main's checkout, so save the cart here or lose it
     exit(0);   // we drew the whole page; skip the framework's table-closing cartHtmlEnd
