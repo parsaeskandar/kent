@@ -120,6 +120,7 @@
 /* Copyright 2024 The Regents of the University of California. */
 #include "common.h"
 #include "linefile.h"
+#include "obscure.h"
 #include "hash.h"
 #include "cheapcgi.h"
 #include "htmshell.h"
@@ -148,6 +149,7 @@
 #include "quickLift.h"
 #include "psl.h"
 #include "chain.h"
+#include "bigBed.h"
 #include "bigChain.h"
 #include "bigLink.h"
 #include <ctype.h>
@@ -1550,6 +1552,13 @@ for (p = db; *p != '\0'; ++p)
 return TRUE;
 }
 
+static boolean pgSafeToken(char *tok)
+/* A sample name, a phase or a sequence name on its way into a file path.
+ * The same shape pgValidDb insists on, named for the wider use. */
+{
+return pgValidDb(tok);
+}
+
 static char *pgAttachAssembly(char *db)
 /* Make sure this assembly is usable in this request, and return the name the
  * browser knows it by.  A GenArk assembly is served from a hub that has to be
@@ -2383,6 +2392,151 @@ errCatchFree(&errCatch);
 return seq;
 }
 
+/* ---- pcLAI: where each haplotype sits in ancestry space ------------------
+ *
+ * pcLAI (Geleta et al. 2026, doi:10.64898/2026.03.23.713813) places every
+ * ~1000-SNP window of every HPRC haplotype at a coordinate in a reference PCA
+ * space, rather than giving it an ancestry label.  One bigBed per haplotype,
+ * in GRCh38 coordinates, under /gbdb/hg38/hprcPclai.
+ *
+ * This answers one question: for these haplotypes, at this locus, where is
+ * each one in that space.  The browser cannot ask it directly - hgTrackUi
+ * serves a track's metaDataUrl but never its bigDataUrl - so the reading is
+ * done here.  The reference cloud the points are plotted against is passed
+ * through from the same directory in the same answer, so the page needs one
+ * request and no dependency on which assembly the cart is pointed at.
+ *
+ * A mapping query is far shorter than a pcLAI window - 290 kb is typical - so
+ * a hit normally falls inside a single window and has exactly one coordinate
+ * here.  That is why this returns a point per haplotype and not a mixture. */
+
+#define PCLAI_DIR "/gbdb/hg38/hprcPclai"
+
+static boolean pgPclaiPoint(char *hap, char *chrom, int start, int end,
+                            double *retX, double *retY, int *retConf)
+/* The pcLAI coordinate of one haplotype over one interval, or FALSE if that
+ * haplotype has no file or no window there.  "hap" is PanSN, SAMPLE#N. */
+{
+char *sample = cloneString(hap);
+char *hash = strchr(sample, '#');
+if (hash == NULL)
+    { freez(&sample); return FALSE; }
+*hash++ = '\0';
+char *phase = hash;
+char *more = strchr(phase, '#');        /* a 3-field name carries a contig too */
+if (more != NULL)
+    *more = '\0';
+/* Both halves end up in a path, so keep them to what an HPRC name can hold. */
+if (!pgSafeToken(sample) || !pgSafeToken(phase))
+    { freez(&sample); return FALSE; }
+
+char path[PATH_LEN];
+safef(path, sizeof(path), "%s/%s.%s.bb", PCLAI_DIR, sample, phase);
+freez(&sample);
+if (!fileExists(path))
+    return FALSE;
+
+boolean got = FALSE;
+struct errCatch *errCatch = errCatchNew();
+if (errCatchStart(errCatch))
+    {
+    struct bbiFile *bbi = bigBedFileOpen(path);
+    struct lm *lm = lmInit(0);
+    struct bigBedInterval *iv = bigBedIntervalQuery(bbi, chrom, start, end, 1, lm);
+    if (iv != NULL && iv->rest != NULL)
+        {
+        /* rest is name, score, strand, thickStart, thickEnd, itemRgb,
+         * haplotype, window, pca, centroid - pca is the ninth. */
+        char *row[16];
+        char *rest = cloneString(iv->rest);
+        int n = chopByChar(rest, '\t', row, ArraySize(row));
+        if (n >= 9)
+            {
+            double x = 0, y = 0;
+            if (sscanf(row[8], "(%lf,%lf)", &x, &y) == 2)
+                {
+                *retX = x;
+                *retY = y;
+                *retConf = (n >= 2) ? atoi(row[1]) : 0;
+                got = TRUE;
+                }
+            }
+        freez(&rest);
+        }
+    lmCleanup(&lm);
+    bbiFileClose(&bbi);
+    }
+errCatchEnd(errCatch);
+if (errCatch->gotError)
+    fprintf(stderr, "hgPangenome: pcLAI read failed for %s: %s\n", hap,
+            trimSpaces(errCatch->message->string));
+errCatchFree(&errCatch);
+return got;
+}
+
+static void doPclai()
+/* Ancestry coordinates for a list of haplotypes at one GRCh38 interval, plus
+ * the reference cloud they are read against. */
+{
+char *chrom = cgiOptionalString("chrom");
+char *haps = cgiOptionalString("haps");
+int start = cgiOptionalInt("start", -1);
+int end = cgiOptionalInt("end", -1);
+if (isEmpty(chrom) || isEmpty(haps) || start < 0 || end <= start)
+    {
+    emitJsonError("missing or malformed chrom, start, end or haps");
+    return;
+    }
+if (!pgSafeToken(chrom))
+    {
+    emitJsonError("malformed sequence name");
+    return;
+    }
+
+struct dyString *out = dyStringNew(4096);
+dyStringAppend(out, "{\"status\":\"ok\",\"points\":[");
+int found = 0, asked = 0;
+int maxHaps = atoi(cfgOr("pangenome.pclaiMaxHaplotypes", "100"));
+char *list = cloneString(haps);
+char *one = list;
+while (one != NULL && *one != '\0' && asked < maxHaps)
+    {
+    char *comma = strchr(one, ',');
+    if (comma != NULL)
+        *comma++ = '\0';
+    asked++;
+    double x, y;
+    int conf = 0;
+    if (pgPclaiPoint(one, chrom, start, end, &x, &y, &conf))
+        {
+        dyStringPrintf(out, "%s{\"hap\":\"%s\",\"x\":%g,\"y\":%g,\"conf\":%d}",
+                       found ? "," : "", jsonStringEscape(one), x, y, conf);
+        found++;
+        }
+    one = comma;
+    }
+freez(&list);
+dyStringPrintf(out, "],\"asked\":%d,\"found\":%d", asked, found);
+
+/* The reference cloud, passed through from the same directory.  It is the
+ * pcLAI authors' published panel and is what makes a coordinate readable. */
+char panelPath[PATH_LEN];
+safef(panelPath, sizeof(panelPath), "%s/pclaiRefPanel.json", PCLAI_DIR);
+char *panel = NULL;
+size_t panelSize = 0;
+if (fileExists(panelPath))
+    readInGulp(panelPath, &panel, &panelSize);
+if (panel != NULL)
+    {
+    dyStringAppend(out, ",\"panel\":");
+    dyStringAppend(out, panel);
+    freez(&panel);
+    }
+dyStringAppend(out, "}");
+emitJson(out->string);
+dyStringFree(&out);
+}
+
 static void doAlignTrack()
 /* Write the PSL/FASTA pair BLAT uses, and hand back a browser URL that draws
  * the read on the target.  Runs with the cart: "ss" has to be put there
@@ -2806,7 +2960,14 @@ if (sameOk(cgiOptionalString("page"), "results"))
      * came back with one row. */
     jsInlineF("var pangenomeMinCoverage = %s;\n",
               cfgOr("pangenome.resultsMinCoverage", "0"));
+    /* The ancestry plot is optional.  With pangenome.resultsPclai off, the flag
+     * is false, the module is never loaded and the results page has no plot
+     * control and no checkbox column - exactly as before the feature existed. */
+    boolean pclai = sameString(cfgOr("pangenome.resultsPclai", "off"), "on");
+    jsInlineF("var pangenomePclai = %s;\n", pclai ? "true" : "false");
     jsIncludeFile("hgPangenomeAssemblies.js", NULL);
+    if (pclai)
+        jsIncludeFile("hgPangenomePclai.js", NULL);
     jsIncludeFile("hgPangenomeResults.js", NULL);
     cartWebEnd();
     return;
@@ -2887,6 +3048,13 @@ if (cmd != NULL)
 /* Reads two local files and needs no cart, so it is answered before the shells
  * below and is not rate limited - the page asks for it whenever the source
  * changes. */
+/* Reads bigBeds under /gbdb and needs no cart, so it is answered beside the
+ * other file-reading commands rather than through a shell. */
+if (sameOk(cmd, "pclai"))
+    {
+    doPclai();
+    return 0;
+    }
 if (sameOk(cmd, "contigs"))
     {
     doContigs();

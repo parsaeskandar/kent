@@ -37,6 +37,13 @@ function pgrSurjectCount() {
 }
 
 
+// The ancestry plot is optional; with it off nothing below it runs and the
+// table has no checkbox column.
+function pgrPclaiOn() {
+    return (typeof pangenomePclai !== "undefined") && pangenomePclai &&
+           (typeof pgpInit === "function");
+}
+
 function pgrMinCoverage() {
     return (typeof pangenomeMinCoverage === "number") ? pangenomeMinCoverage : 50;
 }
@@ -396,7 +403,7 @@ function pgrTableHtml(rows, opt) {
         }
     });
 
-    var head = "   " + pgrPad("ACTIONS", w.act) + " ";
+    var head = (opt.pclai ? "    " : "") + "   " + pgrPad("ACTIONS", w.act) + " ";
     if (opt.multiQuery) { head += pgrPad("QUERY", w.query) + " "; }
     if (opt.multiPlace) { head += pgrPad("PLACE", w.place) + " "; }
     head += pgrPad("HAPLOTYPE", w.hap) + " " + pgrPad("ASSEMBLY", w.asm) +
@@ -407,7 +414,15 @@ function pgrTableHtml(rows, opt) {
 
     var out = [head, rule];
     rows.forEach(function (r) {
-        var line = "   " + pgrPad(pgrActionsText(r), w.act) + " ";
+        // The box bolds this haplotype's point in the ancestry plot.  Rows with
+        // no position have no point, so they get the space but no box.
+        var line = "";
+        if (opt.pclai) {
+            line += (r.contig == null) ? "    "
+                : '<input type="checkbox" class="pgrPick" data-hap="' +
+                  pgrEsc(r.hap) + '"> ';
+        }
+        line += "   " + pgrPad(pgrActionsText(r), w.act) + " ";
         // The links are substituted after padding, so the columns line up on the
         // text that is actually drawn rather than on the length of the markup.
         line = line.replace(pgrActionsText(r), pgrActions(r) || "");
@@ -558,7 +573,14 @@ function pgrDraw(queries, rows, note) {
     }
     html += " <A HREF=\"" + pgrSelf + "\">New search</A>.</P>\n";
     if (note) { html += "<P>" + note + "</P>\n"; }
-    html += pgrTableHtml(rows, { multiQuery: multiQuery, multiPlace: multiPlace });
+    if (pgrPclaiOn()) {
+        html += '<P><A HREF="#" id="pgrPclaiBtn">Show ancestry plot</A> ' +
+                '<SPAN style="color:#6b6b67">\u2014 where these haplotypes sit in ' +
+                'the pcLAI reference space. Tick a row to pick it out.</SPAN></P>\n' +
+                '<DIV id="pgrPclaiPlot" style="display:none;margin:0.5em 0"></DIV>\n';
+    }
+    html += pgrTableHtml(rows, { multiQuery: multiQuery, multiPlace: multiPlace,
+                                 pclai: pgrPclaiOn() });
     // Worth saying only when it applies, which on a clean query it does not.
     if (rows.some(function (r) {
             var q = (r.surjMapq == null) ? r.mapq : r.surjMapq;
@@ -571,7 +593,27 @@ function pgrDraw(queries, rows, note) {
 
     var el = document.getElementById("pgrResults");
     el.innerHTML = html;
+    if (pgrPclaiOn()) {
+        // The query's own GRCh38 locus is what every haplotype's ancestry is read
+        // at, so that hits and the reference cloud are on one ruler.  GRCh38 is in
+        // the graph and is normally among the hits; without it there is no common
+        // locus and the plot is not offered.
+        var ref = pgrRows.filter(function (r) {
+            return /^GRCh38/i.test(r.hap) && r.contig != null; })[0];
+        var haps = pgrRows.filter(function (r) { return r.contig != null; })
+                          .slice(0, 50).map(function (r) { return r.hap; });
+        if (ref && haps.length) {
+            pgpInit({chrom: ref.contig, start: ref.start, end: ref.end}, haps);
+        } else {
+            var b = document.getElementById("pgrPclaiBtn");
+            if (b) { b.parentNode.style.display = "none"; }
+        }
+    }
+
     el.onclick = function (ev) {
+        var box = ev.target && ev.target.classList &&
+                  ev.target.classList.contains("pgrPick") ? ev.target : null;
+        if (box) { pgpTogglePick(box.getAttribute("data-hap"), box.checked); return; }
         var a = ev.target.closest ? ev.target.closest("a[data-rank]") : null;
         if (!a) { return; }
         ev.preventDefault();
