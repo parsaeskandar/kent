@@ -44,9 +44,15 @@ function pgrPclaiOn() {
            (typeof pgpInit === "function");
 }
 
-// ...and only once the query has been located on GRCh38.
+// A row can be plotted when it has both a placement and an assembly to read
+// the ancestry from; the plot needs at least one such row.
+function pgrPclaiSpot(r) {
+    return (r && r.contig != null && r.start != null && r.end != null &&
+            r.db && /^GC[AF]_/.test(r.db)) ? r : null;
+}
+
 function pgrPclaiReady() {
-    return pgrPclaiOn() && pgrRefLoc !== null;
+    return pgrPclaiOn() && pgrRows.some(pgrPclaiSpot);
 }
 
 function pgrMinCoverage() {
@@ -167,29 +173,6 @@ function pgrForm(obj) {
     return Object.keys(obj).map(function (k) {
         return encodeURIComponent(k) + "=" + encodeURIComponent(obj[k]);
     }).join("&");
-}
-
-// The query's own GRCh38 position.  Every haplotype's ancestry is read at one
-// locus so that hits and the reference cloud are on the same ruler, and pcLAI
-// is published in GRCh38 coordinates.  GRCh38 is in the graph but is often not
-// among the hits - it was not for any of the 50 on the query this was built
-// against - so it is asked for directly rather than looked for in the table.
-function pgrSurjectRef(name, index) {
-    var payload = {tgt: "GRCh38#0", job_id: pgrJobId(), name: name, index: index};
-    return fetch(pgrSelf, {
-        method: "POST",
-        headers: {"Content-Type": "application/x-www-form-urlencoded",
-                  Accept: "application/json"},
-        body: pgrForm({cmd: "surject", payload: JSON.stringify(payload)})
-    }).then(pgrCheck).then(function (resp) {
-        var s = resp && resp.surjection;
-        if (!s || s.status !== "ok") { return null; }
-        var tgt = pgrSplitTarget(s.target);
-        if (tgt === null) { return null; }
-        var start = tgt.offset + s.position;
-        return {chrom: tgt.contig, start: start,
-                end: start + pgrCigarSpan(s.cigar)};
-    }).catch(function () { return null; });
 }
 
 function pgrSurjectAll(name, index, maxTargets, minCoverage) {
@@ -356,10 +339,6 @@ function pgrApplySurjection(row, resp) {
 // Records are keyed by "requested", the haplotype name as it was asked for.
 // "haplotype" is the fragment it landed on and is for coordinates only.
 var pgrTruncated = 0;
-// The query's GRCh38 locus, once known.  Without it there is no common ruler
-// for the ancestry plot, so neither the plot nor its checkboxes are offered.
-var pgrRefLoc = null;
-
 function pgrTruncNote() {
     if (!pgrTruncated) { return null; }
     return "This is the best " + pgrFmt(pgrSurjectCount()) + " of " +
@@ -574,8 +553,7 @@ function pgrCacheWrite(job, results, rows, note) {
             // far larger and nothing here reads it again.
             rows: rows,
             queries: (results || []).length,
-            note: note || null,
-            refLoc: pgrRefLoc
+            note: note || null
         }));
     } catch (e) { /* no memory to spare; the page will just rebuild it */ }
 }
@@ -626,9 +604,12 @@ function pgrDraw(queries, rows, note) {
     var el = document.getElementById("pgrResults");
     el.innerHTML = html;
     if (pgrPclaiReady()) {
-        var haps = pgrRows.filter(function (r) { return r.contig != null; })
-                          .slice(0, 50).map(function (r) { return r.hap; });
-        pgpInit(pgrRefLoc, haps);
+        // Each haplotype is read at its own surjection, so what the plot gets
+        // is one spot per row rather than a locus they all share.
+        pgpInit(pgrRows.filter(pgrPclaiSpot).slice(0, 50).map(function (r) {
+            return {hap: r.hap, acc: r.db, contig: r.contig,
+                    start: r.start, end: r.end};
+        }));
     }
 
     el.onclick = function (ev) {
@@ -656,7 +637,6 @@ function pgrStart() {
     var cached = pgrCacheRead(job);
     if (cached) {
         pgrRows = cached.rows;
-        pgrRefLoc = cached.refLoc || null;
         pgrDraw(cached.queries, cached.rows, cached.note || null);
         return;
     }
@@ -713,13 +693,10 @@ function pgrStart() {
         }), 3).then(function () {
             var rows = [];
             jobs.forEach(function (j) { rows = rows.concat(j.rows || []); });
-            if (!rows.length || !pgrPclaiOn()) { return finish(rows, null); }
-            // One extra request, and only when the plot is switched on.
-            return pgrSurjectRef(jobs[0].res.name, jobs[0].index)
-                   .then(function (loc) { return finish(rows, loc); });
+            finish(rows);
         });
 
-        function finish(rows, refLoc) {
+        function finish(rows) {
             if (!rows.length) {
                 el.innerHTML = "<P>This sequence was not found in any haplotype. " +
                     '<A HREF="' + pgrSelf + '">New search</A>.</P>';
@@ -728,7 +705,6 @@ function pgrStart() {
             rows.sort(pgrByIdentity);
             rows.forEach(function (r, i) { r.rank = i; });
             pgrRows = rows;
-            pgrRefLoc = refLoc;
             var note = pgrTruncNote();
             pgrCacheWrite(job, resp.results, rows, note);
             pgrDraw((resp.results || []).length, rows, note);

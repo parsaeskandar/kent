@@ -19,7 +19,7 @@
 
 /* globals pangenomeConfig */
 
-var pgpCfg = null;          // {chrom, start, end} of the query on GRCh38
+var pgpSpots = null;        // one {hap, acc, contig, start, end} per hit
 var pgpData = null;         // the server's answer, kept so a redraw is free
 var pgpPicked = Object.create(null);   // haplotypes the user ticked
 
@@ -40,15 +40,21 @@ function pgpEsc(s) {
 
 // ---- fetching ---------------------------------------------------------------
 
-function pgpFetch(haps) {
-    var qs = "?cmd=pclai&chrom=" + encodeURIComponent(pgpCfg.chrom) +
-             "&start=" + pgpCfg.start + "&end=" + pgpCfg.end +
-             "&haps=" + encodeURIComponent(haps.join(","));
-    return fetch(window.location.pathname + qs, {headers: {Accept: "application/json"}})
-        .then(function (r) {
-            if (!r.ok) { throw new Error("HTTP " + r.status); }
-            return r.json();
-        });
+// Each haplotype is read in its own assembly's coordinates, at the interval the
+// surjection put the query on, so the request is a list of places rather than
+// one locus with a list of names.  POSTed because fifty of them outgrow a URL.
+function pgpFetch(spots) {
+    var body = "cmd=pclai&payload=" +
+               encodeURIComponent(JSON.stringify({spots: spots}));
+    return fetch(window.location.pathname, {
+        method: "POST",
+        headers: {"Content-Type": "application/x-www-form-urlencoded",
+                  Accept: "application/json"},
+        body: body
+    }).then(function (r) {
+        if (!r.ok) { throw new Error("HTTP " + r.status); }
+        return r.json();
+    });
 }
 
 // ---- the plot ---------------------------------------------------------------
@@ -82,6 +88,17 @@ function pgpDraw() {
     var host = pgpEl("pgrPclaiPlot");
     if (!host || !pgpData || !pgpData.panel) { return; }
     var panel = pgpData.panel, pts = pgpData.points || [];
+    // pcLAI windows are built from SNPs, so a region with no SNPs - a
+    // centromere above all - has no windows and no haplotype can be placed.
+    // Say so, rather than drawing an empty reference cloud and leaving the
+    // reader to wonder which of the two it is looking at.
+    if (!pts.length) {
+        host.innerHTML = "<p>None of these " + pgpData.asked + " haplotypes " +
+            "has a pcLAI window where the query matched it. pcLAI windows " +
+            "follow SNPs, so regions without them - centromeres and other " +
+            "repeat-rich sequence - are not covered.</p>";
+        return;
+    }
     var s = pgpScales(panel, pts);
     var o = [];
 
@@ -91,10 +108,11 @@ function pgpDraw() {
     o.push('<rect width="' + PGP_W + '" height="' + PGP_H + '" fill="#fcfcfb"/>');
     o.push('<text x="' + PGP_L + '" y="24" font-size="15" font-weight="600" fill="#1a1a19">' +
            'Position in ancestry space</text>');
+    // No shared locus to name: each haplotype is read where the query matched
+    // it, in that assembly's own coordinates.
     o.push('<text x="' + PGP_L + '" y="43" font-size="11.5" fill="#6b6b67">' +
-           pts.length + ' of ' + pgpData.asked + ' haplotypes placed at GRCh38 ' +
-           pgpEsc(pgpCfg.chrom) + ':' + pgpCfg.start.toLocaleString() + '-' +
-           pgpCfg.end.toLocaleString() + '</text>');
+           pts.length + ' of ' + pgpData.asked + ' haplotypes placed, each read ' +
+           'at its own match</text>');
 
     pgpTicks(s.x0, s.x1).forEach(function (t) {
         o.push('<line x1="' + s.X(t).toFixed(1) + '" y1="' + PGP_T + '" x2="' +
@@ -164,13 +182,13 @@ function pgpTogglePick(hap, on) {
     pgpDraw();
 }
 
-function pgpOpen(haps) {
+function pgpOpen(spots) {
     var host = pgpEl("pgrPclaiPlot");
     if (!host) { return; }
     host.style.display = "";
     if (pgpData) { pgpDraw(); return; }
     host.innerHTML = "<p>Reading ancestry coordinates…</p>";
-    pgpFetch(haps).then(function (resp) {
+    pgpFetch(spots).then(function (resp) {
         if (!resp || resp.status === "error") {
             throw new Error((resp && resp.error) || "server error");
         }
@@ -182,12 +200,12 @@ function pgpOpen(haps) {
     });
 }
 
-// Called by the results page once it knows the query's GRCh38 locus and its
-// hits.  Returns false when the feature is off, so the caller can leave the
-// control and the checkbox column out entirely.
-function pgpInit(cfg, haps) {
-    if (!cfg || !cfg.chrom || !haps || !haps.length) { return false; }
-    pgpCfg = cfg;
+// Called by the results page with one spot per plottable hit.  Returns false
+// when there is nothing to plot, so the caller can leave the control and the
+// checkbox column out entirely.
+function pgpInit(spots) {
+    if (!spots || !spots.length) { return false; }
+    pgpSpots = spots;
     var btn = pgpEl("pgrPclaiBtn");
     if (btn) {
         btn.addEventListener("click", function (e) {
@@ -199,7 +217,7 @@ function pgpInit(cfg, haps) {
                 return;
             }
             btn.textContent = "Hide ancestry plot";
-            pgpOpen(haps);
+            pgpOpen(pgpSpots);
         });
     }
     return true;

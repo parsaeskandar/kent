@@ -2396,43 +2396,57 @@ return seq;
  *
  * pcLAI (Geleta et al. 2026, doi:10.64898/2026.03.23.713813) places every
  * ~1000-SNP window of every HPRC haplotype at a coordinate in a reference PCA
- * space, rather than giving it an ancestry label.  One bigBed per haplotype,
- * in GRCh38 coordinates, under /gbdb/hg38/hprcPclai.
+ * space, rather than giving it an ancestry label.
  *
- * This answers one question: for these haplotypes, at this locus, where is
- * each one in that space.  The browser cannot ask it directly - hgTrackUi
- * serves a track's metaDataUrl but never its bigDataUrl - so the reading is
- * done here.  The reference cloud the points are plotted against is passed
- * through from the same directory in the same answer, so the page needs one
- * request and no dependency on which assembly the cart is pointed at.
+ * It is published in two coordinate systems, and which one is used decides
+ * what the plot means.  The GRCh38-projected copy (/gbdb/hg38/hprcPclai, one
+ * bigBed per haplotype keyed by chr1..chr22) can only be read at a single
+ * shared reference locus, so every haplotype has to be asked about a position
+ * that none of them necessarily matched: when the mapping is ambiguous that
+ * locus can be megabases from where the sequence actually landed, and one bad
+ * reference placement moves all fifty points at once.  The assembly-coordinate
+ * copy - contrib/hprc2annot/pclai.bb on each HPRC2 GenArk hub, keyed by that
+ * assembly's own sequences - is read at each haplotype's own surjection, which
+ * is the question the results page is asking and is what we use here.  It also
+ * means no GRCh38 round-trip: the surjections are already in hand.
+ *
+ * The browser cannot do this lookup itself - hgTrackUi serves a track's
+ * metaDataUrl but never its bigDataUrl - so the reading is done here.  The
+ * reference cloud the points are plotted against is a single shared file in
+ * the same contrib directory and is passed through in the same answer, so the
+ * page needs one request and no dependency on the cart's assembly.
  *
  * A mapping query is far shorter than a pcLAI window - 290 kb is typical - so
  * a hit normally falls inside a single window and has exactly one coordinate
  * here.  That is why this returns a point per haplotype and not a mixture. */
 
-#define PCLAI_DIR "/gbdb/hg38/hprcPclai"
+#define PCLAI_CONTRIB "contrib/hprc2annot"
 
-static boolean pgPclaiPoint(char *hap, char *chrom, int start, int end,
-                            double *retX, double *retY, int *retConf)
-/* The pcLAI coordinate of one haplotype over one interval, or FALSE if that
- * haplotype has no file or no window there.  "hap" is PanSN, SAMPLE#N. */
+static char *pgPclaiDir(char *acc)
+/* The contrib directory holding one assembly's pcLAI, or NULL.
+ *
+ * The path comes from genArkPath(), which resolves through the genark table,
+ * so an accession we do not serve yields NULL rather than a path - the caller
+ * never builds a directory name out of unchecked input. */
 {
-char *sample = cloneString(hap);
-char *hash = strchr(sample, '#');
-if (hash == NULL)
-    { freez(&sample); return FALSE; }
-*hash++ = '\0';
-char *phase = hash;
-char *more = strchr(phase, '#');        /* a 3-field name carries a contig too */
-if (more != NULL)
-    *more = '\0';
-/* Both halves end up in a path, so keep them to what an HPRC name can hold. */
-if (!pgSafeToken(sample) || !pgSafeToken(phase))
-    { freez(&sample); return FALSE; }
+if (isEmpty(acc))
+    return NULL;
+char *arkPath = genArkPath(acc);
+if (arkPath == NULL)
+    return NULL;
+char dir[PATH_LEN];
+safef(dir, sizeof(dir), "/gbdb/genark/%s/%s/%s", arkPath, acc, PCLAI_CONTRIB);
+freez(&arkPath);
+return cloneString(dir);
+}
 
+static boolean pgPclaiPoint(char *dir, char *chrom, int start, int end,
+                            double *retX, double *retY, int *retConf)
+/* The pcLAI coordinate of one haplotype over one interval of its own assembly,
+ * or FALSE if there is no file or no window there. */
+{
 char path[PATH_LEN];
-safef(path, sizeof(path), "%s/%s.%s.bb", PCLAI_DIR, sample, phase);
-freez(&sample);
+safef(path, sizeof(path), "%s/pclai.bb", dir);
 if (!fileExists(path))
     return FALSE;
 
@@ -2445,19 +2459,21 @@ if (errCatchStart(errCatch))
     struct bigBedInterval *iv = bigBedIntervalQuery(bbi, chrom, start, end, 1, lm);
     if (iv != NULL && iv->rest != NULL)
         {
-        /* rest is name, score, strand, thickStart, thickEnd, itemRgb,
-         * haplotype, window, pca, centroid - pca is the ninth. */
+        /* rest is name, score, strand, thickStart, thickEnd, itemRgb, window,
+         * pca, centroid - pca is the eighth.  The GRCh38-projected files carry
+         * an extra "haplotype" column before window and put pca ninth; these
+         * do not need it, because the file is the haplotype. */
         char *row[16];
         char *rest = cloneString(iv->rest);
         int n = chopByChar(rest, '\t', row, ArraySize(row));
-        if (n >= 9)
+        if (n >= 8)
             {
             double x = 0, y = 0;
-            if (sscanf(row[8], "(%lf,%lf)", &x, &y) == 2)
+            if (sscanf(row[7], "(%lf,%lf)", &x, &y) == 2)
                 {
                 *retX = x;
                 *retY = y;
-                *retConf = (n >= 2) ? atoi(row[1]) : 0;
+                *retConf = atoi(row[1]);
                 got = TRUE;
                 }
             }
@@ -2468,28 +2484,44 @@ if (errCatchStart(errCatch))
     }
 errCatchEnd(errCatch);
 if (errCatch->gotError)
-    fprintf(stderr, "hgPangenome: pcLAI read failed for %s: %s\n", hap,
+    fprintf(stderr, "hgPangenome: pcLAI read failed for %s %s: %s\n", path, chrom,
             trimSpaces(errCatch->message->string));
 errCatchFree(&errCatch);
 return got;
 }
 
-static void doPclai()
-/* Ancestry coordinates for a list of haplotypes at one GRCh38 interval, plus
- * the reference cloud they are read against. */
+static boolean pgPclaiChrom(char *hap, char *contig, char *buf, int bufSize)
+/* Build the sequence name pcLAI uses - full PanSN, SAMPLE#PHASE#CONTIG - from
+ * the two-field haplotype and the contig a surjection named.  FALSE if either
+ * is not the shape an HPRC name has. */
 {
-char *chrom = cgiOptionalString("chrom");
-char *haps = cgiOptionalString("haps");
-int start = cgiOptionalInt("start", -1);
-int end = cgiOptionalInt("end", -1);
-if (isEmpty(chrom) || isEmpty(haps) || start < 0 || end <= start)
+char *sample = cloneString(hap);
+char *hash = strchr(sample, '#');
+if (hash == NULL)
+    { freez(&sample); return FALSE; }
+*hash++ = '\0';
+char *phase = hash;
+char *more = strchr(phase, '#');        /* a 3-field name carries a contig too */
+if (more != NULL)
+    *more = '\0';
+boolean ok = pgSafeToken(sample) && pgSafeToken(phase) && pgSafeToken(contig);
+if (ok)
+    safef(buf, bufSize, "%s#%s#%s", sample, phase, contig);
+freez(&sample);
+return ok;
+}
+
+static void doPclai()
+/* Ancestry coordinates for a list of haplotypes, each read at its own
+ * surjected interval, plus the reference cloud they are read against.
+ *
+ * The payload is a list rather than one shared locus because that is the whole
+ * point of using the assembly-coordinate files - see the note above. */
+{
+char *payload = cgiOptionalString("payload");
+if (isEmpty(payload))
     {
-    emitJsonError("missing or malformed chrom, start, end or haps");
-    return;
-    }
-if (!pgSafeToken(chrom))
-    {
-    emitJsonError("malformed sequence name");
+    emitJsonError("missing payload");
     return;
     }
 
@@ -2497,34 +2529,86 @@ struct dyString *out = dyStringNew(4096);
 dyStringAppend(out, "{\"status\":\"ok\",\"points\":[");
 int found = 0, asked = 0;
 int maxHaps = atoi(cfgOr("pangenome.pclaiMaxHaplotypes", "100"));
-char *list = cloneString(haps);
-char *one = list;
-while (one != NULL && *one != '\0' && asked < maxHaps)
+char *panelDir = NULL;                  /* the first contrib dir that resolved */
+char *parseError = NULL;
+
+struct errCatch *errCatch = errCatchNew();
+if (errCatchStart(errCatch))
     {
-    char *comma = strchr(one, ',');
-    if (comma != NULL)
-        *comma++ = '\0';
-    asked++;
-    double x, y;
-    int conf = 0;
-    if (pgPclaiPoint(one, chrom, start, end, &x, &y, &conf))
+    struct jsonElement *root = jsonParse(payload);
+    struct jsonElement *spotsEl = jsonFindNamedField(root, "", "spots");
+    if (spotsEl == NULL)
+        parseError = "payload is missing 'spots'";
+    else
         {
-        dyStringPrintf(out, "%s{\"hap\":\"%s\",\"x\":%g,\"y\":%g,\"conf\":%d}",
-                       found ? "," : "", jsonStringEscape(one), x, y, conf);
-        found++;
+        struct slRef *ref, *list = jsonListVal(spotsEl, "spots");
+        for (ref = list; ref != NULL && asked < maxHaps; ref = ref->next)
+            {
+            struct jsonElement *spot = ref->val;
+            char *hap = jsonOptionalStringField(spot, "hap", NULL);
+            char *acc = jsonOptionalStringField(spot, "acc", NULL);
+            char *contig = jsonOptionalStringField(spot, "contig", NULL);
+            struct jsonElement *sEl = jsonFindNamedField(spot, "", "start");
+            struct jsonElement *eEl = jsonFindNamedField(spot, "", "end");
+            if (isEmpty(hap) || isEmpty(acc) || isEmpty(contig) ||
+                sEl == NULL || eEl == NULL ||
+                sEl->type != jsonNumber || eEl->type != jsonNumber)
+                continue;
+            asked++;
+            int start = (int)sEl->val.jeNumber;
+            int end = (int)eEl->val.jeNumber;
+            if (start < 0 || end <= start)
+                continue;
+            char chrom[PATH_LEN];
+            if (!pgPclaiChrom(hap, contig, chrom, sizeof(chrom)))
+                continue;
+            char *dir = pgPclaiDir(acc);
+            if (dir == NULL)
+                continue;
+            if (panelDir == NULL)
+                panelDir = cloneString(dir);
+            double x, y;
+            int conf = 0;
+            if (pgPclaiPoint(dir, chrom, start, end, &x, &y, &conf))
+                {
+                dyStringPrintf(out,
+                    "%s{\"hap\":\"%s\",\"x\":%g,\"y\":%g,\"conf\":%d}",
+                    found ? "," : "", jsonStringEscape(hap), x, y, conf);
+                found++;
+                }
+            freez(&dir);
+            }
         }
-    one = comma;
     }
-freez(&list);
+errCatchEnd(errCatch);
+if (errCatch->gotError)
+    parseError = "could not read the request";
+errCatchFree(&errCatch);
+
+if (parseError != NULL)
+    {
+    dyStringFree(&out);
+    freez(&panelDir);
+    emitJsonError("%s", parseError);
+    return;
+    }
 dyStringPrintf(out, "],\"asked\":%d,\"found\":%d", asked, found);
 
-/* The reference cloud, passed through from the same directory.  It is the
- * pcLAI authors' published panel and is what makes a coordinate readable. */
+/* The reference cloud.  It is the pcLAI authors' published panel, one shared
+ * file symlinked into every assembly's contrib directory, and it is what makes
+ * a coordinate readable.  Taken from a directory we have already resolved, so
+ * the answer stays within the files the points came from. */
 char panelPath[PATH_LEN];
-safef(panelPath, sizeof(panelPath), "%s/pclaiRefPanel.json", PCLAI_DIR);
+char *cfgPanel = cfgOption("pangenome.pclaiRefPanel");
+if (cfgPanel != NULL)
+    safef(panelPath, sizeof(panelPath), "%s", cfgPanel);
+else if (panelDir != NULL)
+    safef(panelPath, sizeof(panelPath), "%s/pclaiRefPanel.json", panelDir);
+else
+    panelPath[0] = '\0';
 char *panel = NULL;
 size_t panelSize = 0;
-if (fileExists(panelPath))
+if (panelPath[0] != '\0' && fileExists(panelPath))
     readInGulp(panelPath, &panel, &panelSize);
 if (panel != NULL)
     {
@@ -2532,6 +2616,7 @@ if (panel != NULL)
     dyStringAppend(out, panel);
     freez(&panel);
     }
+freez(&panelDir);
 dyStringAppend(out, "}");
 emitJson(out->string);
 dyStringFree(&out);
