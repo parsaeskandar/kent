@@ -2140,17 +2140,32 @@ for(; tdb; tdb = tdbNext)
         isVisible = checkCartVisibility(cart, tdb);
     else if (isParentVisible(cart, tdb) &&  isSubtrackVisible(cart, tdb)) // child of supertrack
         {
-        if (hashLookup(haveSuper, tdb->parent->track) == NULL)  // output yet?
+        // Containers nest: hg38's TSS superTrack holds the proCapNet composite, which
+        // holds the view a leaf sits in.  Every ancestor has to be declared or the hub
+        // reader rejects the child outright ("Parent ... doesn't exist in hub"), so walk
+        // the whole chain rather than one level of it.  Climbing stops at the first
+        // ancestor already written, because everything above that went out with it.
+        struct slRef *chain = NULL, *ref;
+        struct trackDb *anc;
+        for (anc = tdb->parent; anc != NULL; anc = anc->parent)
             {
-            //if (checkCartVisibility(cart, tdb->parent))
-                {
-                tdb->parent->visibility = hTvFromString("tvShow");
-                // a superTrack is not in the list we are walking, so it has no rank
-                // of its own.  Slot it just above the first child that brought it in.
-                outTrack(out, cart, tdb->parent, rank - 0.5);
-                hashStore(haveSuper, tdb->parent->track);
-                }
+            if (hashLookup(haveSuper, anc->track) != NULL)
+                break;
+            refAdd(&chain, anc);        // prepends, so the outermost ends up first
             }
+        // A container is not in the list we are walking, so it has no rank of its own.
+        // Slot the chain into the gap just above the child that brought it in, outermost
+        // first, so the file keeps parents ahead of their children.  With a single
+        // ancestor this is the rank - 0.5 it has always been.
+        int depth = slCount(chain), i = 0;
+        for (ref = chain; ref != NULL; ref = ref->next, ++i)
+            {
+            struct trackDb *parent = ref->val;
+            parent->visibility = hTvFromString("tvShow");
+            outTrack(out, cart, parent, rank - 0.5 + i * (0.5 / depth));
+            hashStore(haveSuper, parent->track);
+            }
+        slFreeList(&chain);
         isVisible = checkCartVisibility(cart, tdb);
         }
 
