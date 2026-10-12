@@ -84,6 +84,117 @@ function pgpTicks(a, b, n) {
     return out;
 }
 
+// ---- hover readout ----------------------------------------------------------
+//
+// The same idea as hgc.scatterPlot.js: a point under the cursor is found from a
+// cell index rather than by asking the DOM, so three thousand reference points
+// stay smooth.  Two differences.  Our cloud is SVG rather than canvas, so the
+// plot is scaled to fit the page and client pixels have to be divided back into
+// viewBox units before anything is compared.  And a hit always wins over a
+// reference point at the same distance - the reader came for the haplotypes.
+
+var PGP_HIT_R = 7;          // how near the cursor must come, in viewBox units
+var PGP_CELL = 14;          // index cell, comfortably above PGP_HIT_R
+
+function pgpFmtNum(v) {
+    // Minus sign rather than hyphen: these are coordinates, and the columns of
+    // a readout line up better.
+    return String(v).replace(/^-/, "\u2212");
+}
+
+function pgpAttachHover(wrap, panel, pts, scale) {
+    if (!wrap) { return; }
+    var marks = [];
+    (panel.points || []).forEach(function (p) {
+        marks.push({x: scale.X(p[0]), y: scale.Y(p[1]), hit: false,
+                    name: p[3], pop: (panel.labels || [])[p[2]],
+                    px: p[0], py: p[1]});
+    });
+    pts.forEach(function (p) {
+        var spot = pgpSpotFor(p.hap);
+        marks.push({x: scale.X(p.x), y: scale.Y(p.y), hit: true,
+                    name: p.hap, conf: p.conf, px: p.x, py: p.y, spot: spot});
+    });
+
+    var grid = Object.create(null);
+    marks.forEach(function (m, i) {
+        var k = Math.floor(m.x / PGP_CELL) + "," + Math.floor(m.y / PGP_CELL);
+        (grid[k] || (grid[k] = [])).push(i);
+    });
+
+    var tip = document.createElement("div");
+    tip.style.cssText = "position:absolute;display:none;pointer-events:none;" +
+        "background:#ffffe0;border:1px solid #999;padding:3px 6px;font-size:11px;" +
+        "line-height:1.45;white-space:nowrap;z-index:10;" +
+        "box-shadow:1px 1px 3px rgba(0,0,0,0.25)";
+    wrap.appendChild(tip);
+
+    wrap.addEventListener("mousemove", function (ev) {
+        var r = wrap.getBoundingClientRect();
+        if (!r.width) { return; }
+        var k = PGP_W / r.width;            // viewBox units per client pixel
+        var mx = (ev.clientX - r.left) * k, my = (ev.clientY - r.top) * k;
+        var gx = Math.floor(mx / PGP_CELL), gy = Math.floor(my / PGP_CELL);
+        var best = null, bestD = PGP_HIT_R * PGP_HIT_R;
+        for (var dx = -1; dx <= 1; dx++) {
+            for (var dy = -1; dy <= 1; dy++) {
+                var cell = grid[(gx + dx) + "," + (gy + dy)];
+                if (!cell) { continue; }
+                for (var j = 0; j < cell.length; j++) {
+                    var m = marks[cell[j]];
+                    var d = (m.x - mx) * (m.x - mx) + (m.y - my) * (m.y - my);
+                    // "<=" lets a hit displace a reference point it sits on,
+                    // because the hits are appended after the cloud.
+                    if (d <= bestD && (best === null || m.hit || !best.hit)) {
+                        bestD = d;
+                        best = m;
+                    }
+                }
+            }
+        }
+        if (best === null) { tip.style.display = "none"; return; }
+        tip.innerHTML = pgpTipHtml(best);
+        tip.style.display = "block";
+        // Keep the readout inside the plot, flipping it left near the edge.
+        var left = best.x / k + 12, top = best.y / k - 10;
+        if (left + tip.offsetWidth > r.width) {
+            left = Math.max(0, best.x / k - 12 - tip.offsetWidth);
+        }
+        tip.style.left = Math.round(left) + "px";
+        tip.style.top = Math.round(Math.max(0, top)) + "px";
+    });
+    wrap.addEventListener("mouseleave", function () { tip.style.display = "none"; });
+}
+
+function pgpSpotFor(hap) {
+    var list = pgpSpots || [];
+    for (var i = 0; i < list.length; i++) {
+        if (list[i].hap === hap) { return list[i]; }
+    }
+    return null;
+}
+
+function pgpTipHtml(m) {
+    var coord = "PC1 " + pgpFmtNum(m.px) + ", PC2 " + pgpFmtNum(m.py);
+    if (!m.hit) {
+        // A reference haplotype: who it is and which population places it.
+        return "<b>" + pgpEsc(m.name) + "</b><br>" +
+               (m.pop ? pgpEsc(m.pop) + "<br>" : "") +
+               '<span style="color:#6b6b67">' + coord + "</span>";
+    }
+    var out = "<b>" + pgpEsc(m.name) + "</b><br>" + coord +
+              '<br><span style="color:#6b6b67">pcLAI confidence ' + m.conf +
+              "/1000</span>";
+    if (m.spot) {
+        // Where this haplotype was read, which is its own match and not a
+        // position shared with the others.
+        out += '<br><span style="color:#6b6b67">' + pgpEsc(m.spot.contig) + ":" +
+               (m.spot.start + 1).toLocaleString() + "-" +
+               m.spot.end.toLocaleString() + "</span>";
+    }
+    return out;
+}
+
 function pgpDraw() {
     var host = pgpEl("pgrPclaiPlot");
     if (!host || !pgpData || !pgpData.panel) { return; }
@@ -146,9 +257,7 @@ function pgpDraw() {
         o.push('<circle class="pgrPclaiHit" data-hap="' + pgpEsc(p.hap) + '" cx="' +
                s.X(p.x).toFixed(1) + '" cy="' + s.Y(p.y).toFixed(1) +
                '" r="' + (on ? 8 : 5) + '" fill="' + (on ? "#1a1a19" : "#fcfcfb") +
-               '" stroke="#1a1a19" stroke-width="' + (on ? 2.4 : 1.6) + '">' +
-               '<title>' + pgpEsc(p.hap) + ' — pcLAI confidence ' + p.conf +
-               '</title></circle>');
+               '" stroke="#1a1a19" stroke-width="' + (on ? 2.4 : 1.6) + '"/>');
     });
     o.push('</g>');
 
@@ -171,7 +280,9 @@ function pgpDraw() {
     o.push('<text x="' + (lx + 15) + '" y="' + (hy + 16) + '" font-size="10" fill="#1a1a19">ticked in the table</text>');
     o.push('</svg>');
 
-    host.innerHTML = o.join("");
+    host.innerHTML = '<div id="pgpPlotWrap" style="position:relative;display:inline-block;' +
+                     'max-width:100%">' + o.join("") + '</div>';
+    pgpAttachHover(pgpEl("pgpPlotWrap"), panel, pts, s);
 }
 
 // ---- wiring -----------------------------------------------------------------
