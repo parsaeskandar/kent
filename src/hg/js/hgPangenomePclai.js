@@ -82,6 +82,53 @@ function pgpScales(panel, pts) {
     };
 }
 
+// How spread out a set of points is: the centroid, the RMS distance from it,
+// and the 1-SD ellipse of their covariance.  The RMS is the single number -
+// "dispersion" in one figure - and the ellipse is there because one number
+// hides direction: fifty haplotypes strung along PC1 and fifty in a disc have
+// the same RMS and mean very different things.
+//
+// Sample covariance (n-1), so the figure is an estimate of the spread of the
+// haplotypes that carry this sequence rather than of these fifty exactly.
+function pgpSpread(pts) {
+    var n = pts.length;
+    if (n < 1) { return null; }
+    var cx = 0, cy = 0, i;
+    for (i = 0; i < n; i++) { cx += pts[i].x; cy += pts[i].y; }
+    cx /= n; cy /= n;
+    if (n < 2) { return {cx: cx, cy: cy, n: n, rms: 0, major: 0, minor: 0, ang: 0}; }
+    var sxx = 0, syy = 0, sxy = 0;
+    for (i = 0; i < n; i++) {
+        var dx = pts[i].x - cx, dy = pts[i].y - cy;
+        sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
+    }
+    sxx /= (n - 1); syy /= (n - 1); sxy /= (n - 1);
+    // Eigenvalues of the 2x2 covariance, closed form.
+    var tr = sxx + syy, det = sxx * syy - sxy * sxy;
+    var disc = Math.sqrt(Math.max(0, tr * tr / 4 - det));
+    return {cx: cx, cy: cy, n: n,
+            rms: Math.sqrt(Math.max(0, tr)),       // RMS distance from centroid
+            major: Math.sqrt(Math.max(0, tr / 2 + disc)),
+            minor: Math.sqrt(Math.max(0, tr / 2 - disc)),
+            ang: 0.5 * Math.atan2(2 * sxy, sxx - syy)};
+}
+
+// The ellipse as a closed polyline in screen space.  It cannot be drawn as a
+// rotated SVG ellipse: PC1 and PC2 have different units per pixel here, so the
+// shape is built in data space and each point put through the scales.
+function pgpEllipse(sp, scale, sds) {
+    var pts = [], k = sds || 1, steps = 72;
+    for (var i = 0; i <= steps; i++) {
+        var t = i / steps * 2 * Math.PI;
+        var u = k * sp.major * Math.cos(t), v = k * sp.minor * Math.sin(t);
+        var dx = u * Math.cos(sp.ang) - v * Math.sin(sp.ang);
+        var dy = u * Math.sin(sp.ang) + v * Math.cos(sp.ang);
+        pts.push(scale.X(sp.cx + dx).toFixed(1) + "," +
+                 scale.Y(sp.cy + dy).toFixed(1));
+    }
+    return pts.join(" ");
+}
+
 function pgpTicks(a, b, n) {
     var step = (b - a) / (n || 5);
     var mag = Math.pow(10, Math.floor(Math.log(step) / Math.LN10));
@@ -217,6 +264,13 @@ function pgpSpotFor(hap) {
     return null;
 }
 
+// A hit's fill: the authors' colour for its coordinate where the file gave one,
+// and a plain light fill where it did not, so a mark is never invisible.
+function pgpFill(p) {
+    return (p && typeof p.rgb === "string" && /^[0-9]+,[0-9]+,[0-9]+$/.test(p.rgb))
+           ? "rgb(" + p.rgb + ")" : "#fcfcfb";
+}
+
 function pgpTipHtml(m) {
     var coord = "PC1 " + pgpFmtNum(m.px) + ", PC2 " + pgpFmtNum(m.py);
     if (!m.hit) {
@@ -264,9 +318,21 @@ function pgpDraw() {
            'Position in ancestry space</text>');
     // No shared locus to name: each haplotype is read where the query matched
     // it, in that assembly's own coordinates.
-    o.push('<text x="' + PGP_L + '" y="43" font-size="11.5" fill="#6b6b67">' +
+    o.push('<text x="' + PGP_L + '" y="41" font-size="11.5" fill="#6b6b67">' +
            pts.length + ' of ' + pgpData.asked + ' haplotypes placed, each read ' +
            'at its own match</text>');
+    // Dispersion: how far apart the hits are, against the reference panel as a
+    // yardstick.  Tight means the sequence sits in one part of the space;
+    // broad means it is carried right across it.
+    var sp = pgpSpread(pts);
+    var ref = pgpSpread((panel.points || []).map(function (p) {
+                  return {x: p[0], y: p[1]}; }));
+    if (sp !== null && sp.n >= 2 && ref !== null && ref.rms > 0) {
+        o.push('<text x="' + PGP_L + '" y="' + (PGP_H - 40) +
+               '" font-size="11" fill="#1a1a19">Dispersion ' + sp.rms.toFixed(3) +
+               ' (' + Math.round(sp.rms / ref.rms * 100) + '% of the reference ' +
+               "panel's " + ref.rms.toFixed(3) + ')</text>');
+    }
 
     pgpTicks(s.x0, s.x1).forEach(function (t) {
         o.push('<line x1="' + s.X(t).toFixed(1) + '" y1="' + PGP_T + '" x2="' +
@@ -293,7 +359,23 @@ function pgpDraw() {
     });
     o.push('</g>');
 
-    // one mark per hit: a dark ringed dot, so it reads against any population colour
+    // The 1-SD ellipse and the centroid, under the hits so they never hide one.
+    if (sp !== null && sp.n >= 2 && sp.major > 0) {
+        o.push('<polyline points="' + pgpEllipse(sp, s, 1) + '" fill="none" ' +
+               'stroke="#1a1a19" stroke-width="1.2" stroke-dasharray="5,4" ' +
+               'opacity="0.55"/>');
+        var ccx = s.X(sp.cx).toFixed(1), ccy = s.Y(sp.cy).toFixed(1);
+        o.push('<line x1="' + (ccx - 5) + '" y1="' + ccy + '" x2="' + (+ccx + 5) +
+               '" y2="' + ccy + '" stroke="#1a1a19" stroke-width="1.2" opacity="0.7"/>');
+        o.push('<line x1="' + ccx + '" y1="' + (ccy - 5) + '" x2="' + ccx +
+               '" y2="' + (+ccy + 5) + '" stroke="#1a1a19" stroke-width="1.2" opacity="0.7"/>');
+    }
+
+    // One mark per hit.  The fill is the authors' own colour for that
+    // coordinate, straight out of the bigBed's itemRgb - so two haplotypes at
+    // the same place in the space are the same colour, and the spread of
+    // colour across the marks is the dispersion in another form.  The dark
+    // ring keeps a mark findable whatever colour it carries.
     o.push('<g id="pgrPclaiHits">');
     pts.forEach(function (p) {
         var on = !!pgpPicked[p.hap];
@@ -305,10 +387,12 @@ function pgpDraw() {
             o.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + (on ? 12 : 10) +
                    '" fill="none" stroke="#1664c0" stroke-width="2"/>');
         }
+        // Ticking a row darkens the ring rather than replacing the fill, so a
+        // ticked haplotype still shows where it sits in the space.
         o.push('<circle class="pgrPclaiHit" data-hap="' + pgpEsc(p.hap) + '" cx="' +
                cx + '" cy="' + cy +
-               '" r="' + (on ? 8 : 5) + '" fill="' + (on ? "#1a1a19" : "#fcfcfb") +
-               '" stroke="#1a1a19" stroke-width="' + (on ? 2.4 : 1.6) + '"/>');
+               '" r="' + (on ? 8 : 5) + '" fill="' + pgpFill(p) +
+               '" stroke="#1a1a19" stroke-width="' + (on ? 2.8 : 1.6) + '"/>');
     });
     o.push('</g>');
 
@@ -324,12 +408,19 @@ function pgpDraw() {
                '" font-size="9.6" fill="#6b6b67">' + pgpEsc(lab) + '</text>');
     });
     var hy = ly + 13 + (panel.labels || []).length * 12.6 + 14;
-    o.push('<circle cx="' + (lx + 4) + '" cy="' + (hy - 3.5) + '" r="5" fill="#fcfcfb" ' +
+    o.push('<circle cx="' + (lx + 4) + '" cy="' + (hy - 3.5) + '" r="5" fill="#d8c0f0" ' +
            'stroke="#1a1a19" stroke-width="1.6"/>');
-    o.push('<text x="' + (lx + 15) + '" y="' + hy + '" font-size="10" fill="#1a1a19">a hit haplotype</text>');
-    o.push('<circle cx="' + (lx + 4) + '" cy="' + (hy + 12.5) + '" r="5" fill="#1a1a19"/>');
+    o.push('<text x="' + (lx + 15) + '" y="' + hy + '" font-size="10" fill="#1a1a19">' +
+           "a hit, in pcLAI's own colour</text>");
+    o.push('<circle cx="' + (lx + 4) + '" cy="' + (hy + 12.5) + '" r="5" fill="#d8c0f0" ' +
+           'stroke="#1a1a19" stroke-width="2.8"/>');
     o.push('<text x="' + (lx + 15) + '" y="' + (hy + 16) + '" font-size="10" fill="#1a1a19">ticked in the table</text>');
-    o.push('<text x="' + lx + '" y="' + (hy + 36) + '" font-size="9.6" fill="#6b6b67">' +
+    o.push('<polyline points="' + (lx - 1) + ',' + (hy + 26) + ' ' + (lx + 9) + ',' +
+           (hy + 26) + '" fill="none" stroke="#1a1a19" stroke-width="1.2" ' +
+           'stroke-dasharray="5,4" opacity="0.55"/>');
+    o.push('<text x="' + (lx + 15) + '" y="' + (hy + 29.5) + '" font-size="10" ' +
+           'fill="#1a1a19">1 SD of the hits</text>');
+    o.push('<text x="' + lx + '" y="' + (hy + 49) + '" font-size="9.6" fill="#6b6b67">' +
            'Click a haplotype for its details.</text>');
     o.push('</svg>');
 
@@ -366,8 +457,23 @@ function pgpDetailHtml() {
                '</td><td style="padding:1px 0">' + value + '</td></tr>');
     }
     if (point !== null) {
-        row("Ancestry", "PC1 " + pgpFmtNum(point.x) + ", PC2 " + pgpFmtNum(point.y));
+        // The swatch is the authors' colour for this coordinate - the same one
+        // the dot carries and the same one the pcLAI tracks paint with.
+        var sw = '<span style="display:inline-block;width:10px;height:10px;' +
+                 'border:1px solid #8a8a85;background:' + pgpFill(point) +
+                 ';vertical-align:-1px;margin-right:5px"></span>';
+        row("Ancestry", sw + "PC1 " + pgpFmtNum(point.x) + ", PC2 " +
+                        pgpFmtNum(point.y));
         row("Confidence", point.conf + "/1000");
+        // Where this haplotype sits relative to the rest of the hits, which is
+        // the dispersion read one haplotype at a time.
+        var sp = pgpSpread(pgpData.points || []);
+        if (sp !== null && sp.n >= 2) {
+            var d = Math.sqrt(Math.pow(point.x - sp.cx, 2) +
+                              Math.pow(point.y - sp.cy, 2));
+            row("From centroid", d.toFixed(3) + " of " + sp.rms.toFixed(3) +
+                                 " (the hits' dispersion)");
+        }
     }
     ((spot && spot.info) || []).forEach(function (pair) {
         row(pair[0], pgpEsc(pair[1]));

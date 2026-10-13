@@ -2441,9 +2441,17 @@ return cloneString(dir);
 }
 
 static boolean pgPclaiPoint(char *dir, char *chrom, int start, int end,
-                            double *retX, double *retY, int *retConf)
+                            double *retX, double *retY, int *retConf,
+                            char *retRgb, int rgbSize)
 /* The pcLAI coordinate of one haplotype over one interval of its own assembly,
- * or FALSE if there is no file or no window there. */
+ * or FALSE if there is no file or no window there.
+ *
+ * retRgb takes the window's itemRgb, which is the authors' own colour for that
+ * coordinate - "generated from a perceptual mapping", per the pcLAI output
+ * spec, and computed by their paintings.py as CIE Lab with L fixed at 80 and
+ * a,b running with PC1,PC2.  Every value it produces is outside the sRGB gamut
+ * and comes back clipped, so the mapping cannot be re-derived from the colours
+ * and is not reimplemented here: the file's own value is passed through. */
 {
 char path[PATH_LEN];
 safef(path, sizeof(path), "%s/pclai.bb", dir);
@@ -2474,6 +2482,19 @@ if (errCatchStart(errCatch))
                 *retX = x;
                 *retY = y;
                 *retConf = atoi(row[1]);
+                /* "R,G,B" - kept as the file wrote it, and checked so that
+                 * nothing but digits and commas reaches a style attribute. */
+                retRgb[0] = '\0';
+                if (countChars(row[5], ',') == 2)
+                    {
+                    char *p;
+                    boolean clean = TRUE;
+                    for (p = row[5]; *p != '\0'; ++p)
+                        if (!isdigit((unsigned char)*p) && *p != ',')
+                            clean = FALSE;
+                    if (clean)
+                        safef(retRgb, rgbSize, "%s", row[5]);
+                    }
                 got = TRUE;
                 }
             }
@@ -2569,11 +2590,17 @@ if (errCatchStart(errCatch))
                 panelDir = cloneString(dir);
             double x, y;
             int conf = 0;
-            if (pgPclaiPoint(dir, chrom, start, end, &x, &y, &conf))
+            char rgb[32];
+            rgb[0] = '\0';
+            if (pgPclaiPoint(dir, chrom, start, end, &x, &y, &conf,
+                             rgb, sizeof(rgb)))
                 {
                 dyStringPrintf(out,
-                    "%s{\"hap\":\"%s\",\"x\":%g,\"y\":%g,\"conf\":%d}",
+                    "%s{\"hap\":\"%s\",\"x\":%g,\"y\":%g,\"conf\":%d",
                     found ? "," : "", jsonStringEscape(hap), x, y, conf);
+                if (rgb[0] != '\0')
+                    dyStringPrintf(out, ",\"rgb\":\"%s\"", rgb);
+                dyStringAppend(out, "}");
                 found++;
                 }
             freez(&dir);
