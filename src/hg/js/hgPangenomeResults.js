@@ -55,6 +55,36 @@ function pgrPclaiReady() {
     return pgrPclaiOn() && pgrRows.some(pgrPclaiSpot);
 }
 
+// What the plot is given for one row: where to read its ancestry, plus the
+// figures the table already shows, formatted here rather than in the plot so
+// that a number means the same thing in both places.  "rank" lets the panel
+// emit the same <a data-rank data-act> the table rows use, which the results
+// page's own click delegation already answers.
+function pgrPclaiSpotOf(r) {
+    var mapq = (r.surjMapq == null) ? r.mapq : r.surjMapq;
+    var id = pgrIdentityOf(r);
+    var info = [];
+    info.push(["Assembly", pgrAssemblyName(r.db) + " (" + pgrAssemblyLabel(r.db) + ")"]);
+    info.push(["Position", r.contig + ":" + pgrFmt(r.start + 1) + "-" + pgrFmt(r.end) +
+                           (r.strand ? " (" + r.strand + ")" : "")]);
+    info.push(["Identity", id == null ? "\u2014" : id.toFixed(1) + "%"]);
+    info.push(["Coverage", r.coverage == null ? "\u2014" : r.coverage.toFixed(1) + "%"]);
+    info.push(["MAPQ", mapq == null ? "\u2014" : String(mapq) +
+                       (mapq < 10 ? " \u2014 the mapper could not tell which copy" : "")]);
+    if (r.matches != null) {
+        info.push(["Bases", pgrFmt(r.matches) + " matching, " +
+                            pgrFmt(r.mismatches || 0) + " mismatched, " +
+                            pgrFmt(r.inserted || 0) + " inserted, " +
+                            pgrFmt(r.deleted || 0) + " deleted"]);
+    }
+    if (r.isCarrier || r.isRepresentative) {
+        info.push(["Role", r.isRepresentative ? "the placement's representative"
+                                              : "carries the query"]);
+    }
+    return {hap: r.hap, acc: r.db, contig: r.contig, start: r.start, end: r.end,
+            rank: r.rank, info: info};
+}
+
 function pgrMinCoverage() {
     return (typeof pangenomeMinCoverage === "number") ? pangenomeMinCoverage : 50;
 }
@@ -606,10 +636,7 @@ function pgrDraw(queries, rows, note) {
     if (pgrPclaiReady()) {
         // Each haplotype is read at its own surjection, so what the plot gets
         // is one spot per row rather than a locus they all share.
-        pgpInit(pgrRows.filter(pgrPclaiSpot).slice(0, 50).map(function (r) {
-            return {hap: r.hap, acc: r.db, contig: r.contig,
-                    start: r.start, end: r.end};
-        }));
+        pgpInit(pgrRows.filter(pgrPclaiSpot).slice(0, 50).map(pgrPclaiSpotOf));
     }
 
     el.onclick = function (ev) {
