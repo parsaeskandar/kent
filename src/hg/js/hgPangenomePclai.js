@@ -23,6 +23,7 @@ var pgpSpots = null;        // one {hap, acc, contig, start, end} per hit
 var pgpData = null;         // the server's answer, kept so a redraw is free
 var pgpPicked = Object.create(null);   // haplotypes the user ticked
 var pgpSelected = null;     // the haplotype whose details are open, if any
+var pgpSelGroup = null;     // the haplotypes sharing the mark that was clicked
 
 // The hit index, shared by the hover readout and the click that opens details:
 // both ask the same question - which mark is under the cursor.
@@ -129,6 +130,85 @@ function pgpEllipse(sp, scale, sds) {
     return pts.join(" ");
 }
 
+// Coincident hits are gathered into one mark.  Measured on a real 48-haplotype
+// query the median gap between neighbouring hits was half a unit, against a
+// mark ten units wide, and 34 of the 48 fell inside one eight-unit disc: at
+// that density separate marks cannot be told apart, let alone aimed at.  So a
+// group is drawn once, sized by how many it holds, and clicking it lists them.
+//
+// Grouping is in viewBox units, not client pixels, so the same query always
+// groups the same way however wide the page renders it.
+var PGP_GROUP_R = 11;       // centres closer than this share a mark
+var PGP_GROUP_GAP = 2;      // clear space every pair of marks must keep
+
+function pgpGroups(pts, scale) {
+    var groups = [];
+    pts.forEach(function (p) {
+        var px = scale.X(p.x), py = scale.Y(p.y), i;
+        for (i = 0; i < groups.length; i++) {
+            var g = groups[i];
+            if (Math.hypot(g.x - px, g.y - py) < PGP_GROUP_R) {
+                g.members.push(p);
+                // Re-centre on the members, so the mark sits where they are
+                // rather than where the first of them happened to be.
+                g.x = 0; g.y = 0;
+                g.members.forEach(function (m) {
+                    g.x += scale.X(m.x); g.y += scale.Y(m.y);
+                });
+                g.x /= g.members.length; g.y /= g.members.length;
+                return;
+            }
+        }
+        groups.push({x: px, y: py, members: [p]});
+    });
+    // Grouping by a fixed radius is not enough on its own: a mark grows with
+    // what it holds, so two groups that were far enough apart as points can
+    // still overlap once drawn.  Merge the worst offending pair and look again,
+    // until no two marks touch - the invariant we actually want is about the
+    // circles, not about the centres.
+    function centre(g) {
+        g.x = 0; g.y = 0;
+        g.members.forEach(function (m) { g.x += scale.X(m.x); g.y += scale.Y(m.y); });
+        g.x /= g.members.length; g.y /= g.members.length;
+    }
+    for (;;) {
+        var worst = PGP_GROUP_GAP, wi = -1, wj = -1, i, j;
+        for (i = 0; i < groups.length; i++) {
+            for (j = i + 1; j < groups.length; j++) {
+                var gap = Math.hypot(groups[i].x - groups[j].x,
+                                     groups[i].y - groups[j].y) -
+                          pgpGroupR(groups[i].members.length) -
+                          pgpGroupR(groups[j].members.length);
+                if (gap < worst) { worst = gap; wi = i; wj = j; }
+            }
+        }
+        if (wi < 0) { break; }
+        groups[wi].members = groups[wi].members.concat(groups[wj].members);
+        centre(groups[wi]);
+        groups.splice(wj, 1);
+    }
+
+    // The group's colour is the member nearest its centre - a real colour the
+    // authors assigned, not an average of several, which would be a colour
+    // pcLAI never gave to any coordinate.
+    groups.forEach(function (g) {
+        var best = null, bestD = Infinity;
+        g.members.forEach(function (m) {
+            var d = Math.hypot(scale.X(m.x) - g.x, scale.Y(m.y) - g.y);
+            if (d < bestD) { bestD = d; best = m; }
+        });
+        g.rep = best;
+        g.picked = g.members.some(function (m) { return !!pgpPicked[m.hap]; });
+    });
+    return groups;
+}
+
+// Area grows with the count so a crowd reads as a crowd, capped so one big
+// group cannot swallow its neighbours.
+function pgpGroupR(n) {
+    return (n <= 1) ? 5 : Math.min(17, 5 + 2.4 * Math.sqrt(n - 1));
+}
+
 function pgpTicks(a, b, n) {
     var step = (b - a) / (n || 5);
     var mag = Math.pow(10, Math.floor(Math.log(step) / Math.LN10));
@@ -147,8 +227,9 @@ function pgpTicks(a, b, n) {
 // viewBox units before anything is compared.  And a hit always wins over a
 // reference point at the same distance - the reader came for the haplotypes.
 
-var PGP_HIT_R = 7;          // how near the cursor must come, in viewBox units
-var PGP_CELL = 14;          // index cell, comfortably above PGP_HIT_R
+var PGP_HIT_R = 7;          // slack outside a mark that still counts, viewBox units
+var PGP_CELL = 14;          // index cell size
+var PGP_GROUP_MAX_R = 17;   // the cap in pgpGroupR, which the search must reach
 
 function pgpFmtNum(v) {
     // Minus sign rather than hyphen: these are coordinates, and the columns of
@@ -159,14 +240,17 @@ function pgpFmtNum(v) {
 function pgpBuildIndex(panel, pts, scale) {
     pgpMarks = [];
     (panel.points || []).forEach(function (p) {
-        pgpMarks.push({x: scale.X(p[0]), y: scale.Y(p[1]), hit: false,
+        pgpMarks.push({x: scale.X(p[0]), y: scale.Y(p[1]), hit: false, r: 2,
                        name: p[3], pop: (panel.labels || [])[p[2]],
                        px: p[0], py: p[1]});
     });
-    pts.forEach(function (p) {
-        pgpMarks.push({x: scale.X(p.x), y: scale.Y(p.y), hit: true,
-                       name: p.hap, conf: p.conf, px: p.x, py: p.y,
-                       spot: pgpSpotFor(p.hap)});
+    // One entry per group, and each is aimable over its whole drawn area: a
+    // big group is a big target, which is the point of drawing it big.
+    pgpGroups(pts, scale).forEach(function (g) {
+        var rep = g.rep;
+        pgpMarks.push({x: g.x, y: g.y, hit: true, r: pgpGroupR(g.members.length),
+                       group: g, name: rep.hap, conf: rep.conf,
+                       px: rep.x, py: rep.y, spot: pgpSpotFor(rep.hap)});
     });
     pgpGrid = Object.create(null);
     pgpMarks.forEach(function (m, i) {
@@ -184,20 +268,26 @@ function pgpMarkAt(wrap, ev) {
     var k = PGP_W / r.width;            // viewBox units per client pixel
     var mx = (ev.clientX - r.left) * k, my = (ev.clientY - r.top) * k;
     var gx = Math.floor(mx / PGP_CELL), gy = Math.floor(my / PGP_CELL);
-    var best = null, bestD = PGP_HIT_R * PGP_HIT_R;
-    for (var dx = -1; dx <= 1; dx++) {
-        for (var dy = -1; dy <= 1; dy++) {
+    // A group's own radius can exceed one index cell, so the search widens
+    // enough to reach the biggest mark that could still be covering the cursor.
+    var reach = Math.ceil((PGP_HIT_R + PGP_GROUP_MAX_R) / PGP_CELL);
+    var best = null, bestScore = Infinity;
+    for (var dx = -reach; dx <= reach; dx++) {
+        for (var dy = -reach; dy <= reach; dy++) {
             var cell = pgpGrid[(gx + dx) + "," + (gy + dy)];
             if (!cell) { continue; }
             for (var j = 0; j < cell.length; j++) {
                 var m = pgpMarks[cell[j]];
-                var d = (m.x - mx) * (m.x - mx) + (m.y - my) * (m.y - my);
-                // "<=" lets a hit displace a reference point it sits on,
-                // because the hits are appended after the cloud.
-                if (d <= bestD && (best === null || m.hit || !best.hit)) {
-                    bestD = d;
-                    best = m;
-                }
+                var d = Math.hypot(m.x - mx, m.y - my);
+                // Inside the mark, or within the slack that makes a small dot
+                // aimable.  Scored by how far outside its edge the cursor is,
+                // so a small mark sitting on a big one still wins when the
+                // cursor is actually on the small one.
+                var edge = d - m.r;
+                if (edge > PGP_HIT_R) { continue; }
+                // A hit always beats a reference point at comparable distance.
+                var score = edge - (m.hit ? 1000 : 0);
+                if (score < bestScore) { bestScore = score; best = m; }
             }
         }
     }
@@ -236,10 +326,19 @@ function pgpAttachHover(wrap) {
     if (!pgpEscBound) {
         pgpEscBound = true;
         document.addEventListener("keydown", function (ev) {
-            if (ev.key === "Escape" && pgpSelected !== null) {
+            if (ev.key !== "Escape") { return; }
+            // Escape steps back out of a haplotype to the group it came from,
+            // then closes.
+            if (pgpSelected !== null && pgpSelGroup !== null &&
+                pgpSelGroup.length > 1) {
                 pgpSelected = null;
-                pgpDraw();
+            } else if (pgpSelected !== null || pgpSelGroup !== null) {
+                pgpSelected = null;
+                pgpSelGroup = null;
+            } else {
+                return;
             }
+            pgpDraw();
         });
     }
 
@@ -249,9 +348,25 @@ function pgpAttachHover(wrap) {
     // what the panel knows.
     wrap.addEventListener("click", function (ev) {
         var at = pgpMarkAt(wrap, ev);
-        var hap = (at !== null && at.mark.hit) ? at.mark.name : null;
-        if (hap === pgpSelected) { hap = null; }       // clicking it again closes
-        pgpSelected = hap;
+        if (at === null || !at.mark.hit) {             // the cloud, or nothing
+            pgpSelected = null;
+            pgpSelGroup = null;
+            pgpDraw();
+            return;
+        }
+        var members = at.mark.group ? at.mark.group.members : [];
+        // Clicking the open mark again closes it.
+        var same = pgpSelGroup !== null && members.length === pgpSelGroup.length &&
+                   members.every(function (m, i) { return m.hap === pgpSelGroup[i].hap; });
+        if (same) {
+            pgpSelected = null;
+            pgpSelGroup = null;
+        } else {
+            pgpSelGroup = members;
+            // A mark holding one haplotype goes straight to its details;
+            // a crowd has to be narrowed down first.
+            pgpSelected = (members.length === 1) ? members[0].hap : null;
+        }
         pgpDraw();
     });
 }
@@ -278,6 +393,15 @@ function pgpTipHtml(m) {
         return "<b>" + pgpEsc(m.name) + "</b><br>" +
                (m.pop ? pgpEsc(m.pop) + "<br>" : "") +
                '<span style="color:#6b6b67">' + coord + "</span>";
+    }
+    if (m.group && m.group.members.length > 1) {
+        var names = m.group.members.slice(0, 4).map(function (x) {
+            return pgpEsc(x.hap); }).join(", ");
+        var more = m.group.members.length - 4;
+        return "<b>" + m.group.members.length + " haplotypes here</b><br>" +
+               names + (more > 0 ? ", and " + more + " more" : "") +
+               '<br><span style="color:#6b6b67">' + coord +
+               " \u2014 click to list them</span>";
     }
     var out = "<b>" + pgpEsc(m.name) + "</b><br>" + coord +
               '<br><span style="color:#6b6b67">pcLAI confidence ' + m.conf +
@@ -377,22 +501,35 @@ function pgpDraw() {
     // colour across the marks is the dispersion in another form.  The dark
     // ring keeps a mark findable whatever colour it carries.
     o.push('<g id="pgrPclaiHits">');
-    pts.forEach(function (p) {
-        var on = !!pgpPicked[p.hap];
-        var cx = s.X(p.x).toFixed(1), cy = s.Y(p.y).toFixed(1);
-        // The open ring marks the one whose details are showing.  Drawn outside
-        // the mark rather than changing it, so a haplotype that is both ticked
-        // and selected still reads as ticked.
-        if (p.hap === pgpSelected) {
-            o.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + (on ? 12 : 10) +
+    // Biggest first, so a large group never covers a small one drawn under it.
+    var groups = pgpGroups(pts, s).slice().sort(function (a, b) {
+        return b.members.length - a.members.length;
+    });
+    groups.forEach(function (g) {
+        var r = pgpGroupR(g.members.length);
+        var cx = g.x.toFixed(1), cy = g.y.toFixed(1);
+        var sel = g.members.some(function (m) { return m.hap === pgpSelected; });
+        // The open ring marks the group whose details are showing.  Drawn
+        // outside the mark rather than changing it, so a group that is both
+        // ticked and selected still reads as ticked.
+        if (sel) {
+            o.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + (r + 5) +
                    '" fill="none" stroke="#1664c0" stroke-width="2"/>');
         }
-        // Ticking a row darkens the ring rather than replacing the fill, so a
+        // Ticking a row thickens the ring rather than replacing the fill, so a
         // ticked haplotype still shows where it sits in the space.
-        o.push('<circle class="pgrPclaiHit" data-hap="' + pgpEsc(p.hap) + '" cx="' +
-               cx + '" cy="' + cy +
-               '" r="' + (on ? 8 : 5) + '" fill="' + pgpFill(p) +
-               '" stroke="#1a1a19" stroke-width="' + (on ? 2.8 : 1.6) + '"/>');
+        o.push('<circle class="pgrPclaiHit" data-haps="' +
+               pgpEsc(String(g.members.length)) + '" cx="' + cx + '" cy="' + cy +
+               '" r="' + r.toFixed(1) + '" fill="' + pgpFill(g.rep) +
+               '" fill-opacity="' + (g.members.length > 1 ? "0.85" : "1") +
+               '" stroke="#1a1a19" stroke-width="' + (g.picked ? 2.8 : 1.6) + '"/>');
+        // The count, once the mark is big enough to hold it legibly.
+        if (g.members.length > 1 && r >= 10) {
+            o.push('<text x="' + cx + '" y="' + (g.y + 3.6).toFixed(1) +
+                   '" font-size="' + (r >= 14 ? 11 : 9.5) + '" font-weight="600" ' +
+                   'fill="#1a1a19" text-anchor="middle" style="pointer-events:none">' +
+                   g.members.length + '</text>');
+        }
     });
     o.push('</g>');
 
@@ -412,6 +549,12 @@ function pgpDraw() {
            'stroke="#1a1a19" stroke-width="1.6"/>');
     o.push('<text x="' + (lx + 15) + '" y="' + hy + '" font-size="10" fill="#1a1a19">' +
            "a hit, in pcLAI's own colour</text>");
+    o.push('<circle cx="' + (lx + 7) + '" cy="' + (hy + 46) + '" r="11" ' +
+           'fill="#d8c0f0" fill-opacity="0.85" stroke="#1a1a19" stroke-width="1.6"/>');
+    o.push('<text x="' + (lx + 7) + '" y="' + (hy + 49.6) + '" font-size="9.5" ' +
+           'font-weight="600" fill="#1a1a19" text-anchor="middle">n</text>');
+    o.push('<text x="' + (lx + 22) + '" y="' + (hy + 49.6) + '" font-size="10" ' +
+           'fill="#1a1a19">n of them, too close to split</text>');
     o.push('<circle cx="' + (lx + 4) + '" cy="' + (hy + 12.5) + '" r="5" fill="#d8c0f0" ' +
            'stroke="#1a1a19" stroke-width="2.8"/>');
     o.push('<text x="' + (lx + 15) + '" y="' + (hy + 16) + '" font-size="10" fill="#1a1a19">ticked in the table</text>');
@@ -420,8 +563,8 @@ function pgpDraw() {
            'stroke-dasharray="5,4" opacity="0.55"/>');
     o.push('<text x="' + (lx + 15) + '" y="' + (hy + 29.5) + '" font-size="10" ' +
            'fill="#1a1a19">1 SD of the hits</text>');
-    o.push('<text x="' + lx + '" y="' + (hy + 49) + '" font-size="9.6" fill="#6b6b67">' +
-           'Click a haplotype for its details.</text>');
+    o.push('<text x="' + lx + '" y="' + (hy + 72) + '" font-size="9.6" fill="#6b6b67">' +
+           'Click a mark for details.</text>');
     o.push('</svg>');
 
     // The panel sits below the plot rather than beside it: the legend already
@@ -432,6 +575,19 @@ function pgpDraw() {
                      pgpDetailHtml();
     pgpBuildIndex(panel, pts, s);
     pgpAttachHover(pgpEl("pgpPlotWrap"));
+
+    // The list in the panel sits outside the plot, so its own clicks are
+    // caught here.  Assigned rather than added, so a redraw cannot stack it.
+    // Anything else is left to bubble: the results page's delegation is what
+    // answers the browser and alignment links.
+    host.onclick = function (ev) {
+        var a = ev.target.closest ? ev.target.closest("a[data-pgp-hap]") : null;
+        if (!a) { return; }
+        ev.preventDefault();
+        var hap = a.getAttribute("data-pgp-hap");
+        pgpSelected = (hap === "") ? null : hap;       // "" steps back to the list
+        pgpDraw();
+    };
 }
 
 // The details of the selected haplotype.  The figures come from the results
@@ -439,6 +595,30 @@ function pgpDraw() {
 // here is the part only the plot knows - where the haplotype sits in ancestry
 // space and how confident pcLAI is about that.
 function pgpDetailHtml() {
+    // A crowded mark lists what it holds, so a haplotype that cannot be aimed
+    // at in the plot can still be reached in two clicks.
+    if (pgpSelected === null && pgpSelGroup !== null && pgpSelGroup.length > 1) {
+        var o = ['<div id="pgpDetail" style="margin:0.6em 0 0 0;padding:0.6em 0.8em;' +
+                 'border:1px solid #cfcfc8;background:#fcfcfb;max-width:820px">'];
+        o.push('<div style="font-weight:600;font-size:13px;margin-bottom:0.2em">' +
+               pgpSelGroup.length + ' haplotypes at this point</div>');
+        o.push('<div style="font-size:11.5px;color:#6b6b67;margin-bottom:0.5em">' +
+               'They sit within ' + PGP_GROUP_R + ' units of one another, which is ' +
+               'closer than one mark is wide. Pick one for its details.</div>');
+        o.push('<div style="font-size:11.5px;line-height:1.9">');
+        pgpSelGroup.slice().sort(function (a, b) {
+            return a.hap < b.hap ? -1 : (a.hap > b.hap ? 1 : 0);
+        }).forEach(function (m) {
+            o.push('<a href="#" data-pgp-hap="' + pgpEsc(m.hap) + '" ' +
+                   'style="display:inline-block;margin-right:1.1em;white-space:nowrap">' +
+                   '<span style="display:inline-block;width:9px;height:9px;' +
+                   'border:1px solid #8a8a85;background:' + pgpFill(m) +
+                   ';vertical-align:-1px;margin-right:4px"></span>' +
+                   pgpEsc(m.hap) + '</a>');
+        });
+        o.push('</div></div>');
+        return o.join("");
+    }
     if (pgpSelected === null) { return ""; }
     var spot = pgpSpotFor(pgpSelected);
     var point = null;
@@ -486,7 +666,11 @@ function pgpDetailHtml() {
                '<a href="#" data-rank="' + spot.rank + '" data-act="browser">' +
                'View in Genome Browser</a> &nbsp;' +
                '<a href="#" data-rank="' + spot.rank + '" data-act="details">' +
-               'Alignment</a></div>');
+               'Alignment</a>' +
+               ((pgpSelGroup !== null && pgpSelGroup.length > 1)
+                ? ' &nbsp;<a href="#" data-pgp-hap="">\u2039 the ' +
+                  pgpSelGroup.length + ' here</a>' : "") +
+               '</div>');
     }
     o.push('</div>');
     return o.join("");
