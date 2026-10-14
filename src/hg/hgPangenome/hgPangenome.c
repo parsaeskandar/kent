@@ -177,14 +177,6 @@ static char *cfgOr(char *name, char *def)
 return cfgOptionDefault(name, def);
 }
 
-static boolean pgReachableTargets()
-/* Is the "only assemblies with this region" filter offered?  Off unless
- * hg.conf says otherwise - see the note where the control is written. */
-{
-return sameString(cfgOr("pangenome.reachableTargets", "off"), "on");
-}
-
-
 /* ---- Middleware HTTP client (the "ask the other server" layer) ----
  * Uses libcurl, which is already a project dependency (see lib/curlWrap.c and
  * the -lcurl on our link line); no new library is introduced. */
@@ -660,16 +652,7 @@ else if (sameString(cmd, "poll"))
 else if (sameString(cmd, "liftoverTargets"))
     {
     /* Which haplotypes can this region translate to?  Same payload as a
-     * translation, minus the target.
-     *
-     * Refused outright while the feature is off, so that a stale page or a
-     * hand-made request cannot send a call we already know answers HTTP 500.
-     * The page does not offer the control at all in that state. */
-    if (!pgReachableTargets())
-        {
-        emitJsonError("the reachable-assembly filter is not available on this server");
-        return;
-        }
+     * translation, minus the target. */
     char *payload = cgiOptionalString("payload");
     if (isEmpty(payload))
         {
@@ -2820,7 +2803,6 @@ jsInlineF("window.pangenomeConfig = {\n"
           "  presetTarget: \"%s\",\n"
           "  presetAnnot: \"%s\",\n"
           "  presetHide: \"%s\",\n"
-          "  reachableTargets: %s,\n"
           "  minTargetCoverage: %s,\n"
           "  maxTargetNodes: %s,\n"
           "  wideRegionBp: %ld,\n"
@@ -2849,7 +2831,6 @@ jsInlineF("window.pangenomeConfig = {\n"
           jsonStringEscape(cgiUsualString("pgTarget", "")),
           jsonStringEscape(cgiUsualString("pgAnnot", "")),
           jsonStringEscape(cgiUsualString("pgHide", "")),
-          pgReachableTargets() ? "true" : "false",
           cfgOr("pangenome.minTargetCoverage", "10"),
           cfgOr("pangenome.maxTargetNodes", "300"),
           atol(cfgOr("pangenome.wideRegionBp", "100000")),
@@ -2969,26 +2950,11 @@ printf("<td>\n");
 printf("<input type='search' id='pgcFilter' size='24' placeholder='filter assemblies…'>\n");
 /* One checkbox rather than two buttons that swapped places.  The pair looked
  * like two separate actions and gave no sign of which state the list was in;
- * a checkbox says both what it does and whether it is on.
- *
- * Off by default, because the endpoint behind it does not work: every
- * /api/v1/liftover/targets request answers HTTP 500 with
- *
- *   liftover-targets failed: Index::translatable_haplotypes needs
- *   table1_path/table2_path and gbwt_ri_pat...
- *
- * - the mapping server is missing the index tables that answer it.  Offering a
- * control that can only fail is worse than not offering it, and the request is
- * not worth sending while we know the answer.  There is no cheap substitute:
- * the only other way to learn which assemblies carry a region is to translate
- * to each of them, and that is capped at pangenome.maxLiftTargets.  So the
- * feature is kept, switched off at the one place that decides whether to ask.
- * Set pangenome.reachableTargets=on once the server serves that endpoint. */
-if (pgReachableTargets())
-    printf("<label for='pgcReachableOnly' class='pgcToggle' title='Ask the graph "
-           "which assemblies this region exists on, and list only those'>"
-           "<input type='checkbox' id='pgcReachableOnly'> "
-           "Only assemblies with this region</label>\n");
+ * a checkbox says both what it does and whether it is on. */
+printf("<label for='pgcReachableOnly' class='pgcToggle' title='Ask the graph "
+       "which assemblies this region exists on, and list only those'>"
+       "<input type='checkbox' id='pgcReachableOnly'> "
+       "Only assemblies with this region</label>\n");
 printf("<div class='pgMuted' id='pgcTargetCount'></div>\n");
 printf("<select id='pgcTargets' multiple size='10' class='pgcTargets'></select>\n");
 printf("<div class='pgMuted'>Hold Ctrl (Cmd on a Mac) to pick several, "

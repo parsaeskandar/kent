@@ -558,26 +558,9 @@ check_eq "exactly at the span cap is accepted" "$(mock_count)" "1"
 
 section "reachable-targets query (cmd=liftoverTargets)"
 
-# The filter is off unless hg.conf asks for it, because the endpoint behind it
-# answers HTTP 500 on the live service - so the forwarding tests below have to
-# switch it on, and one test checks that it really is refused when off.
+: > "$REC"
 TARGETS_OK='{"src":"HG00097#1#CM094066.1","start":19113,"end":19137}'
-
-: > "$REC"
-mk_conf "$TMP/reachOff.conf" "pangenome.apiBase=http://127.0.0.1:$PORT"
-out=$(cgi_post_cmd "$TMP/reachOff.conf" liftoverTargets "$TARGETS_OK")
-check_eq    "off by default: nothing is sent upstream" "$(mock_count)" "0"
-check_contains "off by default: says so in our own envelope" "$out" \
-    "not available on this server"
-
-# The default conf plus the flag, so the caps the validation tests below check
-# are the same ones every other test uses.
-REACH_CONF="$TMP/reach.conf"
-cp "$CONF" "$REACH_CONF"
-echo "pangenome.reachableTargets=on" >> "$REACH_CONF"
-
-: > "$REC"
-out=$(cgi_post_cmd "$REACH_CONF" liftoverTargets "$TARGETS_OK")
+out=$(cgi_post_cmd "$CONF" liftoverTargets "$TARGETS_OK")
 check_eq       "forwarded to /api/v1/liftover/targets" "$(mock_field path)" "/api/v1/liftover/targets"
 check_eq       "forwarded as POST" "$(mock_field method)" "POST"
 check_eq       "payload forwarded byte-for-byte" "$(mock_field body)" "$TARGETS_OK"
@@ -585,17 +568,17 @@ check_contains "reachable list passed through" "$out" '"haplotypes"'
 
 # no tgt is required here, but the source and range still are
 : > "$REC"
-out=$(cgi_post_cmd "$REACH_CONF" liftoverTargets '{"src":"HG00097#1","start":1,"end":2}')
+out=$(cgi_post_cmd "$CONF" liftoverTargets '{"src":"HG00097#1","start":1,"end":2}')
 check_contains "src must still be a full contig path" "$out" "full contig path"
 check_eq       "not forwarded" "$(mock_count)" "0"
 
 : > "$REC"
-out=$(cgi_post_cmd "$REACH_CONF" liftoverTargets '{"src":"a#1#c","start":0,"end":10000001}')
+out=$(cgi_post_cmd "$CONF" liftoverTargets '{"src":"a#1#c","start":0,"end":10000001}')
 check_contains "span cap still enforced" "$out" "limit 10000000"
 check_eq       "not forwarded" "$(mock_count)" "0"
 
 : > "$REC"
-out=$(cgi_post_cmd "$REACH_CONF" liftoverTargets '{"src":"a#1#c","start":5,"end":5}')
+out=$(cgi_post_cmd "$CONF" liftoverTargets '{"src":"a#1#c","start":5,"end":5}')
 check_contains "empty range still rejected" "$out" "greater than"
 
 section "haplotype list"
