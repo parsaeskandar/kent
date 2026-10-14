@@ -1091,7 +1091,11 @@ function init() {
     $("pgcTargets").addEventListener("change", function () {
         fillTargets($("pgcFilter").value);      // refresh the "N selected" line
     });
-    $("pgcReachableOnly").addEventListener("change", onReachableToggle);
+    // The control is only rendered when the server offers the filter, so its
+    // absence is normal rather than a missing element.
+    if ($("pgcReachableOnly")) {
+        $("pgcReachableOnly").addEventListener("change", onReachableToggle);
+    }
 
     loadHaplotypes();
     // Ask on the way in as well as on a change: arriving here from a browser
