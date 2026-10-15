@@ -109,7 +109,16 @@ function pgpFetch(spots) {
 
 // ---- the plot ---------------------------------------------------------------
 
-var PGP_W = 820, PGP_H = 620, PGP_L = 66, PGP_R = 250, PGP_T = 56, PGP_B = 64;
+var PGP_W = 820, PGP_H = 644, PGP_L = 66, PGP_R = 250, PGP_T = 56, PGP_B = 88;
+
+// Everything below the plot is stacked from the plot's own bottom edge rather
+// than from the canvas height, so the three rows cannot drift into each other
+// when the canvas changes: tick labels, then the axis name, then the
+// dispersion line.  PGP_B has to leave room for all three.
+var PGP_BASE = PGP_H - PGP_B;       // y of the plot's bottom edge
+var PGP_TICK_Y = PGP_BASE + 17;
+var PGP_AXIS_Y = PGP_BASE + 38;
+var PGP_DISP_Y = PGP_BASE + 62;
 
 function pgpScales(panel, pts) {
     var xs = panel.points.map(function (p) { return p[0]; })
@@ -520,7 +529,7 @@ function pgpDraw() {
     var ref = pgpSpread((panel.points || []).map(function (p) {
                   return {x: p[0], y: p[1]}; }));
     if (sp !== null && sp.n >= 2 && ref !== null && ref.rms > 0) {
-        o.push('<text x="' + PGP_L + '" y="' + (PGP_H - 40) +
+        o.push('<text x="' + PGP_L + '" y="' + PGP_DISP_Y +
                '" font-size="11" fill="#1a1a19">Dispersion ' + sp.rms.toFixed(3) +
                ' (' + Math.round(sp.rms / ref.rms * 100) + '% of the reference ' +
                "panel's " + ref.rms.toFixed(3) + ')</text>');
@@ -529,7 +538,7 @@ function pgpDraw() {
     pgpTicks(s.x0, s.x1).forEach(function (t) {
         o.push('<line x1="' + s.X(t).toFixed(1) + '" y1="' + PGP_T + '" x2="' +
                s.X(t).toFixed(1) + '" y2="' + (PGP_H - PGP_B) + '" stroke="#e4e3df"/>');
-        o.push('<text x="' + s.X(t).toFixed(1) + '" y="' + (PGP_H - PGP_B + 17) +
+        o.push('<text x="' + s.X(t).toFixed(1) + '" y="' + PGP_TICK_Y +
                '" font-size="10.5" fill="#6b6b67" text-anchor="middle">' + t + '</text>');
     });
     pgpTicks(s.y0, s.y1).forEach(function (t) {
@@ -538,7 +547,7 @@ function pgpDraw() {
         o.push('<text x="' + (PGP_L - 8) + '" y="' + (s.Y(t) + 3.5).toFixed(1) +
                '" font-size="10.5" fill="#6b6b67" text-anchor="end">' + t + '</text>');
     });
-    o.push('<text x="' + ((PGP_L + PGP_W - PGP_R) / 2).toFixed(0) + '" y="' + (PGP_H - 22) +
+    o.push('<text x="' + ((PGP_L + PGP_W - PGP_R) / 2).toFixed(0) + '" y="' + PGP_AXIS_Y +
            '" font-size="11.5" fill="#1a1a19" text-anchor="middle">PC1</text>');
     o.push('<text transform="translate(17,' + ((PGP_T + PGP_H - PGP_B) / 2).toFixed(0) +
            ') rotate(-90)" font-size="11.5" fill="#1a1a19" text-anchor="middle">PC2</text>');
