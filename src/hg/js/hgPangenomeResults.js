@@ -77,12 +77,24 @@ function pgrPclaiSpotOf(r) {
                             pgrFmt(r.inserted || 0) + " inserted, " +
                             pgrFmt(r.deleted || 0) + " deleted"]);
     }
+    // Which locus this hit belongs to, when the query mapped to more than one.
+    // Without it two rows for one haplotype are indistinguishable in the plot.
+    if (r.placements > 1) {
+        info.push(["Placement", (r.placement + 1) + " of " + r.placements +
+                                (r.placement === 0 ? " (the best)" : "")]);
+    }
     if (r.isCarrier || r.isRepresentative) {
         info.push(["Role", r.isRepresentative ? "the placement's representative"
                                               : "carries the query"]);
     }
     return {hap: r.hap, acc: r.db, contig: r.contig, start: r.start, end: r.end,
-            rank: r.rank, info: info};
+            rank: r.rank, info: info,
+            // What the plot filters on.  "id" is this spot's own name: the same
+            // haplotype can appear once per placement of a query that mapped to
+            // several loci, so the haplotype alone does not identify a point.
+            id: r.hap + "/" + r.placement + "/" + r.start,
+            coverage: (r.coverage == null) ? null : r.coverage,
+            placement: r.placement, placements: r.placements, query: r.query};
 }
 
 function pgrMinCoverage() {
@@ -636,7 +648,11 @@ function pgrDraw(queries, rows, note) {
     if (pgrPclaiReady()) {
         // Each haplotype is read at its own surjection, so what the plot gets
         // is one spot per row rather than a locus they all share.
-        pgpInit(pgrRows.filter(pgrPclaiSpot).slice(0, 50).map(pgrPclaiSpotOf));
+        // Every plottable row goes to the plot, not a pre-trimmed best few:
+        // the plot does its own filtering and the thresholds are adjustable
+        // there, so trimming here would put rows out of its reach.  The count
+        // is already bounded by pangenome.resultsSurjectTop.
+        pgpInit(pgrRows.filter(pgrPclaiSpot).map(pgrPclaiSpotOf));
     }
 
     el.onclick = function (ev) {

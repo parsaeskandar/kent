@@ -31,6 +31,48 @@ var pgpMarks = null;
 var pgpGrid = null;
 var pgpEscBound = false;
 
+// ---- what gets plotted ------------------------------------------------------
+//
+// The table lists every hit on purpose.  The plot must not: the surjection is
+// asked for a COUNT of haplotypes and answers best first, so on a region few
+// haplotypes carry, the tail of that count is incidental repeat matches
+// covering a few per cent of the query.  They are real rows and belong in the
+// table, but their ancestry is read at a position that has little to do with
+// the query, and averaging it in moves the centroid and inflates the
+// dispersion.  Both filters below therefore govern the points, the grouping,
+// the ellipse and the dispersion together, so the figure always describes
+// exactly what is drawn - and both say what they excluded rather than dropping
+// it quietly.
+var pgpMinCov = null;       // coverage floor, % - null until the config is read
+var pgpBestOnly = true;     // only the best placement of each query
+
+function pgpMinCovDefault() {
+    return (typeof pangenomePclaiMinCoverage === "number")
+           ? pangenomePclaiMinCoverage : 50;
+}
+
+// A point is drawn when the row behind it clears both filters.
+// What identifies one plotted point.  Its own id where it has one, so two
+// placements on the same haplotype stay distinct; the haplotype name otherwise.
+function pgpKeyOf(p) {
+    return (p && typeof p === "object" && p.id) ? p.id : ((p && p.hap) || String(p));
+}
+
+function pgpKeep(p) {
+    var spot = pgpSpotFor(p);
+    if (spot === null) { return false; }
+    if (pgpMinCov !== null && spot.coverage !== null &&
+        spot.coverage < pgpMinCov) { return false; }
+    if (pgpBestOnly && spot.placement > 0) { return false; }
+    return true;
+}
+
+// True when any hit comes from a secondary placement, which is the only case
+// where the placement control has anything to offer.
+function pgpHasPlacements() {
+    return (pgpSpots || []).some(function (s) { return s.placements > 1; });
+}
+
 // Colours for the reference populations.  The same wheel hgc.scatterPlot.js
 // uses, so a reader who has seen the details page sees the same space.
 var PGP_HUES = ["#d40000","#0033cc","#00802b","#cc6600","#7700aa","#008b8b",
@@ -250,7 +292,7 @@ function pgpBuildIndex(panel, pts, scale) {
         var rep = g.rep;
         pgpMarks.push({x: g.x, y: g.y, hit: true, r: pgpGroupR(g.members.length),
                        group: g, name: rep.hap, conf: rep.conf,
-                       px: rep.x, py: rep.y, spot: pgpSpotFor(rep.hap)});
+                       px: rep.x, py: rep.y, spot: pgpSpotFor(rep)});
     });
     pgpGrid = Object.create(null);
     pgpMarks.forEach(function (m, i) {
@@ -357,7 +399,8 @@ function pgpAttachHover(wrap) {
         var members = at.mark.group ? at.mark.group.members : [];
         // Clicking the open mark again closes it.
         var same = pgpSelGroup !== null && members.length === pgpSelGroup.length &&
-                   members.every(function (m, i) { return m.hap === pgpSelGroup[i].hap; });
+                   members.every(function (m, i) {
+                       return pgpKeyOf(m) === pgpKeyOf(pgpSelGroup[i]); });
         if (same) {
             pgpSelected = null;
             pgpSelGroup = null;
@@ -365,15 +408,26 @@ function pgpAttachHover(wrap) {
             pgpSelGroup = members;
             // A mark holding one haplotype goes straight to its details;
             // a crowd has to be narrowed down first.
-            pgpSelected = (members.length === 1) ? members[0].hap : null;
+            pgpSelected = (members.length === 1) ? pgpKeyOf(members[0]) : null;
         }
         pgpDraw();
     });
 }
 
-function pgpSpotFor(hap) {
+// The spot behind a point.  Matched on the point's own id where it has one:
+// two placements of one query can both land on the same haplotype, and then
+// the haplotype name alone picks the wrong row.
+function pgpSpotFor(p) {
     var list = pgpSpots || [];
-    for (var i = 0; i < list.length; i++) {
+    var id = (p && typeof p === "object") ? p.id : null;
+    var hap = (p && typeof p === "object") ? p.hap : p;
+    var i;
+    if (id) {
+        for (i = 0; i < list.length; i++) {
+            if (list[i].id === id) { return list[i]; }
+        }
+    }
+    for (i = 0; i < list.length; i++) {
         if (list[i].hap === hap) { return list[i]; }
     }
     return null;
@@ -419,11 +473,23 @@ function pgpTipHtml(m) {
 function pgpDraw() {
     var host = pgpEl("pgrPclaiPlot");
     if (!host || !pgpData || !pgpData.panel) { return; }
-    var panel = pgpData.panel, pts = pgpData.points || [];
+    var panel = pgpData.panel, all = pgpData.points || [];
+    if (pgpMinCov === null) { pgpMinCov = pgpMinCovDefault(); }
+    var pts = all.filter(pgpKeep);
+    var dropped = all.length - pts.length;
     // pcLAI windows are built from SNPs, so a region with no SNPs - a
     // centromere above all - has no windows and no haplotype can be placed.
     // Say so, rather than drawing an empty reference cloud and leaving the
     // reader to wonder which of the two it is looking at.
+    if (!pts.length && all.length) {
+        // Filtered down to nothing, which is a different thing from having no
+        // ancestry data: say which filter did it and leave the controls up.
+        host.innerHTML = pgpControlsHtml(0, all.length, dropped) +
+            "<p>No hit clears these filters. Lower the coverage floor, or " +
+            "include every placement, to see more.</p>";
+        pgpBindControls();
+        return;
+    }
     if (!pts.length) {
         host.innerHTML = "<p>None of these " + pgpData.asked + " haplotypes " +
             "has a pcLAI window where the query matched it. pcLAI windows " +
@@ -443,8 +509,10 @@ function pgpDraw() {
     // No shared locus to name: each haplotype is read where the query matched
     // it, in that assembly's own coordinates.
     o.push('<text x="' + PGP_L + '" y="41" font-size="11.5" fill="#6b6b67">' +
-           pts.length + ' of ' + pgpData.asked + ' haplotypes placed, each read ' +
-           'at its own match</text>');
+           pts.length + (dropped ? ' of ' + all.length + ' placed hits' :
+                         ' of ' + pgpData.asked + ' haplotypes placed') +
+           ', each read at its own match' +
+           (dropped ? ' \u2014 ' + dropped + ' filtered out' : '') + '</text>');
     // Dispersion: how far apart the hits are, against the reference panel as a
     // yardstick.  Tight means the sequence sits in one part of the space;
     // broad means it is carried right across it.
@@ -508,7 +576,7 @@ function pgpDraw() {
     groups.forEach(function (g) {
         var r = pgpGroupR(g.members.length);
         var cx = g.x.toFixed(1), cy = g.y.toFixed(1);
-        var sel = g.members.some(function (m) { return m.hap === pgpSelected; });
+        var sel = g.members.some(function (m) { return pgpKeyOf(m) === pgpSelected; });
         // The open ring marks the group whose details are showing.  Drawn
         // outside the mark rather than changing it, so a group that is both
         // ticked and selected still reads as ticked.
@@ -570,9 +638,11 @@ function pgpDraw() {
     // The panel sits below the plot rather than beside it: the legend already
     // owns the right-hand strip, and below keeps the plot from reflowing when a
     // haplotype is picked or let go.
-    host.innerHTML = '<div id="pgpPlotWrap" style="position:relative;' +
+    host.innerHTML = pgpControlsHtml(pts.length, all.length, dropped) +
+                     '<div id="pgpPlotWrap" style="position:relative;' +
                      'display:inline-block;max-width:100%">' + o.join("") + '</div>' +
                      pgpDetailHtml();
+    pgpBindControls();
     pgpBuildIndex(panel, pts, s);
     pgpAttachHover(pgpEl("pgpPlotWrap"));
 
@@ -588,6 +658,52 @@ function pgpDraw() {
         pgpSelected = (hap === "") ? null : hap;       // "" steps back to the list
         pgpDraw();
     };
+}
+
+// The filters, stated as controls rather than applied silently.  Rebuilt on
+// every draw, so their markup carries the current values and nothing has to be
+// kept in sync with the DOM.
+function pgpControlsHtml(shown, total, dropped) {
+    var o = ['<div id="pgpControls" style="margin:0.4em 0;font-size:11.5px">'];
+    o.push('<label for="pgpCovFloor">Plot hits covering at least </label>' +
+           '<input id="pgpCovFloor" type="number" min="0" max="100" step="5" ' +
+           'value="' + pgpMinCov + '" style="width:4.5em"> % of the query');
+    if (pgpHasPlacements()) {
+        // A query that maps to several loci gets one set of haplotypes per
+        // locus.  Their ancestry is read at different places in the genome, so
+        // plotting them together averages positions that have nothing to do
+        // with each other - the best placement alone is the default.
+        o.push('<label style="margin-left:1.4em">' +
+               '<input id="pgpBestOnly" type="checkbox"' +
+               (pgpBestOnly ? ' checked' : '') + '> best placement only</label>');
+    }
+    if (dropped > 0) {
+        o.push('<span style="margin-left:1.2em;color:#6b6b67">' + shown +
+               ' of ' + total + ' shown, ' + dropped + ' filtered out ' +
+               '(still listed in the table)</span>');
+    }
+    o.push('</div>');
+    return o.join("");
+}
+
+function pgpBindControls() {
+    var cov = pgpEl("pgpCovFloor");
+    if (cov) {
+        // "change", not "input": retyping a two-digit floor would otherwise
+        // redraw at the intermediate value.
+        cov.addEventListener("change", function () {
+            var v = parseFloat(cov.value);
+            pgpMinCov = (isNaN(v) || v < 0) ? 0 : Math.min(100, v);
+            pgpDraw();
+        });
+    }
+    var best = pgpEl("pgpBestOnly");
+    if (best) {
+        best.addEventListener("change", function () {
+            pgpBestOnly = !!best.checked;
+            pgpDraw();
+        });
+    }
 }
 
 // The details of the selected haplotype.  The figures come from the results
@@ -609,7 +725,7 @@ function pgpDetailHtml() {
         pgpSelGroup.slice().sort(function (a, b) {
             return a.hap < b.hap ? -1 : (a.hap > b.hap ? 1 : 0);
         }).forEach(function (m) {
-            o.push('<a href="#" data-pgp-hap="' + pgpEsc(m.hap) + '" ' +
+            o.push('<a href="#" data-pgp-hap="' + pgpEsc(pgpKeyOf(m)) + '" ' +
                    'style="display:inline-block;margin-right:1.1em;white-space:nowrap">' +
                    '<span style="display:inline-block;width:9px;height:9px;' +
                    'border:1px solid #8a8a85;background:' + pgpFill(m) +
@@ -620,16 +736,16 @@ function pgpDetailHtml() {
         return o.join("");
     }
     if (pgpSelected === null) { return ""; }
-    var spot = pgpSpotFor(pgpSelected);
     var point = null;
     ((pgpData && pgpData.points) || []).forEach(function (p) {
-        if (p.hap === pgpSelected) { point = p; }
+        if (pgpKeyOf(p) === pgpSelected) { point = p; }
     });
+    var spot = pgpSpotFor(point || pgpSelected);
 
     var o = ['<div id="pgpDetail" style="margin:0.6em 0 0 0;padding:0.6em 0.8em;' +
              'border:1px solid #cfcfc8;background:#fcfcfb;max-width:820px">'];
     o.push('<div style="font-weight:600;font-size:13px;margin-bottom:0.45em">' +
-           pgpEsc(pgpSelected) + '</div>');
+           pgpEsc((spot && spot.hap) || pgpSelected) + '</div>');
     o.push('<table style="border-collapse:collapse;font-size:11.5px">');
     function row(label, value) {
         o.push('<tr><td style="padding:1px 10px 1px 0;color:#6b6b67;' +

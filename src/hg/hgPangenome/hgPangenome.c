@@ -2567,6 +2567,11 @@ if (errCatchStart(errCatch))
             {
             struct jsonElement *spot = ref->val;
             char *hap = jsonOptionalStringField(spot, "hap", NULL);
+            /* The caller's own name for this spot, echoed back untouched.  The
+             * same haplotype can be asked about twice in one request - once per
+             * placement of a query that mapped to several loci - so "hap" does
+             * not identify an answer on its own. */
+            char *id = jsonOptionalStringField(spot, "id", NULL);
             char *acc = jsonOptionalStringField(spot, "acc", NULL);
             char *contig = jsonOptionalStringField(spot, "contig", NULL);
             struct jsonElement *sEl = jsonFindNamedField(spot, "", "start");
@@ -2598,6 +2603,8 @@ if (errCatchStart(errCatch))
                 dyStringPrintf(out,
                     "%s{\"hap\":\"%s\",\"x\":%g,\"y\":%g,\"conf\":%d",
                     found ? "," : "", jsonStringEscape(hap), x, y, conf);
+                if (!isEmpty(id))
+                    dyStringPrintf(out, ",\"id\":\"%s\"", jsonStringEscape(id));
                 if (rgb[0] != '\0')
                     dyStringPrintf(out, ",\"rgb\":\"%s\"", rgb);
                 dyStringAppend(out, "}");
@@ -3077,6 +3084,16 @@ if (sameOk(cgiOptionalString("page"), "results"))
      * control and no checkbox column - exactly as before the feature existed. */
     boolean pclai = sameString(cfgOr("pangenome.resultsPclai", "off"), "on");
     jsInlineF("var pangenomePclai = %s;\n", pclai ? "true" : "false");
+    /* Coverage floor for the ancestry plot only - the table still lists every
+     * hit.  The batch surjection is asked for a COUNT of targets, not a
+     * quality, and answers best first: where a region is carried by fewer
+     * haplotypes than that count, the remaining slots fill with incidental
+     * repeat matches covering a few per cent of the query.  Those are not
+     * wrong, and belong in the table, but averaging their ancestry in with the
+     * real hits moves the centroid and inflates the dispersion.  The page can
+     * change this; this is only where the slider starts. */
+    jsInlineF("var pangenomePclaiMinCoverage = %s;\n",
+              cfgOr("pangenome.pclaiMinCoverage", "50"));
     jsIncludeFile("hgPangenomeAssemblies.js", NULL);
     if (pclai)
         jsIncludeFile("hgPangenomePclai.js", NULL);
