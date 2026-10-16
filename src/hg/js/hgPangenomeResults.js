@@ -475,10 +475,18 @@ function pgrTableHtml(rows, opt) {
             // - it is a mosaic, not a sampled haplotype - and CHM13 has none in
             // assembly coordinates, so ticking either could only ever do
             // nothing.  A box that does nothing is worse than no box.
+            // A row the plot cannot draw keeps a box, hidden.  Spaces will not
+            // do: a checkbox is an inline-block whose height props the line
+            // open and whose width is not four characters, so a row without one
+            // sits closer to its neighbours and starts further left - visible
+            // on GRCh38 and CHM13, which are always in the list.  The hidden box
+            // holds exactly the space a real one would, whatever the browser
+            // makes a checkbox, and carries no class so the click handler
+            // passes over it.
             line += pgrPclaiSpot(r)
                 ? '<input type="checkbox" class="pgrPick" data-hap="' +
                   pgrEsc(r.hap) + '"> '
-                : "    ";
+                : '<input type="checkbox" disabled style="visibility:hidden"> ';
         }
         line += "   " + pgrPad(pgrActionsText(r), w.act) + " ";
         // The links are substituted after padding, so the columns line up on the
