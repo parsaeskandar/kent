@@ -470,9 +470,15 @@ function pgrTableHtml(rows, opt) {
         // no position have no point, so they get the space but no box.
         var line = "";
         if (opt.pclai) {
-            line += (r.contig == null) ? "    "
-                : '<input type="checkbox" class="pgrPick" data-hap="' +
-                  pgrEsc(r.hap) + '"> ';
+            // Only a row the plot can actually draw gets a box.  The two
+            // references are the case that matters: GRCh38 has no pcLAI at all
+            // - it is a mosaic, not a sampled haplotype - and CHM13 has none in
+            // assembly coordinates, so ticking either could only ever do
+            // nothing.  A box that does nothing is worse than no box.
+            line += pgrPclaiSpot(r)
+                ? '<input type="checkbox" class="pgrPick" data-hap="' +
+                  pgrEsc(r.hap) + '"> '
+                : "    ";
         }
         line += "   " + pgrPad(pgrActionsText(r), w.act) + " ";
         // The links are substituted after padding, so the columns line up on the
@@ -626,9 +632,21 @@ function pgrDraw(queries, rows, note) {
     html += " <A HREF=\"" + pgrSelf + "\">New search</A>.</P>\n";
     if (note) { html += "<P>" + note + "</P>\n"; }
     if (pgrPclaiReady()) {
+        // Rows the plot cannot draw get no tick box, so say which and why
+        // rather than leaving a reader to wonder about the gap in the column.
+        var noPlot = pgrRows.filter(function (r) {
+            return r.contig != null && !pgrPclaiSpot(r); })
+            .map(function (r) { return r.hap; });
         html += '<P><A HREF="#" id="pgrPclaiBtn">Show ancestry plot</A> ' +
                 '<SPAN style="color:#6b6b67">\u2014 where these haplotypes sit in ' +
-                'the pcLAI reference space. Tick a row to pick it out.</SPAN></P>\n' +
+                'the pcLAI reference space. Tick a row to pick it out.' +
+                (noPlot.length
+                   ? ' ' + pgrEsc(noPlot.slice(0, 3).join(", ")) +
+                     (noPlot.length > 3 ? " and " + (noPlot.length - 3) + " more" : "") +
+                     (noPlot.length === 1 ? " has" : " have") +
+                     " no pcLAI of their own, so they are not plotted and have no box."
+                   : "") +
+                '</SPAN></P>\n' +
                 '<DIV id="pgrPclaiPlot" style="display:none;margin:0.5em 0"></DIV>\n';
     }
     html += pgrTableHtml(rows, { multiQuery: multiQuery, multiPlace: multiPlace,

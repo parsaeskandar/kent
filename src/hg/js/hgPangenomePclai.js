@@ -593,13 +593,22 @@ function pgpDraw() {
             o.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + (r + 5) +
                    '" fill="none" stroke="#1664c0" stroke-width="2"/>');
         }
-        // Ticking a row thickens the ring rather than replacing the fill, so a
-        // ticked haplotype still shows where it sits in the space.
+        // Ticking a row must be obvious at a glance: a thicker stroke alone is
+        // a pixel of difference on a small mark.  The fill is left as pcLAI
+        // coloured it - that is information - so the marker goes outside, as a
+        // ring in the page's blue over a white halo, which reads against both
+        // the pale background and a dense patch of cloud.
+        if (g.picked) {
+            o.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + (r + 4).toFixed(1) +
+                   '" fill="none" stroke="#fcfcfb" stroke-width="5"/>');
+            o.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + (r + 4).toFixed(1) +
+                   '" fill="none" stroke="#1664c0" stroke-width="2.6"/>');
+        }
         o.push('<circle class="pgrPclaiHit" data-haps="' +
                pgpEsc(String(g.members.length)) + '" cx="' + cx + '" cy="' + cy +
                '" r="' + r.toFixed(1) + '" fill="' + pgpFill(g.rep) +
                '" fill-opacity="' + (g.members.length > 1 ? "0.85" : "1") +
-               '" stroke="#1a1a19" stroke-width="' + (g.picked ? 2.8 : 1.6) + '"/>');
+               '" stroke="#1a1a19" stroke-width="1.6"/>');
         // The count, once the mark is big enough to hold it legibly.
         if (g.members.length > 1 && r >= 10) {
             o.push('<text x="' + cx + '" y="' + (g.y + 3.6).toFixed(1) +
@@ -607,6 +616,34 @@ function pgpDraw() {
                    'fill="#1a1a19" text-anchor="middle" style="pointer-events:none">' +
                    g.members.length + '</text>');
         }
+    });
+    o.push('</g>');
+
+    // The names of the ticked haplotypes, last so that nothing is drawn over
+    // them.  Pulling a mark out of the crowd is the whole point of ticking it,
+    // and a ring says "this one" while a name says which one.
+    o.push('<g id="pgrPclaiPicks">');
+    groups.filter(function (g) { return g.picked; }).forEach(function (g) {
+        var picked = g.members.filter(function (m) { return !!pgpPicked[m.hap]; });
+        var label = picked.slice(0, 2).map(function (m) { return m.hap; }).join(", ");
+        if (picked.length > 2) { label += " +" + (picked.length - 2); }
+        var r = pgpGroupR(g.members.length) + 8;
+        // Flip to the left of the mark rather than run under the legend.
+        var right = g.x + r + 90 < PGP_W - PGP_R;
+        // The halo is a second copy of the text underneath, stroke only, rather
+        // than paint-order="stroke" on one element: browsers honour paint-order
+        // but librsvg 2.50 does not, and there it paints the halo OVER the
+        // glyphs and the label disappears.  Two elements work everywhere.
+        var lx2 = (g.x + (right ? r : -r)).toFixed(1);
+        var ly2 = (g.y + 3.6).toFixed(1);
+        var common = ' y="' + ly2 + '" font-size="10.5" font-weight="600" ' +
+                     'text-anchor="' + (right ? "start" : "end") + '" ' +
+                     'style="pointer-events:none"';
+        o.push('<text x="' + lx2 + '"' + common + ' fill="none" ' +
+               'stroke="#fcfcfb" stroke-width="3" stroke-linejoin="round">' +
+               pgpEsc(label) + '</text>');
+        o.push('<text x="' + lx2 + '"' + common + ' fill="#1664c0">' +
+               pgpEsc(label) + '</text>');
     });
     o.push('</g>');
 
@@ -632,9 +669,11 @@ function pgpDraw() {
            'font-weight="600" fill="#1a1a19" text-anchor="middle">n</text>');
     o.push('<text x="' + (lx + 22) + '" y="' + (hy + 49.6) + '" font-size="10" ' +
            'fill="#1a1a19">n of them, too close to split</text>');
+    o.push('<circle cx="' + (lx + 4) + '" cy="' + (hy + 12.5) + '" r="9" fill="none" ' +
+           'stroke="#1664c0" stroke-width="2.6"/>');
     o.push('<circle cx="' + (lx + 4) + '" cy="' + (hy + 12.5) + '" r="5" fill="#d8c0f0" ' +
-           'stroke="#1a1a19" stroke-width="2.8"/>');
-    o.push('<text x="' + (lx + 15) + '" y="' + (hy + 16) + '" font-size="10" fill="#1a1a19">ticked in the table</text>');
+           'stroke="#1a1a19" stroke-width="1.6"/>');
+    o.push('<text x="' + (lx + 19) + '" y="' + (hy + 16) + '" font-size="10" fill="#1a1a19">ticked in the table</text>');
     o.push('<polyline points="' + (lx - 1) + ',' + (hy + 26) + ' ' + (lx + 9) + ',' +
            (hy + 26) + '" fill="none" stroke="#1a1a19" stroke-width="1.2" ' +
            'stroke-dasharray="5,4" opacity="0.55"/>');
