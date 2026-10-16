@@ -1373,6 +1373,34 @@ fprintf(f, "quickLiftUrl %s\n", chainRel);
 fprintf(f, "quickLiftDb %s\n", srcDb);
 }
 
+static void pgFreshLiftHub(char *db)
+/* Empty the quickLift hub file this cart is using for db, so that the next
+ * trackHubBuild() writes only what the source is showing now.
+ *
+ * trackHubBuild merges its stanzas into whatever the file already holds, and
+ * keeps any stanza it did not generate this time - deliberately, so that for
+ * hgConvert a track lifted earlier is not lost.  For PanLift that is the wrong
+ * contract: adjusting which tracks you want and converting again is the normal
+ * way to use it, so the hub grows into the union of everything ever switched on
+ * during the session, and a track turned off on the source goes on appearing on
+ * the target.  Emptying the file first makes each conversion a snapshot.
+ *
+ * Truncated rather than deleted: getHubName() keeps the name in the cart only
+ * while the file still opens, so deleting it would mint a new name, and a new
+ * name is a new hub attached to the cart beside the old one. */
+{
+char var[PATH_LEN];
+safef(var, sizeof(var), "hubQuickLift-%s", db);
+char *path = cartOptionalString(cart, var);
+if (isEmpty(path) || !fileExists(path))
+    return;
+FILE *f = fopen(path, "w");
+if (f == NULL)
+    fprintf(stderr, "hgPangenome: could not empty %s: %s\n", path, strerror(errno));
+else
+    carefulClose(&f);
+}
+
 static char *pgWriteQuickLiftHub(char *srcDb, char *srcHap, char *tgtDb, char *chainBb,
                                  struct dyString *shown, struct dyString *skipped)
 /* Write a hub that offers the source's annotations to the destination assembly,
@@ -1398,6 +1426,7 @@ static char *pgWriteQuickLiftHub(char *srcDb, char *srcHap, char *tgtDb, char *c
 {
 struct trackDb *badList = NULL;
 char *built = NULL;
+pgFreshLiftHub(srcDb);
 struct errCatch *errCatch = errCatchNew();
 if (errCatchStart(errCatch))
     built = trackHubBuild(srcDb, cart, &badList);
@@ -1816,6 +1845,7 @@ cartSetString(cart, "db", srcName);
 
 struct trackDb *badList = NULL;
 char *built = NULL;
+pgFreshLiftHub(srcName);
 struct errCatch *errCatch = errCatchNew();
 if (errCatchStart(errCatch))
     built = trackHubBuild(srcName, cart, &badList);
