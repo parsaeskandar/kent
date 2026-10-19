@@ -1069,9 +1069,10 @@ function showStatus(html) {
     if (typeof html === "string") statusEl.textContent = html;
     else statusEl.appendChild(html);
 }
-function hideStatus() { statusEl.style.display = "none"; clear(statusEl); }
+function hideStatus() { statusEl.style.display = "none"; clear(statusEl); busyOff(); }
 
 function showValidationErrors(errors) {
+    busyOff();
     var box = el("div", { class: "pgErrBox" });
     box.appendChild(el("b", { text: "Please fix the input:" }));
     var ul = el("ul");
@@ -1083,6 +1084,7 @@ function showValidationErrors(errors) {
 }
 
 function showFatal(message, retryFn) {
+    busyOff();
     var box = el("div", { class: "pgErrBox" });
     box.appendChild(el("span", { class: "pgErrText", text: message }));
     if (retryFn) {
@@ -1099,6 +1101,9 @@ function showProgress(completed, total) {
         el("span", { text: "Mapping… " + completed + " / " + total + " complete" })
     ]);
     showStatus(box);
+    busyOn("Aligning " + (total === 1 ? "your sequence" : total + " sequences") +
+           " to the pangenome graph" +
+           (completed ? " \u2014 " + completed + " of " + total + " done." : "."));
 }
 
 // ---- Submit / poll orchestration -------------------------------------------
@@ -1215,6 +1220,7 @@ function pollJob(jobId, total) {
                 // passed to someone else - neither of which worked while the
                 // results lived only in this page's variables.
                 if (handingOff) {
+                    busyNow("Opening the results\u2026");
                     window.location = window.location.pathname + "?page=results" +
                         "&job_id=" + encodeURIComponent(jobId) +
                         (HGSID ? "&hgsid=" + encodeURIComponent(HGSID) : "");
@@ -1241,7 +1247,14 @@ function onFile(evt) {
     var file = evt.target.files && evt.target.files[0];
     if (!file) return;
     var reader = new FileReader();
-    reader.onload = function () { $("pgSeq").value = reader.result; };
+    reader.onload = function () {
+        $("pgSeq").value = reader.result;
+        // The file is read into the box, so show the box: the user sees what
+        // will be submitted, and the count under it.
+        if ($("pgFileName")) $("pgFileName").textContent = file.name;
+        formCount();
+        formTab(false);
+    };
     reader.onerror = function () { showFatal("Could not read file.", null); };
     reader.readAsText(file);
 }
@@ -1249,19 +1262,278 @@ function onFile(evt) {
 function onClear() {
     $("pgSeq").value = "";
     $("pgFile").value = "";
+    if ($("pgFileName")) $("pgFileName").textContent = "";
+    formCount();
     clear(resultsEl);
     cardsByName = {};
     hideStatus();
 }
 
+// ---- Search form ------------------------------------------------------------
+//
+// Built here from hgPangenomeFormData, the way hgBlat.js builds hgBlat's new
+// search form from hgBlatFormData, and in the same design: the shared house
+// style from gbModern.css (.gbSection bars, .gbPill buttons, .gbCard sidebar,
+// the busy overlay) and this tool's own layout from hgPangenome.css.  The
+// controls keep the ids the rest of this file has always used - pgSeq, pgFile,
+// pgSubmit, pgClear, pgMaxMultimaps - so nothing below had to change to work
+// with them, and a page with no form data is left exactly as it was.
+
+// The Genome Browser's standard info icon, as hgBlat.js copies it from
+// printInfoIconSvg() in hg/lib/hui.c, so these icons are the same ones as on
+// every other page.
+var PG_INFO_SVG =
+    "<svg style='height:1.1em; vertical-align:top' viewBox='0 0 24 24' fill='none' " +
+    "xmlns='http://www.w3.org/2000/svg'>" +
+    "<circle cx='12' cy='12' r='10' stroke='#1C274C' stroke-width='1.5'/>" +
+    "<path d='M12 17V11' stroke='#1C274C' stroke-width='1.5' stroke-linecap='round'/>" +
+    "<circle cx='1' cy='1' r='1' transform='matrix(1 0 0 -1 11 9)' fill='#1C274C'/></svg>";
+
+var BUSY_DELAY_MS = 350;      // as hgBlat.js: a scrim that flashes reads as a glitch
+var busyTimer = null;
+var countTimer = null;
+
+function escHtml(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+        return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+}
+
+function commas(n) { return Number(n).toLocaleString("en-US"); }
+
+function infoIcon(tip) {
+    return '<span class="pgInfo" title="' + escHtml(tip) + '">' + PG_INFO_SVG + "</span>";
+}
+
+function formSidebar(fd) {
+    return '<div>' +
+        '<div class="gbCard"><h3>Similar tools</h3>' +
+        '<div><a href="' + escHtml(fd.blatUrl) + '">BLAT</a> - finds a sequence ' +
+        'in one assembly, rather than across every haplotype at once.</div>' +
+        '<div><a href="' + escHtml(fd.panLiftUrl) + '">PanLift</a> - for a region ' +
+        'you already have coordinates for: translates it from one assembly to ' +
+        'another through the graph.</div>' +
+        '</div>' +
+        '<div class="gbCard"><h3>About pangenome mapping</h3>' +
+        '<div>Your sequence is aligned to the pangenome graph, which holds every ' +
+        'haplotype in it at once. The results list the haplotypes that carry it, ' +
+        'with how well it matches each and where it lands, and open any of them ' +
+        'in the Genome Browser.</div>' +
+        '<div>The graph is built by the <a target="_blank" ' +
+        'href="https://humanpangenome.org/">Human Pangenome Reference ' +
+        'Consortium</a>.</div>' +
+        '</div></div>';
+}
+
+function formBusyMarkup() {
+    // Built with the form, hidden, as hgBlat.js does: nothing should have to be
+    // parsed or fetched at the moment the page is busy with the job.
+    return '<div id="pgBusyBg" class="gbBusyBg" role="status" aria-live="polite">' +
+        '<div class="gbBusyCard"><div class="gbSpinner"></div>' +
+        '<div><div class="gbBusyTitle" id="pgBusyTitle">Mapping&hellip;</div>' +
+        '<div class="gbBusyText" id="pgBusyText"></div></div></div></div>';
+}
+
+// The overlay mirrors the in-page status rather than replacing it: #pgStatus
+// still carries the progress and every error, so a page without the form - and
+// the tests - see exactly what they always did.
+function busyOn(text) {
+    var bg = $("pgBusyBg");
+    if (!bg) return;
+    if (text != null && $("pgBusyText")) $("pgBusyText").textContent = text;
+    if (bg.className.indexOf(" on") >= 0 || busyTimer) return;
+    busyTimer = window.setTimeout(function () {
+        busyTimer = null;
+        if (bg.className.indexOf(" on") < 0) bg.className += " on";
+    }, BUSY_DELAY_MS);
+}
+
+// Up at once, with no delay: used when the page is about to navigate away, so
+// there is no flash to avoid and every reason not to leave a gap.
+function busyNow(text) {
+    var bg = $("pgBusyBg");
+    if (!bg) return;
+    if (busyTimer) { window.clearTimeout(busyTimer); busyTimer = null; }
+    if (text != null && $("pgBusyText")) $("pgBusyText").textContent = text;
+    if (bg.className.indexOf(" on") < 0) bg.className += " on";
+}
+
+function busyOff() {
+    if (busyTimer) { window.clearTimeout(busyTimer); busyTimer = null; }
+    var bg = $("pgBusyBg");
+    if (bg) bg.className = bg.className.replace(/\s*\bon\b/g, "");
+}
+
+function formTab(showUpload) {
+    var paste = $("pgTabPaste"), upload = $("pgTabUpload");
+    if (!paste || !upload) return;
+    paste.className = "pgTab" + (showUpload ? "" : " on");
+    upload.className = "pgTab" + (showUpload ? " on" : "");
+    $("pgPanePaste").style.display = showUpload ? "none" : "";
+    $("pgPaneUpload").style.display = showUpload ? "" : "none";
+}
+
+// The live count under the box.  Counted with the parser the submission uses,
+// so the numbers it shows are the ones the job will see, and checked against
+// the limits the server enforces so a sequence that is too long is flagged
+// before it is sent.  Debounced: a paste can be a megabyte, and the textarea
+// itself is never re-rendered, so the caret stays where the user put it.
+function formCount() {
+    var out = $("pgCountText"), ta = $("pgSeq"), fd = window.hgPangenomeFormData;
+    if (!out || !ta || !fd) return;
+    var parsed = parseInput(ta.value);
+    var bases = 0, longest = 0;
+    parsed.sequences.forEach(function (s) {
+        var n = (s.sequence || "").replace(/\s+/g, "").length;
+        bases += n;
+        if (n > longest) longest = n;
+    });
+    var nSeq = parsed.sequences.length;
+    var text = commas(bases) + " bases in " + commas(nSeq) + " sequence" + (nSeq === 1 ? "" : "s");
+    var problem = null;
+    if (nSeq > MAX_SEQUENCES)
+        problem = "up to " + commas(MAX_SEQUENCES) + " sequences";
+    else if (fd.maxSeqLen && longest > fd.maxSeqLen)
+        problem = "longest is " + commas(longest) + " bp, limit " + commas(fd.maxSeqLen) + " bp";
+    out.textContent = problem ? text + " — " + problem : text;
+    out.className = problem ? "over" : "";
+}
+
+function formCountSoon() {
+    if (countTimer) window.clearTimeout(countTimer);
+    countTimer = window.setTimeout(function () { countTimer = null; formCount(); }, 150);
+}
+
+function formBuild() {
+    var fd = window.hgPangenomeFormData;
+    var box = $("pgFormBox");
+    if (!fd || !box) return;
+
+    var opts = [];
+    for (var i = 1; i <= (fd.maxMultimapsLimit || 1); i++)
+        opts.push('<option value="' + i + '"' + (i === MAX_MULTIMAPS ? " selected" : "") +
+                  ">" + i + "</option>");
+
+    box.innerHTML =
+        '<div class="pgFormGrid"><div>' +
+
+        '<div class="gbSection">Search settings</div>' +
+        '<div class="pgRow">' +
+            '<div class="pgField pgGraphSlot"><span>Pangenome ' +
+                infoIcon("The pangenome graph your sequence is aligned to. Every " +
+                         "haplotype in it is searched at once.") + '</span>' +
+                '<div class="pgGraphName">' + escHtml(fd.graphLabel) + '</div></div>' +
+            '<label class="pgField"><span>Alignments per sequence ' +
+                infoIcon("How many places in the graph to report for each sequence. " +
+                         "A sequence from a repeat can align well in several, and the " +
+                         "results page then shows each placement separately.") +
+                '</span><select id="pgMaxMultimaps">' + opts.join("") + '</select></label>' +
+        '</div>' +
+
+        '<div class="gbSection">Query sequence</div>' +
+        '<div class="pgTabs">' +
+            '<button type="button" class="pgTab on" id="pgTabPaste">Paste sequence</button>' +
+            '<button type="button" class="pgTab" id="pgTabUpload">Upload file</button>' +
+        '</div>' +
+
+        '<div id="pgPanePaste">' +
+            '<div class="pgPaneHint"><span>Separate multiple sequences with a &gt;name ' +
+            'line. Up to ' + commas(MAX_SEQUENCES) + ' sequences, ' +
+            commas(fd.maxSeqLen) + ' bp each.</span>' +
+            '<button type="button" id="pgExample" class="pgChip" title="' +
+            escHtml(fd.exampleTitle) + '">' + escHtml(fd.exampleLabel) + '</button></div>' +
+            '<textarea class="pgSeqBox" id="pgSeq" spellcheck="false" ' +
+            'aria-label="Paste query sequences, one per line or in FASTA"></textarea>' +
+            '<div class="pgCount"><span id="pgCountText"></span></div>' +
+        '</div>' +
+
+        '<div id="pgPaneUpload" style="display:none">' +
+            '<div class="pgDrop" id="pgDrop">' +
+                '<div class="pgDropTitle">Drop a sequence file here</div>' +
+                '<div class="pgDropSub">Plain text or FASTA, up to ' +
+                commas(MAX_SEQUENCES) + ' sequences</div>' +
+                '<input type="file" id="pgFile">' +
+                '<div class="pgFileName" id="pgFileName"></div>' +
+            '</div>' +
+        '</div>' +
+
+        '<div id="pgStatusSlot"></div>' +
+        '<div class="pgActions">' +
+            '<input type="button" class="gbPill primary" id="pgSubmit" value="Submit" ' +
+            'title="Align the sequences to the pangenome and list the haplotypes that carry them">' +
+            '<input type="button" class="gbPill" id="pgClear" value="Clear" ' +
+            'title="Empty the sequence box">' +
+        '</div>' +
+
+        '</div>' + formSidebar(fd) + '</div>' +
+        formBusyMarkup();
+
+    // The status box the C side emitted moves in beside the buttons it reports on.
+    var status = $("pgStatus");
+    if (status) $("pgStatusSlot").appendChild(status);
+
+    $("pgTabPaste").addEventListener("click", function () { formTab(false); });
+    $("pgTabUpload").addEventListener("click", function () { formTab(true); });
+    $("pgSeq").addEventListener("input", formCountSoon);
+
+    // As hgBlat.js: the button is its own status while the example is fetched,
+    // and disabled meanwhile so a double click cannot start a second fetch.
+    $("pgExample").addEventListener("click", function () {
+        var btn = this, label = fd.exampleLabel;
+        btn.disabled = true;
+        btn.textContent = "Loading example…";
+        fetch(fd.exampleUrl).then(function (resp) {
+            if (!resp.ok) throw new Error("HTTP " + resp.status);
+            return resp.text();
+        }).then(function (fa) {
+            var ta = $("pgSeq");
+            ta.value = fa.trim();
+            formCount();
+            formTab(false);
+            ta.focus();
+            ta.setSelectionRange(0, 0);
+            ta.scrollTop = 0;
+            btn.textContent = label;
+            btn.disabled = false;
+        }).catch(function (err) {
+            btn.textContent = "Could not load example";
+            window.setTimeout(function () { btn.textContent = label; btn.disabled = false; }, 4000);
+            if (window.console) console.error("hgPangenome: example fetch failed:", err);
+        });
+    });
+
+    var drop = $("pgDrop"), fileInput = $("pgFile");
+    ["dragenter", "dragover"].forEach(function (e) {
+        drop.addEventListener(e, function (ev) { ev.preventDefault(); drop.className = "pgDrop hot"; });
+    });
+    ["dragleave", "drop"].forEach(function (e) {
+        drop.addEventListener(e, function (ev) { ev.preventDefault(); drop.className = "pgDrop"; });
+    });
+    drop.addEventListener("drop", function (ev) {
+        if (ev.dataTransfer && ev.dataTransfer.files.length) {
+            fileInput.files = ev.dataTransfer.files;
+            fileInput.dispatchEvent(new Event("change"));
+        }
+    });
+
+    // Back from the results page: a browser that restores this page from its
+    // back/forward cache restores the overlay with it, still spinning.
+    window.addEventListener("pageshow", busyOff);
+
+    formCount();
+    if (typeof window.convertTitleTagsToMouseovers === "function")
+        window.convertTitleTagsToMouseovers();
+}
+
 // ---- Init -------------------------------------------------------------------
 
 function init() {
+    readConfig();     // the form is built from these limits, so read them first
+    formBuild();
     resultsEl = $("pgResults");
     statusEl = $("pgStatus");
     if (!resultsEl) return;   // not our page
 
-    readConfig();
     api = makeApi();
 
 

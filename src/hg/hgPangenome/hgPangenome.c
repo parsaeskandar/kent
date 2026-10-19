@@ -128,6 +128,7 @@
 #include "cart.h"
 #include "hgConfig.h"
 #include "jsHelper.h"
+#include "jsonWrite.h"
 #include "jsonParse.h"
 #include "dystring.h"
 #include "hCommon.h"
@@ -2878,67 +2879,49 @@ jsInlineF("window.pangenomeConfig = {\n"
           sameString(cfgOr("pangenome.resultsPage", "on"), "on") ? "true" : "false");
 }
 
-static void drawForm(int maxSeq, int maxMultimaps, int maxMultimapsLimit)
-/* The input form.  It does not POST to this CGI; hgPangenome.js intercepts the
- * submit, parses/validates the sequences and drives the API.  The controls are
- * plain HTML so the page works as a static shell. */
+static void drawForm(int maxMultimapsLimit)
+/* The search form, built in the browser the way hgBlat's new form is built by
+ * hgBlat.js: this emits an empty .gbApp container and the form's settings as an
+ * inline hgPangenomeFormData object, and hgPangenome.js lays the controls out
+ * inside it.  Unlike BLAT's, the form never posts to this CGI - hgPangenome.js
+ * reads the controls, submits the job itself and polls it - so there is no
+ * <form> for the browser to serialize, only the container.
+ *
+ * The limits the job is held to (pangenome.maxSequences, maxMultimaps) are in
+ * window.pangenomeConfig already; this carries only what the form adds. */
 {
-printf("<form id='pgForm' onsubmit='return false;'>\n");
-printf("<h2>Pangenome Mapping</h2>\n");
+printf("<div id='pgFormBox' class='gbApp'></div>\n");
+/* Progress and errors, and the in-page result cards for an install that has
+ * turned the results page off.  Emitted here rather than built by the script,
+ * so that the page has somewhere to say what went wrong even when the script
+ * cannot run; hgPangenome.js moves the status box into the form, beside the
+ * buttons it reports on. */
+printf("<div id='pgStatus' class='pgStatus' style='display:none'></div>\n");
+printf("<div id='pgResults' class='pgResults'></div>\n");
 
-printf("<p>Paste one or more DNA sequences below, or upload a file, then press "
-       "Submit.  Each sequence is aligned to the pangenome graph; for every "
-       "sequence you get the assemblies it is consistent with, and where it "
-       "lands on whichever assembly you choose.</p>\n");
-
-printf("<table class='hgPangenomeTable' border=0>\n");
-
-/* Options row. */
-printf("<tr>\n");
-/* No "report position on" box: the position is reported on the representative
- * assembly, and the user picks a different one by clicking it in the assembly
- * list, which re-surjects.  Asking up front for something they can choose
- * afterwards, from a list they have not seen yet, only got in the way. */
-printf("<td><label for='pgMaxMultimaps'>Alignments per sequence:</label> "
-       "<input type='number' id='pgMaxMultimaps' min='1' max='%d' value='%d' "
-       "style='width:4em' title='How many places in the graph to report for each "
-       "sequence.  A read from a repeat can align in several.'>\n"
-       "<div class='pgMuted'>1 to %d</div></td>\n",
-       maxMultimapsLimit, maxMultimaps, maxMultimapsLimit);
-printf("</tr>\n");
-
-/* Sequence input. */
-printf("<tr><td colspan=3>\n");
-printf("<textarea id='pgSeq' name='pgSeq' rows='12' cols='110' "
-       "aria-label='Paste query sequences (one per line, or FASTA)' "
-       "placeholder='Paste sequences here — one per line, or FASTA (&gt;name header lines)'></textarea>\n");
-printf("</td></tr>\n");
-
-/* File upload + buttons. */
-printf("<tr><td colspan=2>\n");
-/* No accept= filter: BLAT takes any text file and users reasonably expect the
- * same here, whatever the extension happens to be. */
-printf("<label><b>Or upload a file</b> of sequences: "
-       "<input type='file' id='pgFile'></label>\n");
-printf("</td>\n");
-printf("<td style='text-align:right'>\n");
-printf("<input type='button' id='pgSubmit' value='Submit'>\n");
-printf("<input type='button' id='pgClear' value='Clear'>\n");
-printf("</td></tr>\n");
-
-printf("</table>\n");
-
-printf("<p style='font-size:0.9em;color:#555'>Up to %d sequences per submission. "
-       "Sequences may be given one per line or in FASTA format "
-       "(a <tt>&gt;name</tt> header line followed by sequence lines). "
-       "Allowed characters: A, C, G, T, N (case-insensitive); whitespace is ignored.</p>\n",
-       maxSeq);
-
-printf("</form>\n");
-
-printf("<p>Already have coordinates?  "
-       "<a href='hgPangenome?page=convert'>PanLift</a> "
-       "translates a region from one assembly to another through the graph.</p>\n");
+struct jsonWrite *jw = jsonWriteNew();
+jsonWriteObjectStart(jw, NULL);
+/* The per-sequence length the server enforces, so the character counter can
+ * say a sequence is too long before it is submitted rather than after. */
+jsonWriteNumber(jw, "maxSeqLen", atol(cfgOr("pangenome.maxSeqLen", "100000")));
+jsonWriteNumber(jw, "maxMultimapsLimit", maxMultimapsLimit);
+/* What is being searched, named on the form so that nobody has to guess which
+ * graph a result came from.  A setting, because the graph is a deployment
+ * choice and changes with each HPRC release. */
+jsonWriteString(jw, "graphLabel",
+                cfgOr("pangenome.graphLabel",
+                      "Human Pangenome Reference Consortium, release 2"));
+/* Fetched on demand, as hgBlat's is, rather than carried in every page load. */
+jsonWriteString(jw, "exampleUrl", "../goldenPath/help/pangenomeExample.fa");
+jsonWriteString(jw, "exampleLabel", "Load example");
+jsonWriteString(jw, "exampleTitle", "Fill the box with an example query: "
+    "20 kb of the human MCM6 gene, which every haplotype in the graph carries.");
+jsonWriteStringf(jw, "blatUrl", "hgBlat?%s=%s", cartSessionVarName(), cartSessionId(cart));
+jsonWriteStringf(jw, "panLiftUrl", "hgPangenome?page=convert&%s=%s",
+                 cartSessionVarName(), cartSessionId(cart));
+jsonWriteObjectEnd(jw);
+jsInlineF("var hgPangenomeFormData = %s;\n", jw->dy->string);
+jsonWriteFree(&jw);
 }
 
 static void drawConvertPage()
@@ -3147,10 +3130,11 @@ if (sameOk(cgiOptionalString("page"), "convert"))
     return;
     }
 
-int maxSeq = atoi(cfgOr("pangenome.maxSequences", "10"));
-int maxMultimaps = atoi(cfgOr("pangenome.maxMultimaps", "1"));
-
-cartWebStart(cart, NULL, "Pangenome Mapping");
+/* Title as hgBlat's new form has it: the page's purpose in the gold bar, which
+ * gbModern.css styles, rather than a bare name in the bar and an <h2> repeating
+ * it underneath.  cartWebStart HTML-escapes the title, so the dash is a literal
+ * em dash and not &mdash;. */
+cartWebStart(cart, NULL, "Pangenome Mapping — Find a DNA sequence across the human pangenome");
 
 if (issueBotWarning)
     {
@@ -3158,14 +3142,10 @@ if (issueBotWarning)
     botDelayMessage(ip, botDelayMillis);
     }
 
+webIncludeResourceFile("gbModern.css");   // shared house-style components (.gbPill, .gbCard, ...)
 webIncludeResourceFile("hgPangenome.css");
 
-drawForm(maxSeq, maxMultimaps,
-         atoi(cfgOr("pangenome.maxMultimapsLimit", "10")));
-
-/* Progress + results are rendered here by the app. */
-printf("<div id='pgStatus' class='pgStatus' style='display:none'></div>\n");
-printf("<div id='pgResults' class='pgResults'></div>\n");
+drawForm(atoi(cfgOr("pangenome.maxMultimapsLimit", "10")));
 
 /* Config first (inline, runs before DOMContentLoaded), then the app + mock. */
 injectConfig();
