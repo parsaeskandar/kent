@@ -1,6 +1,26 @@
 # Transcription start sites: ENCODE 4 PRO-cap and ProCapNet, #35528, Claude
 Thu Sep 17 2026 (Claude/markd)
 
+# Layout: a transcriptionStart superTrack holding one traditional composite per
+# data source, each composite holding one multiWig overlay per cell line and the
+# two strands as the overlay's leaves, all in transcriptionStart.ra.
+#
+# Under a composite an overlay gets no configuration block of its own, and
+# deselecting both strands of a cell line leaves an empty row where the overlay
+# was, both because compositeUiSubtracks() lists descendant leaves and a
+# multiWig is not a leaf.  That is #38441, to be fixed in hgTrackUi.  An earlier
+# attempt made each data source a superTrack holding the overlays directly,
+# which avoided #38441 but cost the subtrack matrix and the sample class filter,
+# and needed the superTrack-in-superTrack fix of #38460 to nest in
+# transcriptionStart.  It was reverted.
+#
+# The composite set is alpha until #38441 is fixed.  Beta and public keep the
+# shape that is already released: encode4ProCap and proCapNet as top-level
+# superTracks holding the overlays, with no transcriptionStart container, which
+# needs no hgTrackUi change.  The script writes one file per shape and the
+# include lines in trackDb.ra choose between them, so there are no per-stanza
+# release tags to keep in step.
+
 # Scripts are in ~/kent/src/hg/makeDb/outside/proCapNet.  The cell lines, their
 # ENCODE accessions and their colors are in proCapNetExperiments.tsv there.
 
@@ -27,8 +47,19 @@ cd /hive/data/genomes/hg38/bed/proCapNet
     /hive/data/genomes/hg38/chrom.sizes /hive/data/outside/proCapNet/hg38/pred pred 6
 # all 12 files report the same counts:
 #   24 chroms, 3088269832 bases, 2924001250 with data,
-#   164268582 dropped as no-data or NaN   (5.3%, the N regions)
+#   164268582 dropped as no-data or NaN   (5.3%)
+# That is more than the 150610728 gap bases on the primary chromosomes, because
+# no prediction was made where most of a 2114 bp window was unresolved, which
+# also takes out sequence flanking each gap.
 # about 24 GB in, 15.7 to 15.9 GB out per file
+
+# proCapNetPredBuild writes the minus strand negated, so it draws below the
+# baseline from its own values.  Doing it in the data rather than with the
+# trackDb negateValues setting is what makes the composite's own negate control
+# work: that control sets one shared value for the composite, which replaced the
+# per-track negateValues and sent both strands the same way, with no way back to
+# the default short of a cart reset.  encode4ProCap never had the problem,
+# because ENCODE already publishes its minus strand negative.
 
 # confirm the summary statistics are numbers again, they were nan before
 bigWigInfo pred/K562.proCapNet.pos.bw | egrep 'basesCovered|mean|std'
@@ -57,6 +88,34 @@ PYEOF
 # mismatched windows: 0
 
 ##############################################################################
+# negating the minus strand, after the fact
+##############################################################################
+
+# The prediction files were first built with the minus strand positive and
+# flipped at display time with the trackDb negateValues setting.  That broke the
+# composite's negate control, as described above, so the twelve minus-strand
+# files were rewritten with negated values rather than rebuilt from the
+# downloads, which had already been deleted:
+#
+#   for db in hg38 hs1 ; do
+#       base=/hive/data/genomes/$db/bed/proCapNet
+#       mkdir -p $base/previousPred
+#       ls $base/pred/*.neg.bw | while read f ; do
+#           ~/kent/src/hg/makeDb/outside/proCapNet/proCapNetPredToFixedStep \
+#               --negate /hive/data/genomes/$db/chrom.sizes $f $base/negated/$(basename $f)
+#       done
+#   done
+#
+# Each output was checked against its input: same nBasesCovered, value range
+# mirrored, sampled values exactly negated.  The originals were then moved to
+# previousPred/ and the negated files put in their place, so /gbdb needs no new
+# symlinks.  previousPred/ has since been deleted, 367 GB over the two
+# assemblies.  Nothing is lost by that: negation is its own inverse, so the
+# originals can be recovered from the files in pred/ by running the same command
+# again.  A rebuild from the downloads does not need any of this either:
+# proCapNetPredBuild negates the minus strand itself.
+
+##############################################################################
 # ENCODE 4 PRO-cap
 ##############################################################################
 
@@ -75,6 +134,11 @@ cd /hive/data/genomes/hg38/bed/encode4ProCap
 #   HUVEC   ENCSR098LLB  2 files
 #   K562    ENCSR261KBX  4 files
 #   MCF10A  ENCSR799DGV  8 files
+# A copy of the resulting file is committed as
+# outside/proCapNet/proCapNetEncodeFiles.tsv.  It is the record of which ENCODE
+# file accessions went into each track: re-running the step later can resolve to
+# different files, because the default analysis of an experiment changes when
+# ENCODE reprocesses it.
 
 # ENCODE publishes no pooled PRO-cap file, so download the per-replicate files
 # and sum them per cell line and strand.  MCF10A has two sequencing runs per
@@ -102,17 +166,21 @@ PYEOF
 # trackDb
 ##############################################################################
 
-# The stanzas are generated, along with the metadata.tsv and colors.json each
-# faceted composite reads, which are written into the composite's /gbdb
-# directory.  The composites must be faceted: a container multiWig under a plain
-# composite is flattened away by hgTrackUi and never drawn.
+# The stanzas are generated.  These are traditional composites: a faceted one is
+# routed to facetedCompositeUi(), which returns before the wiggle controls are
+# drawn, and signal tracks need those.  The matrix is declared over the leaf
+# bigWigs, so each strand is a cell; the multiWig containers carry no subGroups
+# because a container spans both strands.
 cd ~/kent/src/hg/makeDb/outside/proCapNet
 ./proCapNetTrackDb hg38 proCapNetExperiments.tsv \
-    ~/kent/src/hg/makeDb/trackDb/human/hg38/transcriptionStart.ra /gbdb/hg38
+    ~/kent/src/hg/makeDb/trackDb/human/hg38
 
-# transcriptionStart.ra is generated; the include line in human/hg38/trackDb.ra
-# is added by hand:
+# That writes two files, one per shape: transcriptionStart.ra is the container
+# with both composites inside it, transcriptionStartPublic.ra is the released
+# shape.  The include lines in human/hg38/trackDb.ra are added by hand and are
+# what picks one shape per release:
 #   include transcriptionStart.ra alpha
+#   include transcriptionStartPublic.ra beta,public
 
 ##############################################################################
 # cleanup

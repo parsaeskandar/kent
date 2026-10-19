@@ -260,15 +260,6 @@ RELEASE_GATES = {
                "looked up, no codon carries a transcript number, and the rendering and the "
                "mouseover are byte-identical to before.  Off during QA; flip to TRUE once "
                "released."),
-        h("skipMalformedCgiPairs", "flag", "hg/lib/hgConfig.c", default="FALSE",
-          role="gate", verified=True, ticket="38340",
-          note="Step over a CGI or cookie pair that has no =value, instead of losing the "
-               "pair after it or aborting the request.  Covers parseCookies in cheapcgi, "
-               "hgSession's session backup, and refreshNamedSessionCustomTracks.  The query "
-               "string parsers were fixed unconditionally under #38335 and do not read this "
-               "flag.  The kent libraries cannot read hg.conf, so hgConfig.c hands the "
-               "setting to cheapcgi through cgiSkipMalformedPairs.  Off during QA; flip to "
-               "TRUE once released."),
         h("collectionHubCopyOnWrite", "flag", "hg/lib/cart.c", default="FALSE",
           role="gate", verified=True, ticket="38273",
           note="Copy a track collection's generated hub file when the program that writes "
@@ -291,6 +282,14 @@ RELEASE_GATES = {
                "\"type bigNet\" fails to load with an unsupported-type error, "
                "quickLift refuses the type, and neither hubCheck nor the hubApi "
                "lists it among the supported types."),
+        h("clearFiltersMenu", "flag", "hg/hgTracks/hgTracks.c", default="FALSE",
+          role="gate", verified=True, ticket="38507",
+          note="The \"Reset filters to defaults\" item in hgTracks' right-click "
+               "menu, which clears a track's cart settings (and those of its "
+               "subtracks) but keeps their visibility.  Also read in "
+               "hgTrackUi.c, which does the clearing; with it off the menu item "
+               "is not offered and hgTrackUi ignores the request.  Off during "
+               "QA; flip to TRUE once released."),
         h("showMouseovers", "flag", "hg/hgTracks/config.c", default="FALSE",
           role="gate", verified=True,
           note="Mouseover text on track items instead of the browser's own "
@@ -393,8 +392,31 @@ RELEASE_GATES = {
                "take traffic from the browser UI."),
         h("groupDropdown", "flag", "hg/hgTracks/hgTracks.c",
           default="FALSE", role="gate", verified=True,
-          note="Track group chooser as a dropdown rather than the current "
-               "layout."),
+          note="A \"Genomes:\" dropdown added to a hub's group header, next "
+               "to its Hide group/Refresh buttons, shown whenever the hub "
+               "declares more than one genome in its genomesFile.  Lists "
+               "every genome trackHub.c parsed for that hub, labeled "
+               "\"<name> - <organism>, <freeze>\" via hOrganism()/"
+               "hFreezeFromDb() -- the same lookup hgTracks already uses for "
+               "the page title, so it resolves both a native UCSC db (via "
+               "hgcentral's dbDb table) and a GenArk-style hub genome (via "
+               "the hub's own genomes.txt fields) uniformly, a GenArk "
+               "accession like GCF_011064425.1 included.  The select is "
+               "width-capped with ellipsis, but each option's title "
+               "attribute carries the full label, and the browser's native "
+               "popup still renders at full width regardless.  The "
+               "currently loaded genome is preselected.  Choosing another "
+               "resets TrackForm's position field to that genome's own "
+               "default position (via hDbDb(), same as the label lookup) "
+               "before resubmitting, since a coordinate carried over from a "
+               "different assembly usually does not exist there; option "
+               "values are the hub genomes' raw names -- bare for a native "
+               "UCSC assembly, hub_<id>_-prefixed for a GenArk-style "
+               "twoBitPath genome -- exactly what hgTracks already accepts "
+               "as db elsewhere.  Added nearly a year ago and still off "
+               "everywhere but cgi-bin-max's and cgi-bin-emalekos's "
+               "hg.conf, so it is overdue rather than fresh; see the "
+               "sunset report."),
         h("showAliases", "flag", "hg/hgTracks/hgTracks.c", default="TRUE",
           role="gate", verified=True,
           note="Show chromosome alias names in the position box.  On by "
@@ -461,6 +483,53 @@ RELEASE_GATES = {
                "cfgOption* accessors, which is why browser.quickLift is not in "
                "this catalog.  A cart variable of the same name still "
                "overrides it, so both answers can be had on one machine."),
+        h("browser.quickLiftGtex", "flag", "hg/lib/quickLift.c",
+          default="FALSE", role="gate", verified=True, ticket="38512",
+          note="Draw a quickLifted GTEx gene expression track (gtexGene, "
+               "gtexGeneV4, gtexGeneV8) as GTEx, with its bar charts, from "
+               "genes and gene models read out of the assembly it came from "
+               "through the quickLift chain.  Read in quickLiftGtexEnabled() "
+               "and asked in fillInFromType() (simpleTracks.c), which gives a "
+               "lifted track gtexGeneMethods despite its hub prefix, in "
+               "gtexLiftDb() (gtexTracks.c), and in hgc's doMiddle, which "
+               "sends a click on a lifted GTEx item to doGtexGeneExpr().  Off, "
+               "a lifted GTEx track is drawn as a plain bed and clicks go to "
+               "the generic details page, as before.  Asked when the page "
+               "is drawn, so it applies to tracks lifted before it was set.  "
+               "A cart variable of the same name overrides it, like "
+               "browser.quickLiftBarChart."),
+        h("browser.quickLiftMafSummary", "flag", "hg/lib/quickLift.c",
+          default="FALSE", role="gate", verified=True, ticket="38513",
+          note="Let a quickLifted maf track (wigMaf, such as hg19 "
+               "multiz100way) read its summary table above the summary "
+               "window size, from the assembly it came from, and lift the "
+               "rows; read its blocks with no padding around the window; and "
+               "draw its score overview lifted.  Read in "
+               "quickLiftMafSummaryEnabled() and asked by inSummaryMode() "
+               "(hgTracks/mafTrack.h), quickLiftLoadMafs() and the score "
+               "overview in hgTracks/wigMafTrack.c.  Off, a lifted maf reads "
+               "every block at any zoom, as before, which runs out of memory "
+               "at 50 Mb.  A cart variable of the same name overrides it, "
+               "like browser.quickLiftBarChart."),
+        h("browser.quickLiftWig", "flag", "hg/lib/quickLift.c",
+          default="FALSE", role="gate", verified=True, ticket="38520",
+          note="Let quickLift lift a wig track kept in a table and a .wib "
+               "file (such as hg19 phastCons100way), reading its rows from "
+               "the assembly it came from and drawing each value where the "
+               "chain puts it.  Read in quickLiftWigEnabled() and asked by "
+               "validateOneTdb() (hg/lib/trackHub.c), which lets wig tracks "
+               "into the quickLift hub, by wigLoadItems() "
+               "(hgTracks/wigTrack.c), which also covers a lifted wigMaf's "
+               "conservation wiggles, and by genericWiggleClick() and "
+               "bigWigClick() (hgc/wiggleClick.c), which send a click on a "
+               "lifted wig or bigWig to a page reading the values through the "
+               "chain.  Off, wig tracks are left out of a quickLift, a lifted "
+               "wigMaf draws the same-named wiggle table of the assembly it is "
+               "lifted onto, and a lifted bigWig click queries the file at the "
+               "reference position, all as before.  A lifted wig left in a hub "
+               "written while it was on draws nothing with it off, rather than "
+               "this assembly's table of the same name.  A cart variable of "
+               "the same name overrides it, like browser.quickLiftBarChart."),
         h("showManeInSearch", "flag", "hg/cgilib/cartJson.c",
           default="FALSE", role="gate", verified=True, ticket="38285",
           note="Pulls the MANE Select/Plus Clinical transcript out into its "
@@ -476,6 +545,28 @@ RELEASE_GATES = {
                "doing exactly what a gate is supposed to do and has not "
                "earned a deadline yet.  On in cgi-bin-max's hg.conf for "
                "testing; not yet turned on anywhere shared."),
+        h("showGenbankDownload", "flag", "hg/hgTracks/hgTracks.c",
+          default="FALSE", role="gate", verified=True, ticket="38433",
+          note="A GenBank flat file option in the \"Download Current Track "
+               "Data\" dialog, beside its JSON, CSV and TSV output.  The file "
+               "holds the DNA of the region plus the selected track items as "
+               "a feature table, with blocks as join() locations and "
+               "thickStart..thickEnd as a CDS, so the region opens in "
+               "SnapGene, Benchling or ApE.  Read once, and the flag is the "
+               "only door into the format:  the writer in hgTracks.js runs "
+               "from one value of the format select, and the second api call "
+               "that fetches the sequence fires only for that value, so with "
+               "the flag off neither is reachable and the select offers the "
+               "three formats it always did.  What the flag does not cover is "
+               "the dialog rework that came with the same ticket -- output "
+               "format first, page-sized font and buttons, the position on "
+               "its own line -- which is not GenBank-specific and lands for "
+               "everyone.  Sits behind showDownloadUi, the gate on the dialog "
+               "itself, which has defaulted TRUE since v467.  Added in the "
+               "current release, so it is doing exactly what a gate is "
+               "supposed to do and has not earned a deadline yet.  On in "
+               "cgi-bin-max's hg.conf for testing; not yet turned on anywhere "
+               "shared."),
         # Gates whose default has flipped TRUE.  These are the deletable ones:
         # the feature is public and the flag is now only an off switch.
         h("showTutorial", "flag", "hg/hgCustom/hgCustom.c", default="TRUE",
@@ -594,6 +685,95 @@ RELEASE_GATES = {
                "browser behaved before the change rather than anything about "
                "the machine, so it is a gate and should go once nobody has "
                "asked for the old behaviour."),
+        h("hgGateway.showRefBadge", "flag", "hg/hgGateway/hgGateway.c",
+          default="FALSE", role="gate", verified=True, ticket="38401",
+          note="A green \"reference\" word before an assembly in the "
+               "gateway search results when NCBI's refSeqCategory for it "
+               "is \"reference\".  Only the GenArk matches from "
+               "assemblyList can carry it; a dbDb assembly and a match "
+               "from the NCBI assembly search never do.  With the gate "
+               "off, isReference is always FALSE in the JSON and "
+               "autocompleteCat.js draws no badge and no mouseover."),
+        h("denseClick", "flag", "hg/hgTracks/simpleTracks.c", default="FALSE",
+          role="gate", verified=True, ticket="38364",
+          note="One clickable map box per item in a dense row, so a click "
+               "reaches the item's details page instead of expanding the "
+               "track.  Read once, in denseClickEnabled().  A gate over the "
+               "whole feature: with it on, a track still has to opt in with "
+               "the denseClick trackDb setting, and with it off no track "
+               "gets it whatever its trackDb says."),
+        h("hubHtmlSanitize", "flag", "hg/lib/trackHub.c", default="FALSE",
+          role="gate", verified=True, ticket="38126",
+          note="Passes description HTML from hubs and custom tracks through "
+               "htmlSanitize() on the way in.  Read once, in "
+               "hubHtmlSanitizeOn(), which every entry point and hubCheck "
+               "ask.  Off is the older behavior: customTrack.c falls back to "
+               "jsStripJavascript().  Added off for v504 because QA found "
+               "pages the filter changes; the default is meant to flip to "
+               "TRUE in v505 once those are fixed."),
+        h("multiWigMouseOver", "flag", "hg/hgTracks/multiWig.c", default="FALSE",
+          role="gate", verified=True, ticket="38468",
+          note="A value popup on a multiWig container: hovering lists each "
+               "subtrack's value at the cursor in the subtrack's color.  "
+               "Read in multiWigDraw(), and only when mouseOverEnabled "
+               "is on and the view is not multi-region.  Off, a multiWig "
+               "shows only its track name on hover, as before.  Added off "
+               "for v505; hgwdev's hg.conf turns it on."),
+        h("quickLiftMultiChain", "flag", "hg/lib/quickLift.c", default="FALSE",
+          role="gate", verified=True, ticket="38510",
+          note="Lift an item through every chain it overlaps, rather than "
+               "only the best one, so a feature that crosses a break in the "
+               "alignment is drawn in each place it lands.  Read once, in "
+               "quickLiftMultiChainEnabled(), and asked by the loaders in "
+               "hg/lib/quickLift.c, by gtexTracks.c, and by hgc.c and "
+               "gtexClick.c for the details page.  Off, each item goes "
+               "through the one best chain, as before.  Sibling of "
+               "quickLiftSplitRanges; the four on/off pairs of the two are "
+               "the hg.conf inputs of the quickLift unit test in "
+               "hg/lib/tests.  hgwdev's hg.conf turns it on."),
+        h("quickLiftSplitRanges", "flag", "hg/lib/quickLift.c",
+          default="FALSE", role="gate", verified=True, ticket="38510",
+          note="Cut each chain's source range at large gaps, merge the "
+               "ranges where they overlap, and read an item only once when "
+               "it crosses from one range into the next.  Read once, in "
+               "quickLiftSplitRangesEnabled(), and asked by the loaders in "
+               "hg/lib/quickLift.c and by hgTracks/wigMafTrack.c.  Off, each "
+               "chain's whole source range is read in one piece, as before.  "
+               "Sibling of quickLiftMultiChain.  hgwdev's hg.conf turns it "
+               "on."),
+        h("browser.quickLiftBarChart", "flag", "hg/lib/quickLift.c",
+          default="FALSE", role="gate", verified=True, ticket="38490",
+          note="Let quickLift lift bigBarChart tracks.  Read in "
+               "quickLiftBarChartEnabled() and asked by validateOneTdb() "
+               "(hg/lib/trackHub.c), which decides what track types go into "
+               "a quickLift hub.  Off, bigBarChart tracks are left out of a "
+               "quickLift, as before.  A cart variable of the same name "
+               "overrides it, like browser.quickLiftAlignments.  hgwdev's "
+               "hg.conf turns it on."),
+        h("mouseoverParentLabels", "flag", "hg/hgTracks/simpleTracks.c",
+          default="FALSE", role="gate", verified=True, ticket="38527",
+          note="Start the drawn long label of a track, and its side label, "
+               "button and center label mouseovers, with the shortLabels of "
+               "the containers it sits in, e.g. \"Transcription Initiation "
+               "(TSS) > PRO-cap > A673 PRO-cap\", so a user can see where to "
+               "find a subtrack in the track list.  Composite views are "
+               "skipped.  Read once, in labelWithParents(), which imageV2.c, "
+               "simpleTracks.c and hgTracks.c call for each label.  Off, "
+               "labels are the track's own, as before.  Not set in hgwdev's "
+               "hg.conf."),
+        h("recentSessions.enable", "flag", "hg/lib/cart.c", default="FALSE",
+          role="gate", verified=True, ticket="35736",
+          note="Keep a list of the sessions a user has opened recently, and "
+               "offer the others in a dialog after a session load.  Read in "
+               "cartRecentSessionsEnabled() and asked by cartNew() "
+               "(hg/lib/cart.c), which keeps the list in the cart variable "
+               "recentSessions for a user with an hguid row, and by "
+               "outputRecentSessionsData() (hgTracks.c), which writes the "
+               "dialog's data after a load.  The list lives only in userDb: "
+               "the cart excludes it and saveState writes it by hand, so it "
+               "never enters a saved session.  Off, nothing is recorded and "
+               "no dialog is offered.  Commented out of hgwdev's hg.conf "
+               "as of 2026-10-17."),
     ],
 }
 
@@ -1120,6 +1300,25 @@ LIMITS = {
         h("warnSeconds", "limit", "hg/hgTracks/hgTracks.c",
           verified=True, note="Log a warning for any hgTracks render slower "
                               "than this."),
+        h("maxGenbankRegion", "limit", "hg/hgTracks/hgTracks.c",
+          default='"25000000"', verified=True, ticket="38433",
+          note="Bases.  The largest region the \"Download Current Track Data\" "
+               "dialog will write as a GenBank file, which unlike its other "
+               "formats carries the DNA of the whole region.  A ceiling is "
+               "needed because the file is built in the web browser rather "
+               "than by a CGI:  a 50 Mbp region answers with 340 MB of track "
+               "json and 50 MB of sequence, which is parsed, copied into the "
+               "file text and copied again into the Blob, so the tab needs "
+               "several times the region in memory and can be killed by it.  "
+               "25 Mbp measured as the point where that stays comfortable; a "
+               "mirror serving well provisioned desktops can raise it and a "
+               "GBiB should lower it, which is why it is a knob rather than a "
+               "number in the javascript.  Read only when showGenbankDownload "
+               "is on, and written into the page for hgTracks.js; a value that "
+               "is not a positive number falls back to the default rather than "
+               "aborting the CGI or writing broken javascript.  The javascript "
+               "carries the same default for a page served without the "
+               "setting, e.g. from a cached older hgTracks.js."),
         h("hubSpaceLockTimeout", "limit", "hg/lib/userdata.c",
           default='"300"', verified=True, ticket="37964",
           note="Seconds an upload will wait for another upload to the same "
@@ -1703,14 +1902,6 @@ AWAITING_REVIEW = {
         # --auto-register inserts new rows directly below this line.  Leave the
         # marker in place; it is how the writer finds its way in.
         # AUTO-REGISTER INSERTION POINT
-        h("denseClick", "flag", "hg/hgTracks/simpleTracks.c", default="FALSE",
-          ticket="38364",
-          note="Written down by --auto-register, not yet reviewed by a "
-               "person.  Read with cfgOptionBooleanDefault in "
-               "hg/hgTracks/simpleTracks.c.  Came in at 4d36c5c0a9c, "
-               "hgTracks: a dense row can have one clickable map box per "
-               "item, refs #38364.  Needs a description and a gate or knob "
-               "call."),
     ],
 }
 

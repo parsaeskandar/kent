@@ -157,23 +157,17 @@ for(; hr; hr = hr->next)
         continue;
         }
 
-    // An indel's bases are shown as a preview, not in full.  The length is
-    // unbounded - a kilobase-scale insertion is ordinary between two assemblies
-    // of the same species - and printing all of it overflowed mouseOver, which
-    // safef() answers by aborting: the whole image failed to draw and the user
-    // got an error page instead of a browser.  No one reads thousands of bases
-    // in a tooltip anyway; the details page has them in full.
-    int preview = 60;
     if (hr->type == QUICKTYPE_MISMATCH)
         safef(mouseOver, sizeof mouseOver, "mismatch %c->%c", *hr->otherBases, *hr->bases);
+    // the bases of a long insertion or deletion would not fit, and are no use in a mouseover
+    else if ((hr->chromStart == hr->chromEnd) && (hr->otherBaseCount > QUICKLIFT_SHOW_BASES))
+        safef(mouseOver, sizeof mouseOver, "deletion %ldbp", hr->oChromEnd - hr->oChromStart);
     else if (hr->chromStart == hr->chromEnd)
-        safef(mouseOver, sizeof mouseOver, "deletion %ldbp (%.*s%s)",
-            hr->oChromEnd - hr->oChromStart, min(hr->otherBaseCount, preview), hr->otherBases,
-            hr->otherBaseCount > preview ? "..." : "");
+        safef(mouseOver, sizeof mouseOver, "deletion %ldbp (%.*s)", hr->oChromEnd - hr->oChromStart, hr->otherBaseCount, hr->otherBases);
+    else if ((hr->oChromStart == hr->oChromEnd) && (hr->baseCount > QUICKLIFT_SHOW_BASES))
+        safef(mouseOver, sizeof mouseOver, "insertion %ldbp", hr->chromEnd - hr->chromStart);
     else if (hr->oChromStart == hr->oChromEnd)
-        safef(mouseOver, sizeof mouseOver, "insertion %ldbp (%.*s%s)",
-            hr->chromEnd - hr->chromStart, min(hr->baseCount, preview), hr->bases,
-            hr->baseCount > preview ? "..." : "");
+        safef(mouseOver, sizeof mouseOver, "insertion %ldbp (%.*s)", hr->chromEnd - hr->chromStart, hr->baseCount, hr->bases);
     else
         safef(mouseOver, sizeof mouseOver, "double %ldbp", hr->oChromEnd - hr->oChromStart);
 

@@ -1,34 +1,27 @@
 #!/usr/bin/env python3
-"""Shared helpers for the MaveMD track build: coordinate projection and colors.
+"""MaveMD-specific helpers: calibration choice and the colors that follow from it.
 
-MaveDB's VRS mapper resolves some score sets all the way to the genome and others only
-to a protein sequence.  About a third of MaveMD variants arrive with a genomic HGVS term
-and can be placed directly; the rest carry only an NP_ protein term and have to be walked
-back to their codon here.
+Everything to do with coordinates lives in mavedbPlace.py, under utils/otto/mavedb, and is
+shared with the MaveDB track so the two place a variant identically. Importing this module
+puts that directory on sys.path, so a MaveMD script can then `import mavedbPlace as mp`.
 
-The projection is: NP_ accession -> NM_ transcript (hg38 ncbiRefSeqLink) -> genePred
-(hg38 ncbiRefSeqCurated) -> the CDS bases in transcription order -> the three genomic
-bases of codon N.  makeMaveMdVariants.py validates it against every variant that carries
-both a genomic term and a resolvable protein term, so a drift in either RefSeq or MaveDB's
-mapper shows up as a coordinate disagreement rather than as silently wrong placements.
-That set is smaller than the genomic-route placement count, because some variants have a
-genomic term and no protein term; the makeDoc records both figures per build.
+What is left here is the part MaveMD does not share: which of a score set's calibrations
+drives the display, how that choice is worded for the reader, and the ACMG and functional
+class palettes.
 """
 
-import re
-import subprocess
+import os
 import sys
+
+OTTO_MAVEDB = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                            '..', '..', '..', 'utils', 'otto', 'mavedb'))
+if OTTO_MAVEDB not in sys.path:
+    sys.path.insert(0, OTTO_MAVEDB)
 
 # Standard amino acids ordered by class, matching the MaveDB and popEVE heatmap tracks,
 # with Ter appended as a final row (MaveMD carries ~17k nonsense measurements).
 STANDARD_AAS = list('AVLIMFYWRHKDESTNQGCP')
 HEATMAP_ROWS = STANDARD_AAS + ['*']
-
-THREE_TO_ONE = {
-    'Ala': 'A', 'Arg': 'R', 'Asn': 'N', 'Asp': 'D', 'Cys': 'C', 'Gln': 'Q', 'Glu': 'E',
-    'Gly': 'G', 'His': 'H', 'Ile': 'I', 'Leu': 'L', 'Lys': 'K', 'Met': 'M', 'Phe': 'F',
-    'Pro': 'P', 'Ser': 'S', 'Thr': 'T', 'Trp': 'W', 'Tyr': 'Y', 'Val': 'V', 'Ter': '*',
-}
 
 # Two palettes, because the track carries two different kinds of statement.
 #
@@ -103,195 +96,6 @@ ACMG_SEVERITY = ['PS3_very_strong', 'PS3', 'PS3_moderate_plus', 'PS3_moderate',
 # first. Today they can only arrive via PROTEIN_TERM in makeMaveMdVariants.py, whose
 # character class already excludes quotes, but that regex is far from the query and a
 # future edit to it should not be able to open this up silently.
-SAFE_ACCESSION = re.compile(r'^[A-Za-z0-9_.]+$')
-
-
-def checkAccession(acc):
-    """Fail loudly on an accession that has no business being pasted into SQL."""
-    if not SAFE_ACCESSION.match(acc):
-        raise ValueError('refusing to query on accession %r: expected letters, digits, '
-                         'underscore and dot only' % acc)
-    return acc
-
-
-def hgsql(db, query):
-    """Run a query and return rows as lists of strings."""
-    out = subprocess.run(['hgsql', db, '-N', '-e', query],
-                         check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                         universal_newlines=True)
-    return [line.split('\t') for line in out.stdout.rstrip('\n').split('\n') if line]
-
-
-def isMainChrom(chrom):
-    """True for chr1..chr22, chrX, chrY, chrM - not alts, randoms or patches."""
-    return '_' not in chrom
-
-
-GENCODE_ATTRS = 'wgEncodeGencodeAttrsV50'
-GENCODE_GENEPRED = 'wgEncodeGencodeCompV50'
-
-
-def loadProteinToTranscript(db, protAccs):
-    """Map protein accessions to their transcripts.
-
-    MaveDB states protein terms against RefSeq (NP_) for most score sets and against Ensembl
-    (ENSP) for a handful, so both routes are needed: NP_ through ncbiRefSeqLink, ENSP through
-    the GENCODE attributes table.  Each tries the exact versioned accession first, then any
-    version of the same base accession.
-
-    Returns (mapping, unresolved) so the caller can report a whole score set going missing
-    rather than silently dropping it.
-    """
-    mapping = {}
-    unresolved = []
-    for acc in protAccs:
-        checkAccession(acc)
-        base = acc.split('.')[0]
-        if acc.startswith('ENSP'):
-            table, col, key = GENCODE_ATTRS, 'transcriptId', 'proteinId'
-        else:
-            table, col, key = 'ncbiRefSeqLink', 'mrnaAcc', 'protAcc'
-        rows = hgsql(db, "select %s from %s where %s = '%s'" % (col, table, key, acc))
-        if not rows:
-            rows = hgsql(db, "select %s from %s where %s like '%s.%%'"
-                             % (col, table, key, base))
-        if rows:
-            mapping[acc] = rows[0][0]
-        else:
-            unresolved.append(acc)
-    return mapping, unresolved
-
-
-class CodonMap(object):
-    """Genomic coordinates of every codon of one transcript.
-
-    codons[n] is the list of three 0-based genomic positions of codon n (1-based protein
-    numbering), in transcription order.  For a codon split across an intron those three
-    positions are not contiguous, which is why callers take min() and clamp block widths
-    rather than assuming a 3bp run.
-    """
-
-    def __init__(self, tx, chrom, strand, cdsBases):
-        self.tx = tx
-        self.chrom = chrom
-        self.strand = strand
-        self.cdsBases = cdsBases
-        self.protLen = len(cdsBases) // 3
-
-    def codon(self, protPos):
-        """Genomic positions of codon protPos (1-based), or None if out of range."""
-        i = (protPos - 1) * 3
-        if protPos < 1 or i + 3 > len(self.cdsBases):
-            return None
-        return self.cdsBases[i:i + 3]
-
-    def codonSpan(self, protPos):
-        """Full genomic span of a codon as (start0, end), or None.
-
-        A codon at an exon junction is split, so its three bases are not a 3bp run; the
-        span then covers the intervening intron. That is the honest extent of the codon,
-        and it is what a protein-level measurement actually pins down.
-        """
-        bases = self.codon(protPos)
-        if bases is None:
-            return None
-        return min(bases), max(bases) + 1
-
-    def codonBlock(self, protPos):
-        """The longest contiguous run of a codon's bases, as (start0, size), or None.
-
-        Used for the heatmap, where each column is drawn as one block. Drawing a split
-        codon as three bases from its first position would put the block inside an intron;
-        the longest run keeps it on real coding sequence, and column order is unchanged
-        because runs stay in transcription order.
-        """
-        bases = self.codon(protPos)
-        if bases is None:
-            return None
-        ordered = sorted(bases)
-        runs = []
-        runStart = ordered[0]
-        runLen = 1
-        for prev, cur in zip(ordered, ordered[1:]):
-            if cur == prev + 1:
-                runLen += 1
-            else:
-                runs.append((runStart, runLen))
-                runStart, runLen = cur, 1
-        runs.append((runStart, runLen))
-        return max(runs, key=lambda r: r[1])
-
-
-def loadCodonMaps(db, transcripts):
-    """Build a CodonMap for each transcript from ncbiRefSeqCurated.
-
-    RefSeq transcripts come from ncbiRefSeqCurated and Ensembl ones from the GENCODE
-    genePred, keyed off the accession prefix.  A transcript can align to more than one place
-    (alt haplotypes, fix patches); the alignment on a main chromosome wins, and among several
-    the longest CDS wins.
-    """
-    maps = {}
-    missing = []
-    for tx in transcripts:
-        checkAccession(tx)
-        table = GENCODE_GENEPRED if tx.startswith('ENST') else 'ncbiRefSeqCurated'
-        rows = hgsql(db, "select chrom, strand, cdsStart, cdsEnd, exonStarts, exonEnds "
-                         "from %s where name = '%s'" % (table, tx))
-        best = None
-        for chrom, strand, cdsStart, cdsEnd, exonStarts, exonEnds in rows:
-            cdsStart, cdsEnd = int(cdsStart), int(cdsEnd)
-            starts = [int(x) for x in exonStarts.rstrip(',').split(',')]
-            ends = [int(x) for x in exonEnds.rstrip(',').split(',')]
-            bases = []
-            for s, e in zip(starts, ends):
-                s = max(s, cdsStart)
-                e = min(e, cdsEnd)
-                if s < e:
-                    bases.extend(range(s, e))
-            if not bases:
-                continue
-            if strand == '-':
-                bases.reverse()
-            cand = CodonMap(tx, chrom, strand, bases)
-            if best is None:
-                best = cand
-            elif isMainChrom(cand.chrom) and not isMainChrom(best.chrom):
-                best = cand
-            elif isMainChrom(cand.chrom) == isMainChrom(best.chrom) and \
-                    len(cand.cdsBases) > len(best.cdsBases):
-                best = cand
-        if best is None:
-            missing.append(tx)
-        else:
-            maps[tx] = best
-    return maps, missing
-
-
-def bedField(value):
-    """Render one BED field: no tabs, no newlines, no non-ASCII.
-
-    MaveDB free text (score set titles, formatted citations) carries all three. Tabs and
-    newlines would split the row. Non-ASCII is subtler: the browser does not transcode
-    UTF-8, so an en dash or an author name like Gr\u00f8nb\u00e6k-Thygesen reaches the
-    details page as mojibake. Numeric HTML entities render correctly instead.
-    """
-    text = '' if value is None else str(value)
-    for ch in ('\t', '\n', '\r'):
-        text = text.replace(ch, ' ')
-    while '  ' in text:
-        text = text.replace('  ', ' ')
-    return ''.join(c if ord(c) < 128 else '&#%d;' % ord(c) for c in text.strip())
-
-
-def fmtScore(value, places=4):
-    """Format a functional score for display, trimming trailing zeros."""
-    try:
-        text = ('%.*f' % (places, float(value))).rstrip('0').rstrip('.')
-    except (TypeError, ValueError):
-        return ''
-    return '0' if text in ('', '-0') else text
-
-
 def pickDisplayCall(calls, primaryTitle=None):
     """Choose which calibration's call drives the color and the filters.
 
@@ -335,6 +139,20 @@ def pickDisplayCall(calls, primaryTitle=None):
     if classed:
         return classed[0], '%s; showing the only other calibration with a classification' % context
     return calls[0], context
+
+
+def calibrationLabel(title, ruo):
+    """Calibration name for display, carrying the research-use-only marker.
+
+    researchUseOnly is a fixed property of the calibration method (ExCALIBR and the two
+    BBI-GMM calibrations are always marked, the rest never are), and no calibration MaveDB
+    flags primary is ever marked, so this one string is enough to tell a reader the call
+    they are looking at came from a method MaveDB does not consider clinical-grade. The
+    full reasoning for which calibration won is in the calibrationSource field.
+    """
+    if not title:
+        return 'none'
+    return '%s, research use only' % title if ruo else title
 
 
 def cellColor(acmgOutcome, funcClass):

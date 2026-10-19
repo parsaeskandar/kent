@@ -97,6 +97,10 @@ void cartSaveState(struct cart *cart);
 void cartEncodeState(struct cart *cart, struct dyString *dy);
 /* Add a CGI-encoded var=val&... string of all cart variables to dy. */
 
+void cartEncodeStateRawNames(struct cart *cart, struct dyString *dy);
+/* The same, with variable names written as they stand rather than escaped.  Only for
+ * comparing one cart against another as a string; do not store the result. */
+
 char *cartSessionVarName();
 /* Return name of CGI session ID variable. */
 
@@ -610,6 +614,15 @@ void cartRemoveAllForTdbAndChildren(struct cart *cart, struct trackDb *tdb);
 /* Remove all variables from cart that are associated
    with this tdb and it's children. */
 
+void cartRemoveSettingsForTdbAndChildren(struct cart *cart, struct trackDb *tdb,
+                                         struct trackDb *tdbList);
+/* Remove the settings (filters, colors, display options...) of this tdb, its
+ * subtracks, views and superTrack children from the cart, but keep their
+ * visibility: the track and view visibilities, the subtrack checkboxes, the
+ * image order, the track order and hidden or expanded children. tdbList has all
+ * tracks of the database, so that variables of other tracks whose names start
+ * with this one's are left alone. */
+
 char *cartOrTdbString(struct cart *cart, struct trackDb *tdb, char *var, char *defaultVal);
 /* Look first in cart, then in trackDb for var.  Return defaultVal if not found. */
 
@@ -723,7 +736,20 @@ char *cartNamedSessionDbTable();
 char *cartOrCfgOption(struct cart *cart, char *name);
 /* Return the option with the given name. First check cart then hg.conf.  Return NULL if * it doesn't exist. */
 
+/* The user's recent hgsids, as "hgsid=unixTime ..." with the newest first.  Kept in userDb only. */
+#define RECENT_SESSIONS_VAR "recentSessions"
+/* Set when a session load happens, so hgTracks can offer the recent sessions. */
+#define hgsDidSessionLoad hgSessionPrefix "didSessionLoad"
+
+boolean cartRecentSessionsEnabled();
+/* Return TRUE if hg.conf turns on recent session tracking. */
+
+char *cartContentsVal(char *contents, char *var);
+/* Return the CGI-decoded value of var from a CGI-encoded cart contents string,
+ * or NULL if not present.  Free the result when done. */
+
 struct cartDb *cartDbLoadFromId(struct sqlConnection *conn, char *table, char *secureId);
 /* Load up cartDb entry for particular ID.  Returns NULL if no such id. */
+
 #endif /* CART_H */
 

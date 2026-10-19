@@ -19,20 +19,24 @@ mkdir -p "$BUILD"
 cd "$BUILD"
 
 echo "[$(date +%T)] 1. per-variant bed"
+# set -e would otherwise kill the script before the tail, so a build that aborts on one
+# of the coordinate checks prints nothing at all about why.
 "$SCRIPTS/makeMaveMdVariants.py" "$DOWNLOAD" mavemdVar.bed \
-    --raFragment mavemdFilters.ra --workDir . 2> buildVar.log
-tail -n 14 buildVar.log
+    --raFragment mavemdFilters.ra --workDir . 2> buildVar.log \
+    || { echo "makeMaveMdVariants.py failed:"; tail -n 25 buildVar.log; exit 1; }
+sed -n '/summary/,$p' buildVar.log
 
 echo "[$(date +%T)] 2. heatmap bed"
-"$SCRIPTS/makeMaveMdHeatmap.py" "$DOWNLOAD" mavemdMap.bed 2> buildMap.log
-tail -n 9 buildMap.log
+"$SCRIPTS/makeMaveMdHeatmap.py" "$DOWNLOAD" mavemdMap.bed 2> buildMap.log \
+    || { echo "makeMaveMdHeatmap.py failed:"; tail -n 25 buildMap.log; exit 1; }
+sed -n '/summary/,$p' buildMap.log
 
 echo "[$(date +%T)] 3. sort"
 bedSort mavemdVar.bed mavemdVar.sorted.bed
 bedSort mavemdMap.bed mavemdMap.sorted.bed
 
 echo "[$(date +%T)] 4. bigBed"
-bedToBigBed -type=bed12+34 -tab -as="$SCRIPTS/mavemdVariants.as" \
+bedToBigBed -type=bed12+35 -tab -as="$SCRIPTS/mavemdVariants.as" \
     -extraIndex=name,clinGenId,variantUrn \
     mavemdVar.sorted.bed "$CHROMSIZES" mavemdVar.bb 2>&1 | tail -2
 bedToBigBed -type=bed12+20 -tab -as="$SCRIPTS/mavemdHeatmap.as" \

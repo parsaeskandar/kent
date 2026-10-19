@@ -200,6 +200,30 @@ return (strcasecmp(varBase, "organism") == 0)
     || (strcasecmp(varBase, "db") == 0);
 }
 
+static boolean isFreeTextDbVar(char *varName)
+/* Is this one of the two database vars that carry hub-supplied free text (a genome's
+ * organism name or freeze/date label), as opposed to an internal identifier? */
+{
+char *base = startsWith("o_", varName) ? varName+2 : varName;
+return (strcasecmp(base, "organism") == 0) || (strcasecmp(base, "date") == 0);
+}
+
+static boolean isInsideTag(char *src, char *pos)
+/* Is pos inside an html tag, i.e. is there a '<' before it with no '>' in between?  Reliable
+ * on a hub's description, which htmlSanitize has written with no raw '<' or '>' inside an
+ * attribute value. */
+{
+char *p;
+for (p = pos - 1;  p >= src;  p--)
+    {
+    if (*p == '>')
+        return FALSE;
+    if (*p == '<')
+        return TRUE;
+    }
+return FALSE;
+}
+
 static char *valOrDb(char *val, char *database)
 /* return val if not-null, or a clone of database if it is null */
 {
@@ -360,15 +384,31 @@ while ((next = strchr(next, '$')) != NULL)
             /* Escape the value before it goes into the page.  A hub's description html was
              * sanitized once, when the hub was read (trackHub.c, htmlSanitize); this pass
              * runs at render time, long after, so anything it inserted raw would be markup
-             * that nothing had ever looked at.  Two of the variables are exactly that:
-             * $organism and $date come straight out of a hub's genomes.txt with no
-             * validation.  None of the variables in either list is meant to carry markup,
-             * so escaping them all costs nothing and leaves no gap to keep track of. */
+             * that nothing had ever looked at.  None of the variables in either list is
+             * meant to carry markup, so escaping them all here costs nothing. */
             struct dyString *raw = dyStringNew(64);
             substVar(desc, tdb, database, varName, raw);
-            char *escaped = htmlEncode(raw->string);
+            char *rawStr = raw->string;
+            char *pctEncoded = NULL;
+            if (isFreeTextDbVar(varName) && isInsideTag(src, next))
+                {
+                /* $organism and $date are free text straight out of a hub's genomes.txt --
+                 * real labels can use any punctuation, so this does not reject any of it.
+                 * Inside a tag, i.e. in an attribute such as href or style, it neutralizes
+                 * the two characters that could give the text a second meaning there (a URL
+                 * scheme, or a CSS declaration separator): %-encoding survives both
+                 * HTML-entity decoding and CSS parsing, unlike the literal characters.  In
+                 * the text of the page they mean nothing and are left as they are, a reader
+                 * should see "GAN:26980312", not "GAN%3A26980312". */
+                char *step1 = replaceChars(rawStr, ":", "%3A");
+                pctEncoded = replaceChars(step1, ";", "%3B");
+                freeMem(step1);
+                rawStr = pctEncoded;
+                }
+            char *escaped = htmlEncode(rawStr);
             dyStringAppend(dest, escaped);
             freeMem(escaped);
+            freez(&pctEncoded);
             dyStringFree(&raw);
             start = next = after;
             }

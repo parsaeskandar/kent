@@ -12,12 +12,14 @@ all: 	${BIN_DIR}/genePredTester \
 	${BIN_DIR}/pslReaderTester \
 	${BIN_DIR}/quickLiftTester \
 	${BIN_DIR}/sessionDataTester \
-	${BIN_DIR}/trashDirTester \
-#	${BIN_DIR}/annoGratorTester \
+	${BIN_DIR}/cartParseTest \
 	${BIN_DIR}/binTest \
 	${BIN_DIR}/customTrackTester \
 	${BIN_DIR}/hgvsTester \
 	${BIN_DIR}/sqlCheck 
+# annoGratorTester is left out, like the annoGratorTest target below.  A commented
+# line inside the list above would comment out every entry after it, because the
+# backslash on the line before joins them into one line.
 
 ${BIN_DIR}/%: %.c ${MYLIBS}
 	@${MKDIR} ${BIN_DIR}
@@ -25,8 +27,9 @@ ${BIN_DIR}/%: %.c ${MYLIBS}
 
 #test: binTest spDbTest hdbTest genePredTest pslReaderTest annoGratorTest customTrackTest hgvsTest
 test: binTest quickLiftTest sessionDataTest trashDirTest mallocTopPadTest \
-	hVarSubstHtmlTest dataVersionPathTest genarkLiftOverTest \
-	snapshotTypeTest sessionDirTest geoMirrorSelfTest asForDbTest spDbTest hdbTest genePredTest pslReaderTest customTrackTest hgvsTest
+	hVarSubstHtmlTest dataVersionPathTest genarkLiftOverTest trackDbLoopTest \
+	snapshotTypeTest sessionDirTest geoMirrorSelfTest asForDbTest vcfInfoFilterTest pgSnpManyAllelesTest \
+	trackHubSkipHubNameTest cartPcrVarTest spDbTest hdbTest genePredTest pslReaderTest customTrackTest hgvsTest cartParseTest
 	rm -r output
 	echo tested all
 
@@ -60,12 +63,21 @@ customTrackTest: ${BIN_DIR}/customTrackTester loaders mkdirs
 hgvsTest: ${BIN_DIR}/hgvsTester mkdirs
 	${MAKE} -f hgvsTests.mk test
 
+cartParseTest: ${BIN_DIR}/cartParseTest mkdirs
+	${BIN_DIR}/cartParseTest > output/cartParseTest 2>&1
+	diff expected/cartParseTest output/cartParseTest
+
 binTest: mkdirs ${BIN_DIR}/binTest
 	@./binTest.sh
 
 quickLiftTest: ${BIN_DIR}/quickLiftTester mkdirs
 	${BIN_DIR}/quickLiftTester > output/quickLiftTest
 	diff expected/quickLiftTest output/quickLiftTest
+	for g in off split multi both; do \
+	    HGDB_CONF=input/quickLift/$$g.hg.conf ${BIN_DIR}/quickLiftTester intervals \
+	        input/quickLift/lift.bb input/quickLift/items.bb > output/quickLiftIntervals.$$g \
+	        && diff expected/quickLiftIntervals.$$g output/quickLiftIntervals.$$g || exit 1; \
+	done
 
 sessionDataTest: ${BIN_DIR}/sessionDataTester mkdirs
 	${BIN_DIR}/sessionDataTester output/sessionData > output/sessionDataTest
@@ -100,8 +112,10 @@ trashDirTest: ${BIN_DIR}/trashDirTester mkdirs
 
 # Twice: once with the setting and once without, because the answer is the DIFFERENCE between
 # them.  A single run could pass on a library whose own default happened to be large.
+# The off conf sets 0 by name, because the developer's conf may include one that sets it.
 mallocTopPadTest: ${BIN_DIR}/mallocTopPadTester mkdirs
 	echo "include ${HOME}/.hg.conf" > output/topPadOff.conf
+	echo "mallocTopPad=0" >> output/topPadOff.conf
 	echo "include ${HOME}/.hg.conf" > output/topPadOn.conf
 	echo "mallocTopPad=33554432" >> output/topPadOn.conf
 	HGDB_CONF=output/topPadOff.conf ${BIN_DIR}/mallocTopPadTester > output/mallocTopPadTest
@@ -118,9 +132,20 @@ dataVersionPathTest: mkdirs
 	${BIN_DIR}/dataVersionPathTester > output/dataVersionPathTest
 	diff expected/dataVersionPathTest output/dataVersionPathTest
 
+trackDbLoopTest: mkdirs
+	${CC} ${CC_PROG_OPTS} -o ${BIN_DIR}/trackDbLoopTester trackDbLoopTester.c ${MYLIBS} $L
+	${BIN_DIR}/trackDbLoopTester input/trackDbLoop/composite.ra input/trackDbLoop/self.ra \
+	    input/trackDbLoop/loop2.ra input/trackDbLoop/loop3.ra > output/trackDbLoopTest
+	diff expected/trackDbLoopTest output/trackDbLoopTest
+
+# genarkLiftOver is set in the conf rather than assumed.  genarkLiftOverDbs returns nothing
+# at all when the option is off, so a developer's own hg.conf without it turns every line of
+# the expected output into "0 back" and the test goes red for a reason that is not the code.
 genarkLiftOverTest: mkdirs
 	${CC} ${CC_PROG_OPTS} -o ${BIN_DIR}/genarkLiftOverTester genarkLiftOverTester.c ${MYLIBS} $L
-	${BIN_DIR}/genarkLiftOverTester > output/genarkLiftOverTest
+	echo "include ${HOME}/.hg.conf" > output/genarkLiftOver.conf
+	echo "genarkLiftOver=on" >> output/genarkLiftOver.conf
+	HGDB_CONF=output/genarkLiftOver.conf ${BIN_DIR}/genarkLiftOverTester > output/genarkLiftOverTest
 	diff expected/genarkLiftOverTest output/genarkLiftOverTest
 
 snapshotTypeTest: mkdirs
@@ -165,6 +190,32 @@ asForDbTest: mkdirs
 	echo "include /usr/local/apache/cgi-bin/hg.conf" > output/genark.conf
 	HGDB_CONF=output/genark.conf ${BIN_DIR}/asForDbTester > output/asForDbTest 2>&1
 	diff expected/asForDbTest output/asForDbTest
+
+# The warnings for filters a VCF cannot support are part of what is checked, so the tester
+# prints them in line with its other output rather than on stderr.
+vcfInfoFilterTest: mkdirs
+	${CC} ${CC_PROG_OPTS} -o ${BIN_DIR}/vcfInfoFilterTester vcfInfoFilterTester.c ${MYLIBS} $L
+	${BIN_DIR}/vcfInfoFilterTester > output/vcfInfoFilterTest
+	diff expected/vcfInfoFilterTest output/vcfInfoFilterTest
+
+# per-allele counts from a VCF record with more alleles than the old fixed array held.
+# refs #38154
+pgSnpManyAllelesTest: mkdirs
+	${CC} ${CC_PROG_OPTS} -o ${BIN_DIR}/pgSnpManyAllelesTester pgSnpManyAllelesTester.c ${MYLIBS} $L
+	${BIN_DIR}/pgSnpManyAllelesTester > output/pgSnpManyAllelesTest
+	diff expected/pgSnpManyAllelesTest output/pgSnpManyAllelesTest
+
+trackHubSkipHubNameTest: mkdirs
+	${CC} ${CC_PROG_OPTS} -o ${BIN_DIR}/trackHubSkipHubNameTester trackHubSkipHubNameTester.c ${MYLIBS} $L
+	${BIN_DIR}/trackHubSkipHubNameTester > output/trackHubSkipHubNameTest
+	diff expected/trackHubSkipHubNameTest output/trackHubSkipHubNameTest
+
+# hgPcrResult_ cart variables fed through the cart's own parse.  The dropped ones are also
+# reported on stderr, the way the CGIs log them, so that goes to /dev/null.  refs #38442
+cartPcrVarTest: mkdirs
+	${CC} ${CC_PROG_OPTS} -o ${BIN_DIR}/cartPcrVarTester cartPcrVarTester.c ${MYLIBS} $L
+	${BIN_DIR}/cartPcrVarTester > output/cartPcrVarTest 2> /dev/null
+	diff expected/cartPcrVarTest output/cartPcrVarTest
 
 sqlCheck: ${BIN_DIR}/sqlCheck mkdirs
 	${MAKE} -f sqlCheck.mk test BIN_DIR=${BIN_DIR} OUT_DIR=output

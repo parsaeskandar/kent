@@ -473,7 +473,12 @@ if (offerNewAddress)
      * way in, so offer to replace it here. */
     hPrintf("<p>If <b>%s</b> is not the right email address, enter the right one, and we will "
         "send the confirmation there instead.</p>", encAddress);
+    /* One token per render of this form, checked back by changePendingEmail: a link built
+     * without having seen this page cannot carry it. */
+    char *formToken = makeRandomKey(128+33);
+    cartSetString(cart, "oauth_pending_formToken", formToken);
     hPrintf("<form method=\"post\" action=\"%s\" name=\"fixEmailForm\">", hgLoginUrl);
+    hPrintf("<input type=\"hidden\" name=\"pendingFormToken\" value=\"%s\">", formToken);
     hPrintf("<div class=\"inputGroup\">"
         "<label for=\"fixEmailAddr\">Email address</label>"
         "<input type=\"text\" name=\"hgLogin_email\" value=\"\" size=\"30\" "
@@ -738,7 +743,7 @@ hPrintf("<div class=\"acctHelpSection\"><input name=\"hgLogin_helpWith\" type=\"
     sameString(pre, "username") ? " checked" : "");
 if (emailLinkEnabled())
     hPrintf("<div class=\"acctHelpSection\"><input name=\"hgLogin_helpWith\" type=\"radio\" value=\"loginLink\" id=\"loginLink\">"
-        "<label for=\"loginLink\" class=\"radioLabel\">Email me a <b>login link</b> so I can sign in without a password.</label></div>");
+        "<label for=\"loginLink\" class=\"radioLabel\">Email me a <b>sign-in link</b>.</label></div>");
 hPrintf("</div>\n");
 hPrintf("<div class=\"inputGroup\" id=\"usernameBox\" style=\"display: none;\">"
     "<label for=\"emailUsername\">Username</label>"
@@ -836,9 +841,9 @@ safef(activateURL, sizeof(activateURL),
     hgLoginUrl,
     cgiEncode(username),
     cgiEncode(encToken));
-safef(subject, sizeof(subject),"%s account e-mail address confirmation", brwName);
+safef(subject, sizeof(subject),"%s account email address confirmation", brwName);
 safef(msg, sizeof(msg),
-    "Someone (probably you, from IP address %s) has requested an account %s with this e-mail address on the %s.\nTo confirm that this account really does belong to you on the %s, open this link in your browser:\n\n%s\n\nIf this is *not* you, do not follow the link. This confirmation code will expire in 7 days.\n\nIf this *is* you, after clicking the activation link, your new account gives you access to sessions you can create and name. Sessions allow you to save your Genome Browser screen configuration and share it with others with a link like https://genome.ucsc.edu/s/%s/YourSessionName\n\nFor more information on sessions, see our help page on the topic: https://genome.ucsc.edu/goldenPath/help/hgSessionHelp.html#Introduction\n\nAdditional resources:\nSubscribe to the Genome Browser Mailing List: https://groups.google.com/a/soe.ucsc.edu/group/genome-announce?hl=en\nGenome Browser User Guide: https://genome.ucsc.edu/goldenPath/help/hgTracksHelp.html\nTraining and Tutorials: https://genome.ucsc.edu/training/index.html\n\n%s\n%s",
+    "Someone (probably you, from IP address %s) has requested an account %s with this email address on the %s.\nTo confirm that this account really does belong to you on the %s, open this link in your browser:\n\n%s\n\nIf this is *not* you, do not follow the link. This confirmation code will expire in 7 days.\n\nIf this *is* you, after clicking the activation link, your new account gives you access to sessions you can create and name. Sessions allow you to save your Genome Browser screen configuration and share it with others with a link like https://genome.ucsc.edu/s/%s/YourSessionName\n\nFor more information on sessions, see our help page on the topic: https://genome.ucsc.edu/goldenPath/help/hgSessionHelp.html#Introduction\n\nAdditional resources:\nSubscribe to the Genome Browser Mailing List: https://groups.google.com/a/soe.ucsc.edu/group/genome-announce?hl=en\nGenome Browser User Guide: https://genome.ucsc.edu/goldenPath/help/hgTracksHelp.html\nTraining and Tutorials: https://genome.ucsc.edu/training/index.html\n\n%s\n%s",
      remoteAddr, username, brwName, brwName, activateURL, username, signature, returnAddr);
 sendActMailOut(email, subject, msg);
 }
@@ -1300,8 +1305,8 @@ safef(message, sizeof(message),
     "browser:\n\n%s\n\nThe link works once and expires in seven days.  Until it is opened, this "
     "email address cannot be used to sign in to that account and will not receive a "
     "password-reset email.\n\n"
-    "If this is *not* you, do not open the link: someone typed your address by mistake, and "
-    "ignoring this message is all it takes to keep them from using it.\n\n%s\n%s",
+    "If this was not you, do not open the link. This address will not be used for the account "
+    "unless the link is opened.\n\n%s\n%s",
     emptyForNull(remoteAddr), brwName, user, url, signature, returnAddr);
 /* Not sendActMailOut(): that exits the CGI when the address will not take mail, which would
  * end the signup response after the account has already been created and its activation mail
@@ -1431,7 +1436,7 @@ if (isNotEmpty(curPwd))
     if (isEmpty(given) || !checkPwd(given, curPwd))
         {
         freez(&errMsg);
-        errMsg = cloneString("Please enter your current password.");
+        errMsg = cloneString("Invalid current password.");
         changeEmailPage(conn);
         return;
         }
@@ -1627,10 +1632,10 @@ hPrintf("<p>Signed in as <b>%s</b>.<br>Current recovery email address: <b>%s</b>
     encUser, encCurRecov,
     (isNotEmpty(curRecov) && !curConfirmed) ? " (waiting to be confirmed)" : "");
 hPrintf("<p style=\"font-size:0.9em\">You can add a second email address to get back into "
-    "your account. Once confirmed, it can sign you in, including through the Google and "
-    "ORCID buttons, and it will get a copy of the password-reset email whenever one is sent "
-    "for this account. We will email a confirmation link to the new address. Until that "
-    "link is opened, the email address cannot be used to sign in and will not receive a "
+    "your account. Once confirmed, it can sign you in, including through the Google, GitHub, "
+    "and CILogon sign-in options, and it will get a copy of the password-reset email whenever "
+    "one is sent for this account. We will email a confirmation link to the new address. Until "
+    "that link is opened, the email address cannot be used to sign in and will not receive a "
     "password-reset email.%s</p>",
     isNotEmpty(curRecov) ? " Your current recovery email address keeps working until then." : "");
 freeMem(encUser);
@@ -1701,7 +1706,7 @@ if (isNotEmpty(curPwd))
     if (isEmpty(given) || !checkPwd(given, curPwd))
         {
         freez(&errMsg);
-        errMsg = cloneString("Please enter your current password.");
+        errMsg = cloneString("Invalid current password.");
         changeRecovEmailPage(conn);
         return;
         }
@@ -1836,7 +1841,7 @@ char *encUserName = cgiEncodeFull(user);
 if (!user || sameString(user,""))
     {
     freez(&errMsg);
-    errMsg = cloneString("User name cannot be blank.");
+    errMsg = cloneString("Username cannot be blank.");
     signupPage(conn);
     return;
     }
@@ -1845,7 +1850,7 @@ if (!user || sameString(user,""))
 if (strlen(user) < 2)
     {
     freez(&errMsg);
-    errMsg = cloneString("User name must be at least two characters long.");
+    errMsg = cloneString("Username must be at least two characters long.");
     signupPage(conn);
     return;
     }
@@ -1853,7 +1858,7 @@ if (strlen(user) < 2)
 if (strlen(encUserName) > 32)
     {
     char buf[1024];
-    safef(buf,sizeof(buf), "Encoded user name: '%s' is %d characters.  Please use a shorter name: less than 32 characters after URL encoding.", encUserName, (int)strlen(encUserName));
+    safef(buf,sizeof(buf), "Encoded username: '%s' is %d characters.  Please use a shorter username: less than 32 characters after URL encoding.", encUserName, (int)strlen(encUserName));
     freez(&errMsg);
     errMsg = cloneString(buf);
     signupPage(conn);
@@ -2122,7 +2127,7 @@ char *userName = cartUsualString(cart, "hgLogin_userName", "");
 if (sameString(userName,""))
     {
     freez(&errMsg);
-    errMsg = cloneString("User name cannot be blank.");
+    errMsg = cloneString("Username cannot be blank.");
     displayLoginPage(conn);
     return;
     }
@@ -2586,9 +2591,9 @@ else
     char *encProviderEmail = htmlEncode(providerEmail);
     /* Only promise the change-email page where it exists: it, and the confirmation link that
      * finishes the change, are all behind login.emailLink, which is off by default. */
-    hPrintf("<p>Your email address, as %s gave it to us, is <b>%s</b>.%s</p>",
+    hPrintf("<p>Your email address from %s is <b>%s</b>.%s</p>",
         label, encProviderEmail,
-        emailLinkEnabled() ? " You can change it later on the account page." : "");
+        emailLinkEnabled() ? " You can change this email address later on the account page." : "");
     freeMem(encProviderEmail);
     }
 hPrintf("<div class=\"formControls\">"
@@ -2624,14 +2629,14 @@ if (isEmpty(user))
 if (strlen(user) < 2)
     {
     freez(&errMsg);
-    errMsg = cloneString("User name must be at least two characters long.");
+    errMsg = cloneString("Username must be at least two characters long.");
     completeAccountPage(conn);
     return;
     }
 if (strlen(encUserName) > 32)
     {
     freez(&errMsg);
-    errMsg = cloneString("Please use a shorter user name: less than 32 characters after URL encoding.");
+    errMsg = cloneString("Please use a shorter username: less than 32 characters after URL encoding.");
     completeAccountPage(conn);
     return;
     }
@@ -2811,7 +2816,7 @@ if (emailMode)
         "Select the account you would like to sign in to.</p>", encEmail, brwName);
 else
     hPrintf("<p>The email address <b>%s</b> is associated with more than one %s account. "
-        "Select the account you would like to sign in to; your %s login will be linked to it.</p>",
+        "Select the account you would like to sign in to. Your %s login will be linked to it.</p>",
         encEmail, brwName, oauthProviderLabel(provider));
 hPrintf("<span style='color:red;'>%s</span>", errMsg ? errMsg : "");
 hPrintf("<form method=\"post\" action=\"%s\" name=\"chooseAccountForm\">", hgLoginUrl);
@@ -2860,7 +2865,7 @@ if (isEmpty(provider))
     if (isEmpty(email) || isEmpty(tokenMd5))
         {
         freez(&errMsg);
-        errMsg = cloneString("Your login link expired. Please request a new one.");
+        errMsg = cloneString("Your sign-in link expired. Please request a new one.");
         displayLoginPage(conn);
         return;
         }
@@ -3062,9 +3067,15 @@ void changePendingEmail(struct sqlConnection *conn)
  * provider round trip, and only for this browser, so a request arriving here without one is
  * refused rather than trusted. */
 {
-char *provider = cartUsualString(cart, "oauth_pending_provider", "");
+// Clone this: clearPendingIdentity below frees the cart's copy, but we still use provider
+// after calling it, to label the confirmation page.
+char *provider = cloneString(cartUsualString(cart, "oauth_pending_provider", ""));
 char *subject = cartUsualString(cart, "oauth_pending_subject", "");
-if (isEmpty(provider) || isEmpty(subject) || !pendingIdentityValid())
+char *formToken = cartUsualString(cart, "oauth_pending_formToken", "");
+boolean postedRightToken = sameString(emptyForNull(cgiRequestMethod()), "POST") &&
+    isNotEmpty(formToken) && sameString(formToken, cgiUsualString("pendingFormToken", ""));
+cartRemove(cart, "oauth_pending_formToken");   // one-time use either way
+if (isEmpty(provider) || isEmpty(subject) || !pendingIdentityValid() || !postedRightToken)
     {
     clearPendingIdentity();
     freez(&errMsg);
@@ -3112,6 +3123,8 @@ if (!bad)
     /* The page we are about to show is the same one the user just came from, so say that the
      * change went through.  Otherwise the swapped-in address is the only sign of it. */
     cartSetString(cart, "hgLogin_actMailChanged", "1");
+    // One change per pending identity: clear it so the form this came from cannot be reused.
+    clearPendingIdentity();
     }
 else
     {
@@ -3219,8 +3232,8 @@ if (!emailLinkEnabled())
 hPrintf("<div id=\"emailLinkBox\" class=\"centeredContainer formBox\">"
     "<h2>%s</h2>", brwName);
 hPrintf("<h3>Email me a sign-in link</h3>");
-hPrintf("<p>Enter your email address and we'll send you a link that signs you in without a "
-    "password. This is handy on a computer where you don't have your password saved.</p>");
+hPrintf("<p>Enter your email address and we will send you a link that signs you in without a "
+    "password.</p>");
 hPrintf("<span style='color:red;'>%s</span>", errMsg ? errMsg : "");
 hPrintf("<form method=\"post\" action=\"%s\" name=\"emailLinkForm\">", hgLoginUrl);
 char *encEmail = htmlEncode(cartUsualString(cart, "hgLogin_email", ""));
@@ -3230,7 +3243,7 @@ hPrintf("<div class=\"inputGroup\">"
     "</div>", encEmail);
 freeMem(encEmail);
 hPrintf("<div class=\"formControls\">"
-    "<input type=\"submit\" name=\"hgLogin.do.sendEmailLink\" value=\"Send login link\" class=\"largeButton\">"
+    "<input type=\"submit\" name=\"hgLogin.do.sendEmailLink\" value=\"Send sign-in link\" class=\"largeButton\">"
     " &nbsp;<a href=\"%s\" class=\"cancelButton\">Cancel</a>"
     "</div></form></div><!-- END - emailLinkBox -->", getReturnToUrlForAttr());
 cartSaveSession(cart);
@@ -3244,10 +3257,10 @@ char *email = htmlEncode(cartUsualString(cart, "hgLogin_sendMailTo", ""));
 hPrintf("<div id=\"confirmationBox\" class=\"centeredContainer formBox\">"
     "<h2>%s</h2>", brwName);
 hPrintf("<p id=\"confirmationMsg\" class=\"confirmationTxt\">If an account exists for "
-    "<B>%s</B>, a login link has been sent to that address.<BR><BR>"
+    "<B>%s</B>, a sign-in link has been sent to that address.<BR><BR>"
     "Click the link in that email to sign in. No password needed. "
     "The link works once and expires in one hour.</p>", email);
-hPrintf("<p>If you don't see the email, please check your spam folder.</p>");
+hPrintf("<p>If you do not see the email, please check your spam folder.</p>");
 hPrintf("<p><a href=\"%s?hgLogin.do.displayLoginPage=1\">Return to Login</a></p>\n", hgLoginUrl);
 cartRemove(cart, "hgLogin_email");
 cartRemove(cart, "hgLogin_sendMailTo");
@@ -3265,9 +3278,9 @@ char url[512];
 char *remoteAddr = getenv("REMOTE_ADDR");
 safef(url, sizeof(url), "%s?hgLogin.do.emailLogin=1&email=%s&token=%s",
     hgLoginUrl, cgiEncode(email), cgiEncode(token));
-safef(subject, sizeof(subject), "Your login link for the %s", brwName);
+safef(subject, sizeof(subject), "Your sign-in link for the %s", brwName);
 safef(msg, sizeof(msg),
-    "Someone (probably you, from IP address %s) requested a login link for the %s account "
+    "Someone (probably you, from IP address %s) requested a sign-in link for the %s account "
     "registered to this email address.\nClick the link below to sign in without a password. "
     "It works once and expires in one hour:\n\n%s\n\n%s\n%s",
     remoteAddr, brwName, url, signature, returnAddr);
@@ -3346,7 +3359,7 @@ int n = slCount(list);
 if (n == 0)
     {
     freez(&errMsg);
-    errMsg = cloneString("This login link is invalid or has expired. Please request a new one.");
+    errMsg = cloneString("This sign-in link is invalid or has expired. Please request a new one.");
     displayLoginPage(conn);
     }
 else if (n == 1)
@@ -3386,6 +3399,7 @@ static char *serverOwned[] = {
     "emailLogin_email", "emailLogin_tokenMd5",
     "hgLogin_actMailProvider", "hgLogin_actMailTo", "hgLogin_actMailUser",
     "hgLogin_actMailUnverified", "hgLogin_actMailChanged",
+    "oauth_pending_formToken",
     };
 int i;
 for (i = 0;  i < ArraySize(serverOwned);  i++)

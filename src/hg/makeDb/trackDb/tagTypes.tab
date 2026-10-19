@@ -89,6 +89,7 @@ hideEmptySubtracksLabel *
 hideEmptySubtracksMultiBedUrl *
 hideEmptySubtracksSourcesUrl *
 color *
+colorByInfo* vcf vcfTabix
 colorByStrand bigBed bed genePred bigGenePred
 colorChromDefault psl bigPsl
 colorSettingsUrl *
@@ -136,6 +137,8 @@ dimensionZchecked *
 dimensions *
 directUrl *
 dividers *
+dotBracketColor bigBed
+dotBracketField bigBed
 dragAndDrop *
 drawMode hic
 doWiggle bigBed
@@ -143,6 +146,7 @@ downloadUrl* *
 endFudge bed
 ensemblIdUrl genePred
 ensArchive genePred
+excludeFilterValues vcf vcfTabix vcfPhasedTrio
 exonArrows genePred bed broadPeak bigBed
 exonArrowsDense bed
 exonNumbers genePred bed broadPeak psl big*
@@ -334,7 +338,7 @@ motifMapTable factorSource
 motifMaxWindow factorSource
 motifDrawDefault factorSource
 mouseOverField big*
-mouseOver bigLolly bigBed bigPsl bigGenePred bed bigDbSnp bigNarrowPeak
+mouseOver bigLolly bigBed bigPsl bigGenePred bed bigDbSnp bigNarrowPeak vcfTabix
 mouseOverFunction bigWig
 msaTable wig wigMafProt wigMaf
 multiRegionsBedUrl *
@@ -550,7 +554,7 @@ qValueFilter bed narrowPeak broadPeak bigNarrowPeak
 qValueFilterLimits bed narrowPeak broadPeak bigNarrowPeak
 singleCellColumnNames *
 skipFields bigBed bigPsl bigGenePred bigLolly
-skipEmptyFields bigBed bigPsl
+skipEmptyFields bigBed bigPsl bigGenePred
 smoothingWindow wig bed5FloatScore bedGraph bigWig
 snpExceptions bed
 snpExceptionDesc bed

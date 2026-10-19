@@ -1006,6 +1006,13 @@ boolean trackHubBigNetEnabled()
 return cfgOptionBooleanDefault("bigNet", FALSE);
 }
 
+boolean hubHtmlSanitizeOn()
+/* Return TRUE if description HTML from hubs and custom tracks goes through htmlSanitize.
+ * Off unless hg.conf says hubHtmlSanitize=on. */
+{
+return cfgOptionBooleanDefault("hubHtmlSanitize", FALSE);
+}
+
 static void validateOneTrack( struct trackHub *hub, 
     struct trackHubGenome *genome, struct trackDb *tdb)
 /* Validate a track's trackDb entry. */
@@ -1136,6 +1143,18 @@ for (tdb = tdbList; tdb != NULL; tdb = tdb->next)
 	 if (parent == NULL)
 	    errAbort("Parent %s of track %s doesn't exist in hub %s genome %s", parentName,
 		tdb->track, hub->url, genome->name);
+	 /* Refuse the link that closes a loop in the parent chain.  validateOneTrack runs
+	  * before trackDbLinkUpGenerations and its loop check, and trackDbSetting walks
+	  * this chain to the top, so a loop here spins the CGI forever rather than
+	  * reporting the bad setting.  The links already made are loop-free, which is what
+	  * ends this walk.  refs #38471 */
+	 struct trackDb *ancestor;
+	 for (ancestor = parent; ancestor != NULL; ancestor = ancestor->parent)
+	    {
+	    if (ancestor == tdb)
+	       errAbort("Track %s is its own ancestor through its parent %s in hub %s "
+		   "genome %s", tdb->track, parentName, hub->url, genome->name);
+	    }
 	 // mark the parent as a container
 	 parent->subtracks = tdb;
 
@@ -1294,7 +1313,10 @@ char *trackHubSkipHubName(char *name)
 {
 if ((name == NULL) || !startsWith("hub_", name))
     return name;
-return strchr(&name[4], '_') + 1;
+char *ptr = strchr(&name[4], '_');
+if (ptr == NULL)
+    return name;
+return ptr + 1;
 }
 
 struct trackDb *findTdbByBareName(struct trackDb *tdbList, char *bareName)
@@ -1351,8 +1373,13 @@ void trackHubAddOneDescription(char *trackDbFile, struct trackDb *tdb)
 char *html = trackHubDescriptionText(trackDbFile, tdb);
 if (html == NULL)
     return;                     /* no page of its own, so leave any it inherited alone */
-tdb->html = htmlSanitize(html);
-freeMem(html);
+if (hubHtmlSanitizeOn())
+    {
+    tdb->html = htmlSanitize(html);
+    freeMem(html);
+    }
+else
+    tdb->html = html;
 }
 
 struct slName *trackHubDescriptionRemovals(char *trackDbFile, struct trackDb *tdb)
@@ -1361,6 +1388,11 @@ struct slName *trackHubDescriptionRemovals(char *trackDbFile, struct trackDb *td
 {
 char *html = trackHubDescriptionText(trackDbFile, tdb);
 struct slName *removed = NULL;
+if (!hubHtmlSanitizeOn())
+    {
+    freeMem(html);
+    return NULL;
+    }
 char *clean = htmlSanitizeReport(html, &removed);
 freeMem(html);
 freeMem(clean);
@@ -1438,8 +1470,11 @@ struct hash *nameHash = hashNew(5);
 
 for (tdb = tdbList; tdb != NULL; tdb = next)
     {
-    if (tdb->parent != NULL)
-	polishOneTrack(hub, tdb->parent, nameHash);
+    /* Polish every ancestor, not just the closest: a supertrack may itself sit inside
+     * another supertrack, which is reached only through it. */
+    struct trackDb *ancestor;
+    for (ancestor = tdb->parent; ancestor != NULL; ancestor = ancestor->parent)
+	polishOneTrack(hub, ancestor, nameHash);
     next = tdb->next;
     polishOneTrack(hub, tdb, nameHash);
     if (tdb->subtracks != NULL)
@@ -1537,6 +1572,8 @@ if (bigDataUrl != NULL)
         if (startsWithWord("bigBed", type) && (typeString != NULL))
             {
             unsigned numFields = sqlUnsigned(nextWord(&typeString));
+            if (numFields < 3)
+                errAbort("Track \"%s\" declares 'type bigBed %u', but a bigBed has at least 3 fields (chrom, chromStart, chromEnd). Change the type line to match the file's field count, or leave the number off and the count is read from the file.", trackHubSkipHubName(tdb->track), numFields);
             if (numFields > bbi->fieldCount)
                 errAbort("bigBed file '%s' has %d fields, but track \"%s\" declares 'type bigBed %d'. Either regenerate the bigBed with the correct number of fields, or change the type line to match the file's field count.", bigDataUrl, bbi->fieldCount, trackHubSkipHubName(tdb->track), numFields);
             }
@@ -1985,6 +2022,9 @@ if (sameString("cytoBandIdeo", trackHubSkipHubName(tdb->track)) ||
        startsWithNoCase("bigLolly", tdb->type) || \
        (startsWithNoCase("bigNet", tdb->type) && trackHubBigNetEnabled()) || \
        (isAlignmentType(tdb->type) && quickLiftAlignmentsEnabled(cart)) || \
+       (startsWithNoCase("bigBarChart", tdb->type) && quickLiftBarChartEnabled(cart)) || \
+       ((sameWord("wig", tdb->type) || startsWithNoCase("wig ", tdb->type)) &&
+        quickLiftWigEnabled(cart)) ||
        sameWord("bed", tdb->type) ||
        startsWithNoCase("bed ", tdb->type)))
     {
@@ -1999,6 +2039,7 @@ if (startsWithNoCase("bigBed", tdb->type) || \
        startsWithNoCase("bigPsl", tdb->type) || \
        startsWithNoCase("bigChain", tdb->type) || \
        startsWithNoCase("bigMaf", tdb->type) || \
+       startsWithNoCase("bigBarChart", tdb->type) || \
        startsWithNoCase("bigWig", tdb->type))
     {
     char *fileName = cloneString(trackDbSetting(tdb, "bigDataUrl"));
@@ -2140,32 +2181,31 @@ for(; tdb; tdb = tdbNext)
         isVisible = checkCartVisibility(cart, tdb);
     else if (isParentVisible(cart, tdb) &&  isSubtrackVisible(cart, tdb)) // child of supertrack
         {
-        // Containers nest: hg38's TSS superTrack holds the proCapNet composite, which
-        // holds the view a leaf sits in.  Every ancestor has to be declared or the hub
-        // reader rejects the child outright ("Parent ... doesn't exist in hub"), so walk
-        // the whole chain rather than one level of it.  Climbing stops at the first
-        // ancestor already written, because everything above that went out with it.
-        struct slRef *chain = NULL, *ref;
-        struct trackDb *anc;
-        for (anc = tdb->parent; anc != NULL; anc = anc->parent)
+        /* Write every supertrack above this track, outermost first.  A supertrack may
+         * itself be a member of another supertrack, and writing only the closest one
+         * leaves its "parent" setting pointing at a stanza the hub does not contain. */
+        struct slRef *supers = NULL, *superRef;
+        struct trackDb *ancestor;
+        for (ancestor = tdb->parent; ancestor != NULL; ancestor = ancestor->parent)
             {
-            if (hashLookup(haveSuper, anc->track) != NULL)
-                break;
-            refAdd(&chain, anc);        // prepends, so the outermost ends up first
+            if (tdbIsSuperTrack(ancestor))
+                slAddHead(&supers, slRefNew(ancestor));  // ends up outermost first
             }
-        // A container is not in the list we are walking, so it has no rank of its own.
-        // Slot the chain into the gap just above the child that brought it in, outermost
-        // first, so the file keeps parents ahead of their children.  With a single
-        // ancestor this is the rank - 0.5 it has always been.
-        int depth = slCount(chain), i = 0;
-        for (ref = chain; ref != NULL; ref = ref->next, ++i)
+        // a superTrack is not in the list we are walking, so it has no rank of its own.
+        // Slot the chain just above the first child that brought it in.
+        double superRank = rank - 0.5;
+        for (superRef = supers; superRef != NULL; superRef = superRef->next)
             {
-            struct trackDb *parent = ref->val;
-            parent->visibility = hTvFromString("tvShow");
-            outTrack(out, cart, parent, rank - 0.5 + i * (0.5 / depth));
-            hashStore(haveSuper, parent->track);
+            struct trackDb *super = superRef->val;
+            if (hashLookup(haveSuper, super->track) == NULL)  // output yet?
+                {
+                super->visibility = tvShow;
+                outTrack(out, cart, super, superRank);
+                hashStore(haveSuper, super->track);
+                }
+            superRank += 0.01;          // keep an outer folder above the one it holds
             }
-        slFreeList(&chain);
+        slFreeList(&supers);
         isVisible = checkCartVisibility(cart, tdb);
         }
 

@@ -820,6 +820,7 @@ cartRemovePrefix(cart, hgsDoDownloadPrefix);
 cartRemovePrefix(cart, hgsDo);
 cartRemove(cart, hgsOldSessionName);
 cartRemove(cart, hgsCancel);
+cartRemove(cart, hgsDidSessionLoad);
 /* Two of the Save form's own inputs.  If they stay in the cart they are stored inside every
  * session saved afterwards, so one session's description travels in sessions that never had
  * one.  hgsNewSessionShare is left alone on purpose: it has the same problem, but it is also
@@ -828,6 +829,41 @@ cartRemove(cart, hgsCancel);
  * the box for someone who keeps their sessions private. */
 cartRemove(cart, hgsNewSessionName);
 cartRemove(cart, hgsNewSessionDescription);
+}
+
+static char *sessionJustLoadedVars[] = {hgsSessionJustLoaded, hgsOtherUserSessionName,
+                                        hgsOtherUserName};
+
+static struct slPair *setAsideSessionJustLoadedMarker(struct cart *cart)
+/* A pending "session just loaded" marker (and the name/owner it refers to) belongs to the
+ * live cart's next page view, not to a session's own saved contents.  Call this at every
+ * place that bakes the current cart into a persistent artifact (a named session, a local
+ * download), and put the variables back with restoreSessionJustLoadedMarker() once the
+ * artifact is written: the live cart still needs them, hgTracks shows the notice from them
+ * and the recommended track set panel reads the session name and owner. */
+{
+struct slPair *saved = NULL;
+int i;
+for (i = 0;  i < ArraySize(sessionJustLoadedVars);  i++)
+    {
+    char *val = cartOptionalString(cart, sessionJustLoadedVars[i]);
+    if (val != NULL)
+        {
+        // clone it, cartRemove frees the cart's copy
+        slPairAdd(&saved, sessionJustLoadedVars[i], cloneString(val));
+        cartRemove(cart, sessionJustLoadedVars[i]);
+        }
+    }
+return saved;
+}
+
+static void restoreSessionJustLoadedMarker(struct cart *cart, struct slPair **pSaved)
+/* Put back into the live cart what setAsideSessionJustLoadedMarker() took out, and free it. */
+{
+struct slPair *pair;
+for (pair = *pSaved;  pair != NULL;  pair = pair->next)
+    cartSetString(cart, pair->name, pair->val);
+slPairFreeValsAndList(pSaved);
 }
 
 static void outIfNotPresent(struct cart *cart, struct dyString *dy, char *track, int tdbVis)
@@ -870,7 +906,7 @@ static void outDefaultTracks(struct cart *cart, struct dyString *dy)
 /* Output the default trackDb visibility for all tracks
  * in trackDb if the track is not mentioned in the cart. */
 {
-database = cartString(cart, "db");
+database = cartUsualString(cart, "db", hDefaultDb());
 struct trackDb *tdb = NULL;
 // Some old sessions reference databases that are no longer present, and that triggers an errAbort
 // when calling hgTrackDb.  Just move on instead of errAborting.
@@ -890,8 +926,10 @@ struct hash *parentHash = newHash(5);
 
 for(; tdb; tdb = tdb->next)
     {
-    struct trackDb *parent = tdb->parent;
-    if (parent) 
+    /* Every ancestor, not just the closest: a supertrack may itself be a member of
+     * another supertrack, and the outer one is reached only through it. */
+    struct trackDb *parent;
+    for (parent = tdb->parent; parent != NULL; parent = parent->parent)
         {
         if (hashLookup(parentHash, parent->track) == NULL)
             {
@@ -970,8 +1008,10 @@ sqlDyStringPrintf(dy, ") VALUES (");
 sqlDyStringPrintf(dy, "'%s', '%s', ", encUserName, encSessionName);
 sqlDyStringPrintf(dy, "'");
 cleanHgSessionFromCart(cart);
+struct slPair *justLoaded = setAsideSessionJustLoadedMarker(cart);
 struct dyString *encoded = dyStringNew(4096);
 cartEncodeState(cart, encoded);
+restoreSessionJustLoadedMarker(cart, &justLoaded);
 
 // First output the hubStatus id's for attached trackHubs
 outAttachedHubUrls(cart, encoded);
@@ -1009,18 +1049,34 @@ if (userName == NULL)
     return "Unable to save session -- please log in and try again.";
 struct dyString *dyMessage = dyStringNew(2048);
 /* Clone: saveCartAsSession() removes this cart variable, which frees the cart's own copy. */
-char *sessionName = trimSpaces(cloneString(cartString(cart, hgsNewSessionName)));
+char *sessionName = trimSpaces(cloneString(cartUsualString(cart, hgsNewSessionName, "")));
 if (isEmpty(sessionName))
     return "Error: Unable to save a session without a name.  Please add one and try again.";
 
 char *encSessionName = cgiEncodeFull(sessionName);
-boolean shareSession = cartBoolean(cart, hgsNewSessionShare);
 char *encUserName = cgiEncodeFull(userName);
 struct sqlConnection *conn = hConnectCentral();
 
 if (sqlTableExists(conn, namedSessionTable))
     {
-    int useCount = saveCartAsSession(conn, encUserName, encSessionName, shareSession);
+    int sharingLevel;
+    /* Ask the request, not the cart: the cart keeps hgsNewSessionShare on purpose (see
+     * cleanHgSessionFromCart), so it is there long after the form that set it. */
+    if (cgiBooleanDefined(hgsNewSessionShare) || cgiVarExists(hgsNewSessionShare))
+        sharingLevel = cartBoolean(cart, hgsNewSessionShare);
+    else
+        {
+        /* The Save form always sends the checkbox's shadow, so this request did not come from it.
+         * Do not widen who can load the session: keep an existing session's level, and make a new
+         * one private (sqlQuickNum returns 0 when there is no row). */
+        struct dyString *query = sqlDyStringCreate(
+                 "select shared from %s where userName = '%s' and sessionName = '%s'",
+                 namedSessionTable, encUserName, encSessionName);
+        sharingLevel = sqlQuickNum(conn, query->string);
+        dyStringFree(&query);
+        }
+    boolean shareSession = (sharingLevel > 0);
+    int useCount = saveCartAsSession(conn, encUserName, encSessionName, sharingLevel);
     if (useCount > INITIAL_USE_COUNT)
 	dyStringPrintf(dyMessage,
 	  "Overwrote the contents of session <B>%s</B> "
@@ -1760,8 +1816,15 @@ char *compressType = cartString(cart, hgsSaveLocalFileCompress);
 struct pipeline *compressPipe = textOutInit(fileName, compressType, NULL);
 
 cleanHgSessionFromCart(cart);
+struct slPair *justLoaded = setAsideSessionJustLoadedMarker(cart);
 
+char *recentSessions = cloneString(cartOptionalString(cart, RECENT_SESSIONS_VAR));
+cartRemove(cart, RECENT_SESSIONS_VAR);
 cartDumpHgSession(cart);
+if (recentSessions)
+    cartSetString(cart, RECENT_SESSIONS_VAR, recentSessions);
+freeMem(recentSessions);
+restoreSessionJustLoadedMarker(cart, &justLoaded);
 
 // First output the hubStatus id's for attached trackHubs
 outAttachedHubUrls(cart, NULL);
@@ -2084,7 +2147,7 @@ if (userName == NULL)
     return "Unable to re-save session -- please log in and try again.";
 struct sqlConnection *conn = hConnectCentral();
 /* Clone: cartLoadUserSession() and saveCartAsSession() both free the cart's own copy. */
-char *sessionName = trimSpaces(cloneString(cartString(cart, hgsNewSessionName)));
+char *sessionName = trimSpaces(cloneString(cartUsualString(cart, hgsNewSessionName, "")));
 if (isEmpty(sessionName))
     return "Error: Unable to save a session without a name.  Please add one and try again.";
 
@@ -2262,34 +2325,6 @@ else
     }
 }
 
-static char *sessionValFromContents(char *contents, char *var)
-/* Extract the value of var (e.g. "db" or "position") from a saved session's CGI-encoded cart
- * contents string, CGI-decoded, or NULL if not present. */
-{
-if (isEmpty(contents))
-    return NULL;
-char pfx[64];
-char *valIdx = NULL;
-safef(pfx, sizeof(pfx), "%s=", var);
-if (startsWith(pfx, contents))
-    valIdx = contents + strlen(pfx);
-else
-    {
-    char ampPfx[66];
-    safef(ampPfx, sizeof(ampPfx), "&%s", pfx);
-    char *p = strstr(contents, ampPfx);
-    if (p != NULL)
-        valIdx = p + strlen(ampPfx);
-    }
-if (valIdx == NULL)
-    return NULL;
-char *valEnd = strchr(valIdx, '&');
-char *enc = valEnd ? cloneStringZ(valIdx, valEnd - valIdx) : cloneString(valIdx);
-char *dec = cgiDecodeClone(enc);
-freez(&enc);
-return dec;
-}
-
 static int countShownTracks(struct cart *cart)
 /* Rough count of tracks turned on in the current cart: cart entries whose value is a display
  * visibility other than hide.  A proxy for "tracks currently shown" for the save-summary line
@@ -2455,8 +2490,8 @@ if (loggedIn)
             char *createdFull = cloneString(firstUse);
             if (strlen(createdFull) == 19)
                 createdFull[16] = '\0';
-            char *db2 = sessionValFromContents(row[4], "db");
-            char *pos2 = sessionValFromContents(row[4], "position");
+            char *db2 = cartContentsVal(row[4], "db");
+            char *pos2 = cartContentsVal(row[4], "position");
             char *description = gotSettings ? getSetting(row[5], "description") : NULL;
             /* lastUse (last time the session was saved/overwritten/loaded) drives the "most
              * recently saved session" quick-update shortcut on the client. */
@@ -2926,7 +2961,7 @@ if (row != NULL)
     char *spacePt = strchr(dateOnly, ' ');
     if (spacePt != NULL)
         *spacePt = '\0';
-    db2 = sessionValFromContents(row[1], "db");
+    db2 = cartContentsVal(row[1], "db");
     }
 sqlFreeResult(&sr);
 struct dyString *extra = dyStringNew(256);

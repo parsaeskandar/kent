@@ -4043,6 +4043,16 @@ if (trackDbLabel == NULL)
 return trackDbLabel;
 }
 
+static char *asColumnLabel(struct asColumn *asCol)
+/* Return the autoSql comment of a column without the "|longer description" suffix
+ * that hgc shows as a note on the details page. */
+{
+char *pipe = strchr(asCol->comment, '|');
+if (pipe == NULL)
+    return asCol->comment;
+return cloneStringZ(asCol->comment, pipe - asCol->comment);
+}
+
 static filterBy_t *buildFilterBy(struct trackDb *tdb, struct cart *cart, struct asObject *as, struct trackDbFilter *tdbFilter, char *name)
 /* Build a filterBy_t structure from a <column>FilterValues statement. */
 {
@@ -4059,7 +4069,7 @@ filterBy->column = cloneString(field);
 filterBy->title = cloneString(field); ///  title should come from AS file, or trackDb variable
 struct asColumn *asCol = (as != NULL) ? asColumnFind(as, field) : NULL;
 if (asCol != NULL)
-    filterBy->title = asCol->comment;
+    filterBy->title = asColumnLabel(asCol);
 else if (as != NULL)
     {
     // We have autoSql but the field is missing — that's a typo or an
@@ -4112,7 +4122,10 @@ filterBy_t *filterByValues(struct trackDb *tdb, struct cart *cart, struct trackD
 // bigData file that isn't reachable at UI time both return NULL here.
 // That's fine for filterValues.* settings as long as a filterLabel.*
 // override is provided; buildFilterBy() already tolerates a NULL `as`.
-struct asObject *as = asForTdb(NULL, tdb);
+// VCF filters are on INFO fields, which are not autoSql columns.
+struct asObject *as = NULL;
+if (tdb->type == NULL || !startsWith("vcf", tdb->type))
+    as = asForTdb(NULL, tdb);
 filterBy_t *filterByList = NULL, *filter;
 struct trackDbFilter *fieldFilter;
 while ((fieldFilter = slPopHead(&trackDbFilters)) != NULL)
@@ -4792,6 +4805,22 @@ char cartVar[1024];
 safef(cartVar, sizeof cartVar, "%s.%s", trackHubSkipHubName(tdb->track), suffix);
 cgiMakeCheckBox(cartVar, option);
 printf(" %s&nbsp;&nbsp;&nbsp;", desc);
+}
+
+void dotBracketCfgUi(struct cart *cart, struct trackDb *tdb)
+/* Checkbox to draw or hide the RNA secondary structure, for a track that names a
+ * dot-bracket column.  Does nothing for a track that does not. */
+{
+if (trackDbSetting(tdb, DOT_BRACKET_FIELD) == NULL)
+    return;
+boolean option = cartUsualBooleanClosestToHome(cart, tdb, FALSE, DOT_BRACKET_SHOW_SUFFIX,
+                                               TRUE);
+char cartVar[1024];
+safef(cartVar, sizeof cartVar, "%s.%s", tdb->track, DOT_BRACKET_SHOW_SUFFIX);
+puts("<p>");
+cgiMakeCheckBox(cartVar, option);
+puts(" Draw the RNA secondary structure over each item");
+puts("</p>");
 }
 
 void geneTrackMakeCheckBox(struct cart *cart, struct trackDb *tdb, char *sym, char *desc,
@@ -6938,7 +6967,10 @@ if (filterSettings)
     struct slName *filter = NULL;
     while ((filter = slPopHead(&filterSettings)) != NULL)
         {
-        if (differentString(filter->name,NO_SCORE_FILTER))
+        // vcfDoFilter and vcfDoInfoFilter are VCF UI toggles, not filters on a field
+        if (differentString(filter->name,NO_SCORE_FILTER)
+            && differentString(filter->name, VCF_DO_FILTER_UI)
+            && differentString(filter->name, VCF_DO_INFOFILTER_UI))
             {
             AllocVar(tdbFilter);
             slAddHead(&trackDbFilterList, tdbFilter);
@@ -7032,7 +7064,7 @@ if (sameString("qValue", field))
 return -1;
 }
 
-static int numericFiltersShowAll(char *db, struct cart *cart, struct trackDb *tdb, boolean *opened,
+int numericFiltersShowAll(char *db, struct cart *cart, struct trackDb *tdb, boolean *opened,
                                  boolean boxed, boolean parentLevel,char *name, char *title,
                                  boolean isHighlight)
 // Shows all *Filter style filters.  Note that these are in random order and have no graceful title
@@ -7052,6 +7084,7 @@ if (trackDbFilters)
         conn = hAllocConnTrack(db, tdb);
     struct asObject *as = asForTdb(conn, tdb);
     hFreeConn(&conn);
+    boolean isVcf = (tdb->type != NULL && startsWith("vcf", tdb->type));
 
     while ((filter = slPopHead(&trackDbFilters)) != NULL)
         {
@@ -7059,15 +7092,12 @@ if (trackDbFilters)
         char *scoreName = cloneString(filter->name);
         char *trackDbLabel = getLabelSetting(cart, tdb, field);
 
-        if (as != NULL)
+        if (as != NULL && !isVcf)
             {
             struct asColumn *asCol = asColumnFind(as, field);
             if (asCol != NULL)
                 { // Found label so replace field; strip "|..." suffix used for detail page
-                field = asCol->comment;
-                char *pipe = strchr(field, '|');
-                if (pipe != NULL)
-                    field = cloneStringZ(field, pipe - field);
+                field = asColumnLabel(asCol);
                 }
             else if (defaultFieldLocation(field) < 0)
                 errAbort("Building filter on field %s which is not in AS file.", field);
@@ -7158,6 +7188,24 @@ if (!blocked)  // scoreFilter is implicit unless NO_SCORE_FILTER
 return FALSE;
 }
 
+char *getHighlightType(struct cart *cart, struct trackDb *tdb, char *field, char *def)
+/* Figure out how the trackDb is specifying the HIGHLIGHT_TYPE variable and return its setting */
+{
+char settingString[4096];
+safef(settingString, sizeof settingString, "%s.%s", HIGHLIGHT_TYPE_NAME_LOW, field);
+char *setting = cartOrTdbString(cart, tdb, settingString, NULL);
+if (setting == NULL)
+    {
+    safef(settingString, sizeof settingString, "%s.%s", field, HIGHLIGHT_TYPE_NAME_CAP);
+    setting = cartOrTdbString(cart, tdb, settingString, NULL);
+    }
+if (setting == NULL)
+    {
+    safef(settingString, sizeof settingString, "%s%s", field, HIGHLIGHT_TYPE_NAME_CAP);
+    setting = cartOrTdbString(cart, tdb, settingString, def);
+    }
+return setting;
+}
 
 char *getFilterType(struct cart *cart, struct trackDb *tdb, char *field, char *def)
 // figure out how the trackDb is specifying the FILTER_TYPE variable and return its setting
@@ -7178,7 +7226,7 @@ if (setting == NULL)
 return setting;
 }
 
-static int textFiltersShowAll(char *db, struct cart *cart, struct trackDb *tdb, boolean isHighlight)
+int textFiltersShowAll(char *db, struct cart *cart, struct trackDb *tdb, boolean isHighlight)
 /* Show all the text filters for this track. */
 {
 int count = 0;
@@ -7196,17 +7244,18 @@ if (trackDbFilters)
         conn = hAllocConnTrack(db, tdb);
     struct asObject *as = asForTdb(conn, tdb);
     hFreeConn(&conn);
+    boolean isVcf = (tdb->type != NULL && startsWith("vcf", tdb->type));
     while ((filter = slPopHead(&trackDbFilters)) != NULL)
         {
         char *trackDbLabel = getLabelSetting(cart, tdb, filter->fieldName);
         char *value = cartUsualStringClosestToHome(cart, tdb, FALSE, filter->name, filter->setting);
-        if (as != NULL)
+        if (as != NULL && !isVcf)
             {
             struct asColumn *asCol = asColumnFind(as, filter->fieldName);
             if (asCol != NULL)
                 {
                 if (trackDbLabel == NULL)
-                    trackDbLabel = asCol->comment;
+                    trackDbLabel = asColumnLabel(asCol);
                 }
             else if (defaultFieldLocation(filter->fieldName) < 0)
                 errAbort("Building filter on field %s which is not in AS file.", filter->fieldName);
@@ -7502,7 +7551,7 @@ else
             ;
         assert(col);
         // the comment comes from the autoSql inside the hub's bigBed, escape
-        printf(" %s&nbsp;&nbsp;&nbsp;", htmlEncode(col->comment));
+        printf(" %s&nbsp;&nbsp;&nbsp;", htmlEncode(asColumnLabel(col)));
         }
     }
 }
@@ -10594,18 +10643,22 @@ else
     struct trackDb *loadTrackDb(char *db, char *where);
     struct trackDb *tdb = loadTrackDb(db, query);
 
+    // a track lifted from a hub need not be a track in the native database at all
+    if (tdb == NULL)
+        return NULL;
     html = tdb->html;
     //char *html = tdb->html;
-    if (isEmpty(tdb->html))
+    char *parent = trackDbSetting(tdb, "parent");
+    if (isEmpty(tdb->html) && !isEmpty(parent))
         {
-        char *parent = trackDbSetting(tdb, "parent");
         char *words[10];
 
         chopLine(parent,words);
         sqlSafef(query, sizeof query,  "tableName = '%s'", trackHubSkipHubName(words[0]));
         struct trackDb *tdb = loadTrackDb(db, query);
 
-        html = tdb->html;
+        if (tdb != NULL)
+            html = tdb->html;
         }
     }
 return html;

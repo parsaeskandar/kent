@@ -1,13 +1,14 @@
 #!/bin/bash
 #
-# run-instance.sh <tip|beta|rel|vNNN>
+# run-instance.sh <tip|beta|rel|mirror|vNNN>
 #
 # Start one of the docker browser instances on hgwdev. The image is fully
 # self-contained: MariaDB, Apache and the CGIs were baked in at build time by
 # browserSetup.sh, so NOTHING from the hgwdev filesystem is bind-mounted into
 # the container. Anything that must survive a refresh (the MariaDB data dir and
 # /gbdb) lives on Docker-managed named volumes, which seed from the image's
-# baked content on first use and persist across refresh-instance cycles. For
+# baked content on first use. Only the mirror and release instances keep them
+# across refresh-instance cycles; tip, beta and rel start fresh each time. For
 # tip and beta, the matching hgwdev CGIs are copied in on top afterward (see
 # overlay-cgi.sh) -- a copy, not a mount.
 #
@@ -22,7 +23,7 @@ set -eEu -o pipefail
 selfDir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-    echo "usage: $(basename "$0") tip|beta|rel|vNNN" >&2
+    echo "usage: $(basename "$0") tip|beta|rel|mirror|vNNN" >&2
     exit 1
 }
 
@@ -36,6 +37,12 @@ case "$name" in
     # beta-arm64 is an arm64 image running emulated on this amd64 host, so pin
     # the platform explicitly; it needs the QEMU binfmt handlers registered.
     beta-arm64) port=8084; image=kent:beta-arm64; platform="--platform linux/arm64" ;;
+    # mirror is seeded once and then only ever updated in place
+    # (update-mirror.sh), never recreated. The seed is v493 on purpose: it is
+    # the last release whose hgcentral.hubPublic lacks the email column added
+    # in #33571, which broke mirror updates (#38503). Starting from there means
+    # kent-mirror carries the same old state the affected mirrors do. refs #37655
+    mirror)     port=8085; image=genomebrowser/server:v493 ;;
     # A past release. The port encodes the release number (v503 -> 8503), so the
     # mapping needs neither a table nor an allocator, and the tag is the
     # multi-arch manifest buildReleaseDocker.sh pushes, so docker picks the
@@ -43,8 +50,8 @@ case "$name" in
     v[0-9][0-9][0-9])
         port=$(( 8000 + 10#${name#v} ))
         image="genomebrowser/server:$name"
-        if (( port <= 8084 )); then
-            echo "$name would want port $port, which is inside the tip/beta/rel block" >&2
+        if (( port <= 8085 )); then
+            echo "$name would want port $port, which is inside the tip/beta/rel/mirror block" >&2
             exit 1
         fi
         ;;

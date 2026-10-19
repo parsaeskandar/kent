@@ -27,6 +27,7 @@
 #include "hPrint.h"
 #include "htmshell.h"
 #include "cart.h"
+#include "cartDb.h"
 #include "hdb.h"
 #include "hui.h"
 #include "hgFind.h"
@@ -359,12 +360,21 @@ for (group = groupList; group != NULL; group = group->next)
                 if (tdbIsSuperTrackChild(tdb) || tdbIsCompositeChild(tdb))
                     {
                     assert(tdb->parent != NULL && tdb->parent->track);
-                    cartRemove(cart, tdb->parent->track);
-                    if (withPriorityOverride)
+                    /* every container above, not just the closest: a supertrack may
+                     * itself sit inside another supertrack */
+                    struct slName *containers = tdbSuperTrackAncestors(tdb);
+                    slNameAddHead(&containers, tdb->parent->track);
+                    struct slName *container;
+                    for (container = containers; container != NULL; container = container->next)
                         {
-                        safef(pname, sizeof(pname), "%s.priority",tdb->parent->track);
-                        cartRemove(cart, pname);
+                        cartRemove(cart, container->name);
+                        if (withPriorityOverride)
+                            {
+                            safef(pname, sizeof(pname), "%s.priority",container->name);
+                            cartRemove(cart, pname);
+                            }
                         }
+                    slNameFreeList(&containers);
                     }
 
                 track->visibility = tdb->visibility;
@@ -384,17 +394,25 @@ for (group = groupList; group != NULL; group = group->next)
                 if (tdbIsSuperTrackChild(tdb))
                     {
                     assert(tdb->parent != NULL);
-                    /* Leave supertrack members alone -- only change parent */
-                    struct trackDb *parentTdb = tdb->parent;
-                    if ((changeVis == tvHide && !parentTdb->isShow) ||
-                        (changeVis != tvHide && parentTdb->isShow))
+                    /* Leave supertrack members alone -- only change the supertracks above.
+                     * A supertrack may itself sit inside another, and every one of them has
+                     * to move or the member stays hidden by the one that did not. */
+                    struct trackDb *ancestor;
+                    for (ancestor = tdb->parent; ancestor != NULL; ancestor = ancestor->parent)
                         {
-                        /* remove if setting to default vis */
-                        cartRemove(cart, parentTdb->track);
+                        if (tdbIsSuperTrack(ancestor))
+                            {
+                            if ((changeVis == tvHide && !ancestor->isShow) ||
+                                (changeVis != tvHide && ancestor->isShow))
+                                {
+                                /* remove if setting to default vis */
+                                cartRemove(cart, ancestor->track);
+                                }
+                            else
+                                cartSetString(cart, ancestor->track,
+                                            changeVis == tvHide ? "hide" : "show");
+                            }
                         }
-                    else
-                        cartSetString(cart, parentTdb->track,
-                                    changeVis == tvHide ? "hide" : "show");
                     }
                 // if we're called on the path that has excludeHash set
                 // we also want to set the supertrack children's visbilities
@@ -1689,6 +1707,7 @@ if (track->limitedVis != tvHide)
         int insideHeight = fontHeight-1;
 	boolean toggleDone = FALSE;
         char *label = track->longLabel;
+        struct trackDb *labelTdb = track->tdb;
         Color labelColor = (track->labelColor ?
                             track->labelColor : track->ixColor);
         labelColor = colorFromCart(track, labelColor);
@@ -1698,6 +1717,7 @@ if (track->limitedVis != tvHide)
             if (tdbComposite != NULL)
                 {
                 label = tdbComposite->longLabel;
+                labelTdb = tdbComposite;
                 labelColor = hvGfxFindColorIx(hvg, tdbComposite->colorR,
                                                 tdbComposite->colorG, tdbComposite->colorB);
 
@@ -1713,6 +1733,7 @@ if (track->limitedVis != tvHide)
         else
             labelfont = font;
         labelColor = maybeDarkerLabels(track, hvg, labelColor);
+        label = labelWithParents(labelTdb, label);
         hvGfxTextCentered(hvg, insideX, y+1, fullInsideWidth, insideHeight,
                           labelColor, labelfont, label);
         if (theImgBox && curImgTrack)
@@ -1749,6 +1770,7 @@ if (track->limitedVis != tvHide)
             mapBoxToggleVis(hvg, trackPastTabX, y+1,trackPastTabWidth, insideHeight,
                             (theImgBox ? track : parentTrack));
             }
+        freeMem(label);
         y += fontHeight;
         }
     y += track->totalHeight(track, track->limitedVis);
@@ -5649,12 +5671,18 @@ if (withLeftLabels && psOutput == NULL)
                 if (tdbIsCompositeChild(track->tdb))
                     {
                     struct trackDb *parent = tdbGetComposite(track->tdb);
+                    char *label = labelWithParents(parent, parent->shortLabel);
                     mapBoxTrackUi(hvgSide, trackTabX, yStart, trackTabWidth, (yEnd - yStart - 1),
-                                  parent->track, parent->shortLabel, track->track);
+                                  parent->track, label, track->track);
+                    freeMem(label);
                     }
                 else
+                    {
+                    char *label = labelWithParents(track->tdb, track->shortLabel);
                     mapBoxTrackUi(hvgSide, trackTabX, yStart, trackTabWidth, h, title,
-                                  track->shortLabel, title);
+                                  label, title);
+                    freeMem(label);
+                    }
                 }
             }
         }
@@ -7021,13 +7049,15 @@ for (bl = browserLines; bl != NULL; bl = bl->next)
 				cartRemove(cart, tg->track);
 			    else
 				cartSetString(cart, tg->track, command);
-			    /* hide or show supertrack enclosing this track */
+			    /* hide or show every supertrack enclosing this track */
 			    if (tdbIsSuperTrackChild(tg->tdb))
 				{
-				assert(tg->tdb->parentName != NULL);
-				cartSetString(cart, tg->tdb->parentName,
-					    (sameString(command, "hide") ?
-						"hide" : "show"));
+				struct slName *supers = tdbSuperTrackAncestors(tg->tdb), *super;
+				for (super = supers; super != NULL; super = super->next)
+				    cartSetString(cart, super->name,
+						(sameString(command, "hide") ?
+						    "hide" : "show"));
+				slNameFreeList(&supers);
 				}
 			    }
 			}
@@ -7171,9 +7201,12 @@ return (sqlDatabaseExists("hgFixed") && hTableExists("hgFixed", "cutters") &&
 
 static void setSuperTrackHasVisibleMembers(struct trackDb *tdb)
 /* Determine if any member tracks are visible -- currently
- * recording this in the parent's visibility setting */
+ * recording this in the parent's visibility setting.  A supertrack may itself
+ * be a member of another supertrack, and a visible track makes every supertrack
+ * above it visible too. */
 {
-tdb->visibility = tvDense;
+for (; tdb != NULL; tdb = tdbIsSuperTrackChild(tdb) ? tdb->parent : NULL)
+    tdb->visibility = tvDense;
 }
 
 boolean superTrackHasVisibleMembers(struct trackDb *tdb)
@@ -7349,12 +7382,17 @@ for (track = *pTrackList; track != NULL; track = track->next)
         if (tdbIsSuperTrackChild(track->tdb))
             {
             assert(track->tdb->parentName != NULL);
-            /* supertrack member must be in same group as its super */
-            /* determine supertrack group */
-            safef(cartVar, sizeof(cartVar), "%s.group",track->tdb->parentName);
-            groupName = cloneString(                                              //1
-                    cartUsualString(cart, cartVar, track->tdb->parent->grp));
-            track->tdb->parent->grp = cloneString(groupName);                     //2
+            /* supertrack member must be in same group as its super.  The group belongs to
+             * the outermost supertrack, since that is the one the group list shows, and
+             * every supertrack in between takes the same one. */
+            struct trackDb *outer = track->tdb->parent;
+            while (tdbIsSuperTrackChild(outer))
+                outer = outer->parent;
+            safef(cartVar, sizeof(cartVar), "%s.group",outer->track);
+            groupName = cloneString(cartUsualString(cart, cartVar, outer->grp));
+            struct trackDb *ancestor;
+            for (ancestor = track->tdb->parent; ancestor != NULL; ancestor = ancestor->parent)
+                ancestor->grp = cloneString(groupName);
             }
         else
             {
@@ -7455,33 +7493,53 @@ for (tr = group->trackList; tr != NULL; tr = tr->next)
                         hStringFromTv(track->tdb->visibility))) != tvHide)
             setSuperTrackHasVisibleMembers(track->tdb->parent);
         assert(track->parent == NULL);
-        track->parent = hashFindVal(superHash, track->tdb->parentName);
-        if (track->parent)
-            continue;
-        /* create track and reference for the supertrack */
-        struct track *superTrack = track->parent = trackFromTrackDb(track->tdb->parent);
-        track->parent = superTrack;
-        if (trackHashRef != NULL)
-            hashAddUnique(trackHashRef,superTrack->track,superTrack);
-        superTrack->hasUi = TRUE;
-        superTrack->group = track->group;
-        superTrack->groupName = cloneString(track->group->name);
-        superTrack->defaultGroupName = cloneString(track->group->name);
 
-        /* handle track reordering */
-        char cartVar[256];
-        safef(cartVar, sizeof(cartVar), "%s.priority",track->tdb->parentName);
-        float priority = (float)cartUsualDouble(cart, cartVar,
-                                        track->tdb->parent->priority);
-        /* remove cart variables that are the same as the trackDb settings */
-        if (priority == track->tdb->parent->priority)
-            cartRemove(cart, cartVar);
-        superTrack->priority = priority;
+        /* Walk up the chain of supertracks, making a track for each the first
+         * time one of its members is seen.  A supertrack may itself be a member
+         * of another supertrack, and only the innermost is reached from the
+         * group's track list.  Key by the supertrack's own track name: a hub
+         * leaf names its parent with the hub prefix while a nested supertrack
+         * names it without, so keying by the name the member uses would build
+         * the same supertrack twice. */
+        struct track *child = track;
+        struct trackDb *superTdb = track->tdb->parent;
+        while (superTdb != NULL)
+            {
+            struct track *superTrack = hashFindVal(superHash, superTdb->track);
+            if (superTrack != NULL)
+                {   /* already made, and so were its own ancestors */
+                child->parent = superTrack;
+                break;
+                }
+            /* create track and reference for the supertrack */
+            superTrack = trackFromTrackDb(superTdb);
+            child->parent = superTrack;
+            if (trackHashRef != NULL)
+                hashAddUnique(trackHashRef,superTrack->track,superTrack);
+            superTrack->hasUi = TRUE;
+            superTrack->group = track->group;
+            superTrack->groupName = cloneString(track->group->name);
+            superTrack->defaultGroupName = cloneString(track->group->name);
 
-        AllocVar(ref);
-        ref->track = superTrack;
-        slAddHead(&newList, ref);
-        hashAdd(superHash, track->tdb->parentName, superTrack);
+            /* handle track reordering */
+            char cartVar[256];
+            safef(cartVar, sizeof(cartVar), "%s.priority",superTdb->track);
+            float priority = (float)cartUsualDouble(cart, cartVar, superTdb->priority);
+            /* remove cart variables that are the same as the trackDb settings */
+            if (priority == superTdb->priority)
+                cartRemove(cart, cartVar);
+            superTrack->priority = priority;
+
+            AllocVar(ref);
+            ref->track = superTrack;
+            slAddHead(&newList, ref);
+            hashAdd(superHash, superTdb->track, superTrack);
+
+            if (!tdbIsSuperTrackChild(superTdb))
+                break;
+            child = superTrack;
+            superTdb = superTdb->parent;
+            }
         }
     }
 slSort(&newList, trackRefCmpPriority);
@@ -7517,14 +7575,20 @@ hButtonWithOnClick(var, paddedLabel, NULL, "return imageV2.navigateButtonClick(t
 }
 
 void limitSuperTrackVis(struct track *track)
-/* Limit track visibility by supertrack parent */
+/* Limit track visibility by supertrack parent.  A supertrack may itself be a
+ * member of another supertrack, and hiding any one of them hides everything
+ * below it, so the whole chain has to be checked. */
 {
-if (tdbIsSuperTrackChild(track->tdb))
+struct trackDb *tdb;
+for (tdb = track->tdb; tdbIsSuperTrackChild(tdb); tdb = tdb->parent)
     {
-    assert(track->tdb->parent != NULL);
-    if (sameString("hide", cartUsualString(cart, track->tdb->parent->track,
-                                           track->tdb->parent->isShow ? "show" : "hide")))
+    assert(tdb->parent != NULL);
+    if (sameString("hide", cartUsualString(cart, tdb->parent->track,
+                                           tdb->parent->isShow ? "show" : "hide")))
+        {
         track->visibility = tvHide;
+        break;
+        }
     }
 }
 
@@ -7541,6 +7605,78 @@ for (track = trackList; track != NULL; track = track->next)
          return subTrack;
     }
 return NULL;
+}
+
+static unsigned superTrackCartVis(struct cart *cart, struct trackDb *superTdb,
+                                  struct trackDb *childTdb, boolean hideTracks)
+/* Apply the cart's visibility to one supertrack, and report whether its _hideKids says to
+ * hide what is under it.  Called once per supertrack above a member, since a supertrack may
+ * itself sit inside another supertrack. */
+{
+char buffer[1024];
+
+// hideTracks means we just arrived from a quickLift.  The lift hub has already
+// written the container the way it is on the source ("superTrack on show"), so
+// the hub stanza decides, not the cart.  Drop any value an earlier lift left
+// under the hub name, and leave the source's own undecorated value alone:  that
+// one belongs to the source assembly, and it is gone anyway whenever the source
+// container is back at its default.
+boolean quickLifted = (trackDbSetting(childTdb, "quickLiftUrl") != NULL);
+if (hideTracks && quickLifted)
+    cartRemove(cart, superTdb->track);
+boolean superFromCart = !hideTracks;
+// first deal with visibility of super track
+char *s = superFromCart ? cartOptionalString(cart, superTdb->track)
+                        : cgiOptionalString(superTdb->track);
+if (s)
+    {
+    superTdb->visibility = hTvFromString(s) ;
+    cartSetString(cart, superTdb->track, s);
+    }
+// The undecorated name of a quickLifted container is the source assembly's own
+// setting, in a cart shared by both assemblies, so it is never read or removed here,
+// on the lift page or on any later request on the target.
+else if (startsWith("hub_", superTdb->track) && !quickLifted)
+    {
+    s = superFromCart ? cartOptionalString(cart, trackHubSkipHubName(superTdb->track))
+                      : cgiOptionalString(trackHubSkipHubName(superTdb->track));
+    // the bare name is the native track's if the assembly has one by that name
+    if (s != NULL && !hubTrackOwnsBareName(database, superTdb->track))
+        s = NULL;
+    if (s)
+        {
+        cartSetString(cart, superTdb->track, s);
+        cartRemove(cart, trackHubSkipHubName(superTdb->track)); // remove the undecorated version
+        superTdb->visibility = hTvFromString(s) ;
+        }
+    }
+
+// now look to see if we have a _hideKids statement to turn off all subtracks
+// (including the current one)
+unsigned hideKids = 0;
+char *usedThis = buffer;
+safef(buffer, sizeof buffer, "%s_hideKids", superTdb->track);
+
+s = cartOptionalString(cart, buffer);
+if (s == NULL && startsWith("hub_", superTdb->track))
+    {
+    char *bare = trackHubSkipHubName(buffer);
+    char *bareVal = cartOptionalString(cart, bare);
+    // the bare name is the native track's if the assembly has one by that name
+    if (bareVal != NULL
+        && hubTrackOwnsBareName(database, superTdb->track))
+        {
+        s = bareVal;
+        usedThis = bare;
+        }
+    }
+
+if (s != NULL)
+    {
+    hideKids = 1;
+    cartRemove(cart, usedThis);  // we don't want this hanging out in the cart
+    }
+return hideKids;
 }
 
 static void setSearchedTrackToPackOrFull(struct track *trackList)
@@ -7711,66 +7847,24 @@ for (track = trackList; track != NULL; track = track->next)
     // deal with any supertracks we're seeing for the first time
     if (tdbIsSuperTrackChild(track->tdb))
         {
-        struct hashEl *hel = NULL;
-
-        if ((hel = hashLookup(superTrackHash, track->tdb->parent->track)) == NULL)   // we haven't seen this guy
+        /* Every supertrack above this track, not just the closest: a supertrack may itself
+         * be a member of another supertrack, and a _hideKids on any of them hides this. */
+        unsigned hideKids = 0;
+        struct trackDb *ancestor;
+        for (ancestor = track->tdb->parent; ancestor != NULL; ancestor = ancestor->parent)
             {
-            // QuickLifted tracks are exempt from hideTracks -- their visibility is
-            // carried over from the source assembly's cart (and may still be under the
-            // undecorated name until migrated below), so consult the cart, not the URL.
-            boolean superFromCart = !hideTracks ||
-                (trackDbSetting(track->tdb, "quickLiftUrl") != NULL);
-            // first deal with visibility of super track
-            char *s = superFromCart ? cartOptionalString(cart, track->tdb->parent->track) : cgiOptionalString(track->tdb->parent->track);
-            if (s)
+            if (tdbIsSuperTrack(ancestor))
                 {
-                track->tdb->parent->visibility = hTvFromString(s) ;
-                cartSetString(cart, track->tdb->parent->track, s);
+                struct hashEl *hel = hashLookup(superTrackHash, ancestor->track);
+                if (hel == NULL)        // we haven't seen this guy
+                    hel = hashAddInt(superTrackHash, ancestor->track,
+                                     superTrackCartVis(cart, ancestor, track->tdb, hideTracks));
+                if (ptToInt(hel->val) == 1)
+                    hideKids = 1;
                 }
-            else if (startsWith("hub_", track->tdb->parent->track))
-                {
-                s = superFromCart ? cartOptionalString( cart, trackHubSkipHubName(track->tdb->parent->track)) : cgiOptionalString( trackHubSkipHubName(track->tdb->parent->track));
-                // the bare name is the native track's if the assembly has one by that name
-                if (s != NULL && !hubTrackOwnsBareName(database, track->tdb->parent->track))
-                    s = NULL;
-                if (s)
-                    {
-                    cartSetString(cart, track->tdb->parent->track, s);
-                    cartRemove(cart, trackHubSkipHubName(track->tdb->parent->track)); // remove the undecorated version
-                    track->tdb->parent->visibility = hTvFromString(s) ;
-                    }
-                }
-            
-            // now look to see if we have a _hideKids statement to turn off all subtracks (including the current one)
-            unsigned hideKids = 0;
-            char *usedThis = buffer;
-            safef(buffer, sizeof buffer, "%s_hideKids", track->tdb->parent->track);
-
-            s = cartOptionalString(cart, buffer);
-            if (s == NULL && startsWith("hub_", track->tdb->parent->track))
-                {
-                char *bare = trackHubSkipHubName(buffer);
-                char *bareVal = cartOptionalString(cart, bare);
-                // the bare name is the native track's if the assembly has one by that name
-                if (bareVal != NULL
-                    && hubTrackOwnsBareName(database, track->tdb->parent->track))
-                    {
-                    s = bareVal;
-                    usedThis = bare;
-                    }
-                }
-
-            if (s != NULL)
-                {
-                hideKids = 1;
-                cartRemove(cart, usedThis);  // we don't want this hanging out in the cart
-                }
-
-            // mark this as having been addressed
-            hel = hashAddInt(superTrackHash, track->tdb->parent->track, hideKids );  
             }
 
-        if ( ptToInt(hel->val) == 1)    // we want to hide this track
+        if (hideKids)                   // we want to hide this track
             {
             if (tvHide == track->tdb->visibility)
                 /* remove if setting to default vis */
@@ -7877,7 +7971,10 @@ for (track = trackList; track != NULL; track = track->next)
                     if (!facetedParent)
                         cartSetString(cart, buffer, "1");
                     }
-                if (undecoratedVis)
+                // The bare name of a quickLifted subtrack is the source assembly's own
+                // setting.  The lifted subtrack starts from it, because the lift hub does
+                // not carry a subtrack's visibility, but it is never removed here.
+                if (undecoratedVis && (trackDbSetting(subtrack->tdb, "quickLiftUrl") == NULL))
                     cartRemove(cart, trackHubSkipHubName(subtrack->track)); // remove the undecorated version
                 }
             else if (hideKids && isSubtrackVisible(subtrack))
@@ -8712,6 +8809,62 @@ if (sharedVis != 99)
     }
 }
 
+static void loadOneTrackSummary(struct track *track)
+/* Load the zoomed out summary for a track and for any subtrack that has one. */
+{
+if (track->loadSummary && !track->subtracks
+    && !trackDbSetting(track->tdb, "quickLiftUrl")
+    && !startsWith("bigLolly", track->tdb->type))
+    track->loadSummary(track);
+
+struct track *subtrack;
+for (subtrack = track->subtracks; subtrack != NULL; subtrack = subtrack->next)
+    {
+    if ((tdbVisLimitedByAncestors(cart, subtrack->tdb, TRUE, TRUE) != tvHide)
+        && !subtrack->parallelLoading && subtrack->loadSummary
+        && !trackDbSetting(subtrack->tdb, "quickLiftUrl")
+        && !startsWith("bigLolly", subtrack->tdb->type))
+        subtrack->loadSummary(subtrack);
+    }
+}
+
+static void loadOneTrackSerial(struct track *track, boolean doLoadSummary)
+/* Everything the main thread does to get one track ready to draw.  The checks come first
+ * because they can change what is drawn, then either the summary or the items.  It is a
+ * function so that the caller can put the whole of it inside one errCatch, the way
+ * parallelLoadData does for a worker thread.  Not quite the same work as that one:
+ * checkIfWiggling has always been serial only.  refs #38560 */
+{
+checkMaxWindowToDraw(track);
+checkHideEmptySubtracks(track);
+checkIfWiggling(cart, track);
+if (doLoadSummary)
+    loadOneTrackSummary(track);
+else
+    {
+    track->loadItems(track);
+    if (tdbHasDecorators(track))
+        {
+        loadDecorators(track);
+        decoratorMethods(track);
+        }
+    }
+}
+
+static void spreadErrorToSubtracks(struct track *track, char *message)
+/* Put a container's load error onto its subtracks as well.  A composite parent is not
+ * drawn, its subtracks are, so a message left only on the parent is never painted and the
+ * rows come up empty with nothing to explain them.  Keep it on the parent too, for the
+ * containers that do draw their own row.  refs #38560 */
+{
+struct track *subtrack;
+for (subtrack = track->subtracks; subtrack != NULL; subtrack = subtrack->next)
+    {
+    if (subtrack->networkErrMsg == NULL)
+        subtrack->networkErrMsg = cloneString(message);
+    }
+}
+
 static void setSharedErrorsAcrossWindows(struct track *track)
 /* Look for network errors across all windows
  * if found, set all windows to same errMsg and set bigWarn track handlers. */
@@ -8735,6 +8888,12 @@ if (sharedErrMsg)
 	tg->totalHeight = bigWarnTotalHeight;
 	}
     }
+
+/* Recurse, because a container can hold a container: a multiWig inside a composite keeps
+ * its wiggles two levels down, and those are the rows that get drawn.  refs #38560 */
+struct track *subtrack;
+for (subtrack = track->subtracks; subtrack != NULL; subtrack = subtrack->next)
+    setSharedErrorsAcrossWindows(subtrack);
 }
 
 
@@ -8898,7 +9057,7 @@ char *curSessVisTracks = cgiTrackVisString(curSessCart);
 
 // get track-related vars from current cart
 struct dyString *dsCgiVars = dyStringNew(0);
-cartEncodeState(cart, dsCgiVars);
+cartEncodeStateRawNames(cart, dsCgiVars);
 outDefaultTracks(cart, dsCgiVars);
 char *this = dyStringCannibalize(&dsCgiVars);
 // TODO: again, better parsing
@@ -9152,6 +9311,23 @@ if (cfgOptionBooleanDefault("showDownloadUi", TRUE))
     jsInline("var showDownloadButton = true;\n");
 
 // remove the hg.conf option once this feature is released
+if (cfgOptionBooleanDefault("showGenbankDownload", FALSE))
+    {
+    jsInline("var showGenbankDownload = true;\n");
+    // How much sequence the javascript will turn into a GenBank file, in bases.  The
+    // file holds the whole region and is built in the web browser's memory, so the
+    // ceiling belongs to the machine and its users rather than to the code.  Printed
+    // as a number, and a value that is not a positive one falls back to the default,
+    // so a typo in hg.conf cannot write broken javascript or refuse every region.
+    // Only plain digits count: atoll stops at the first comma, so "25,000,000" would be 25.
+    char *maxGbStr = cfgOptionDefault("maxGenbankRegion", "25000000");
+    long long maxGbRegion = isAllDigits(maxGbStr) ? atoll(maxGbStr) : 0;
+    if (maxGbRegion <= 0)
+        maxGbRegion = 25000000;
+    jsInlineF("var maxGenbankRegion = %lld;\n", maxGbRegion);
+    }
+
+// remove the hg.conf option once this feature is released
 if (cfgOptionBooleanDefault("showIgv", FALSE))
     {
     puts(" <button id='hgtIgv' type='button' "
@@ -9236,10 +9412,11 @@ if (!url)
 struct sqlConnection *conn = hConnectCentral();
 
 char *email = NULL;
-if (sqlColumnExists(conn, "hubPublic", "email"))
+if (hubPublicHasEmail(conn))
     {
     char query[1000];
-    sqlSafef(query, sizeof query, "SELECT email FROM hubPublic WHERE hubUrl='%s'", url);
+    sqlSafef(query, sizeof query, "SELECT email FROM %s WHERE hubUrl='%s'",
+             hubPublicTableName(), url);
     email = sqlQuickNonemptyString(conn, query);
     }
 
@@ -9291,6 +9468,9 @@ hPrintf("<FORM ACTION=\"%s\" NAME=\"TrackHeaderForm\" id=\"TrackHeaderForm\" MET
 jsonObjectAdd(jsonForClient, "insideX", newJsonNumber(insideX));
 jsonObjectAdd(jsonForClient, "revCmplDisp", newJsonBoolean(revCmplDisp));
 jsonObjectAdd(jsonForClient, "canColorItems", newJsonBoolean(canColorItems));
+// right-click "Reset filters to defaults": reset a track's settings but not its visibility
+jsonObjectAdd(jsonForClient, "clearFiltersMenu",
+              newJsonBoolean(cfgOptionBooleanDefault("clearFiltersMenu", FALSE)));
 if (canColorItems)
     jsonObjectAdd(jsonForClient, "itemColors",
                   newJsonString(cartUsualString(cart, "itemColors", "")));
@@ -9531,57 +9711,22 @@ for (doLoadLoop=0; doLoadLoop < 2; ++doLoadLoop)
 		    if (measureTiming)
 			lastTime = clock1000();
 
-		    checkMaxWindowToDraw(track);
-
-		    checkHideEmptySubtracks(track);
-
-		    checkIfWiggling(cart, track);
-
-		    if (doLoadSummary)
+		    /* Keep an errAbort to the track that caused it rather than letting it
+		     * take the whole image down.  parallelLoadData does this for the threaded
+		     * path; the serial path needs it too, and over the same work, or the two
+		     * disagree about what a bad track does.  refs #38560 */
+		    struct errCatch *errCatch = errCatchNew();
+		    if (errCatchStart(errCatch))
+			loadOneTrackSerial(track, doLoadSummary);
+		    errCatchEnd(errCatch);
+		    if (errCatch->gotError)
 			{
-			if (track->loadSummary)
-			    {
-			    if (!track->subtracks)
-				{
-				char *quickLiftFile = trackDbSetting(track->tdb, "quickLiftUrl");
-				if (!quickLiftFile)
-				    {
-				    if (!startsWith("bigLolly", track->tdb->type))
-					{
-					track->loadSummary(track);
-					}
-				    }
-				}
-			    }
-			struct track *subtrack;
-			for (subtrack=track->subtracks; subtrack; subtrack=subtrack->next)
-			    {
-			    if (tdbVisLimitedByAncestors(cart,subtrack->tdb,TRUE,TRUE) != tvHide)
-				{
-				if (!subtrack->parallelLoading)
-				    {
-				    char *quickLiftFile = trackDbSetting(subtrack->tdb, "quickLiftUrl");
-				    if (!quickLiftFile)
-					{
-					if (!startsWith("bigLolly", subtrack->tdb->type))
-					    {
-					    if (subtrack->loadSummary)
-						subtrack->loadSummary(subtrack);
-					    }
-					}
-				    }
-				}
-			    }
+			track->networkErrMsg = cloneString(errCatch->message->string);
+			spreadErrorToSubtracks(track, errCatch->message->string);
 			}
-		    else
-			{
-			track->loadItems(track);
-			if (tdbHasDecorators(track))
-			    {
-			    loadDecorators(track);
-			    decoratorMethods(track);
-			    }
-			}
+		    else if (errCatch->gotWarning)
+			warn("%s", errCatch->message->string);  // errCatch took it, hand it back
+		    errCatchFree(&errCatch);
 
 		    if (measureTiming)
 			{
@@ -9626,12 +9771,7 @@ for (track = trackList; track != NULL; track = track->next)
 // if found, set all windows to same errMsg and set bigWarn track handlers.
 for (track = trackList; track != NULL; track = track->next)
     {
-    setSharedErrorsAcrossWindows(track);
-    struct track *sub;
-    for (sub=track->subtracks; sub; sub=sub->next)
-	{
-	setSharedErrorsAcrossWindows(sub);
-	}
+    setSharedErrorsAcrossWindows(track);   // recurses into subtracks itself
     }
 
 
@@ -10311,17 +10451,66 @@ if (!hideControls)
 		{
                 if (cfgOptionBooleanDefault("groupDropdown", FALSE) && hub && hub->genomeList && hub->genomeList->next)
                     {
-                    puts("<span style='font-size:13px'>Genomes: </span><select style='width:7em' name='db'>");
+                    // deliberately not named "db": this select lives inside TrackForm
+                    // alongside the page's own hidden db field, and sharing that name
+                    // would submit two values for it on any button in the form
+                    safef(idText, sizeof idText, "%s_dbSel", group->name);
+                    hPrintf("<span style='font-size:13px'>Genomes: </span>"
+                            "<select id='%s' style='max-width:9em; text-overflow:ellipsis; "
+                            "overflow:hidden; white-space:nowrap;' "
+                            "title='Switch to another genome in this hub'>\n", idText);
                     for (struct trackHubGenome *thg = hub->genomeList; thg != NULL; thg = thg->next)
                         {
-                        if (!sameWord(thg->name, database))
-                            {
-                            // hub genome names come from the hub, so encode them
-                            char *escName = htmlEncode(thg->name);
-                            printf("<option value='%s'>%s</option>\n", escName, escName);
-                            }
+                        // hOrganism/hFreezeFromDb/hDbDb all already know how to resolve either
+                        // a native db (via dbDb) or a hub_-prefixed genome (via the hub's own
+                        // genomes.txt fields) -- see the identical recipe used for the page
+                        // title above, around trackHubSkipHubName(hOrganism(...)). For a NATIVE
+                        // genome each of those three is its own hgcentral query (pooled
+                        // connection, but still one round trip apiece), so a hub listing many
+                        // native genomes pays 3N queries here. Not batching that: hubs with
+                        // large genome counts are GenArk-style (twoBitPath genomes, resolved
+                        // from the already-parsed hub with no SQL at all); hubs of many native
+                        // genomes are old and small in practice.
+                        char *shortName = trackHubSkipHubName(thg->name); // display only, not allocated
+                        // trackHub.c's genome reader prefixes a hub genome's own organism
+                        // setting with the hub name too (addAssembly), so strip it same as name
+                        char *organismAlloc = hOrganism(thg->name);
+                        char *organism = trackHubSkipHubName(organismAlloc); // display only
+                        char *freeze = hFreezeFromDb(thg->name);
+                        struct dbDb *thgDbDb = hDbDb(thg->name); // never errAborts, unlike hDefaultPos()
+                        char *defaultPos = (thgDbDb != NULL) ? cloneString(thgDbDb->defaultPos) : NULL;
+                        dbDbFree(&thgDbDb);
+                        char extraBuf[400];
+                        extraBuf[0] = 0;
+                        if (isNotEmpty(organism) && isNotEmpty(freeze))
+                            safef(extraBuf, sizeof extraBuf, "%s, %s", organism, freeze);
+                        else if (isNotEmpty(organism))
+                            safef(extraBuf, sizeof extraBuf, "%s", organism);
+                        else if (isNotEmpty(freeze))
+                            safef(extraBuf, sizeof extraBuf, "%s", freeze);
+                        char labelBuf[512];
+                        if (isNotEmpty(extraBuf))
+                            safef(labelBuf, sizeof labelBuf, "%s - %s", shortName, extraBuf);
+                        else
+                            safef(labelBuf, sizeof labelBuf, "%s", shortName);
+                        char *escName = htmlEncode(thg->name);
+                        char *escLabel = htmlEncode(labelBuf);
+                        char *escPos = htmlEncode(emptyForNull(defaultPos));
+                        printf("<option value='%s' title='%s' data-pos='%s'%s>%s</option>\n",
+                            escName, escLabel, escPos,
+                            sameWord(thg->name, database) ? " selected" : "", escLabel);
+                        freez(&organismAlloc);
+                        freez(&freeze);
+                        freez(&defaultPos);
                         }
                     puts("</select>");
+                    jsOnEventByIdF("change", idText,
+                        "var o=this.selectedOptions[0]; document.TrackForm.db.value=this.value; "
+                        "var posEl=document.getElementById('position'); "
+                        "if (posEl) posEl.value=o.dataset.pos||''; "
+                        "var posInput=document.getElementById('positionInput'); "
+                        "if (posInput) posInput.value=''; "
+                        "document.TrackForm.submit(); return true;");
                     }
 
                 // visibility: hidden means that the element takes up space so the center alignment is not disturbed.
@@ -12211,7 +12400,7 @@ if (isNotEmpty(description))
             jsSafe(description), (truncated ? "..." : ""));
     }
 
-dyStringPrintf(dy, "The tracks, position and settings you had in the browser before have been "
+dyStringPrintf(dy, "The tracks, position, and settings you had in the browser before have been "
         "replaced by this session and cannot be brought back. If you want to keep a browser "
         "configuration, save it under My Data &gt; My Sessions before you open a session. ");
 }
@@ -12236,7 +12425,7 @@ if (isEmpty(sessionName) || isEmpty(sessionOwner) || hasRecTrackSet(cart))
 
 struct dyString *dy = dyStringNew(1024);
 sessionNoticeText(dy, sessionName, sessionOwner);
-dyStringPrintf(dy, "This note is shown only once, it is gone on the next page.");
+dyStringPrintf(dy, "This note is shown only once; it is gone on the next page.");
 notifyOnce(dy->string, "sessionLoad");
 dyStringFree(&dy);
 }
@@ -12254,6 +12443,45 @@ return (isEmpty(cartOptionalString(cart, "pix")) &&
 }
 
 extern boolean issueBotWarning;
+
+static void outputRecentSessionsData(struct cart *cart)
+/* After a session load, write the user's other recent sessions to the page
+ * for the session load dialog. */
+{
+if (!cartRecentSessionsEnabled() || !cartUsualBoolean(cart, hgsDidSessionLoad, FALSE))
+    return;
+cartRemove(cart, hgsDidSessionLoad);
+
+struct slPair *recent = slPairListFromString(cartOptionalString(cart, RECENT_SESSIONS_VAR), FALSE);
+char *currentId = cartSessionId(cart);
+struct sqlConnection *conn = hConnectCentral();
+struct jsonWrite *jw = jsonWriteNew();
+jsonWriteListStart(jw, NULL);
+for (struct slPair *el = recent; el != NULL; el = el->next)
+    {
+    if (sameString(el->name, currentId))
+        continue;
+    struct cartDb *cdb = cartDbLoadFromId(conn, sessionDbTable(), el->name);
+    if (cdb == NULL)
+        continue;
+    char *db = cartContentsVal(cdb->contents, "db");
+    char *position = cartContentsVal(cdb->contents, "position");
+    jsonWriteObjectStart(jw, NULL);
+    jsonWriteString(jw, "hgsid", el->name);
+    jsonWriteString(jw, "db", db);
+    jsonWriteString(jw, "position", position);
+    jsonWriteNumber(jw, "timestamp", sqlLongLong(el->val));
+    jsonWriteObjectEnd(jw);
+    freeMem(db);
+    freeMem(position);
+    cartDbFree(&cdb);
+    }
+jsonWriteListEnd(jw);
+jsInlineF("var recentSessions = %s;\n", jw->dy->string);
+jsonWriteFree(&jw);
+hDisconnectCentral(&conn);
+slPairFreeValsAndList(&recent);
+}
 
 void doMiddle(struct cart *theCart)
 /* Print the body of an html file.   */
@@ -12369,6 +12597,12 @@ if (cartUsualBoolean(cart, "hgt.trackImgOnly", FALSE))
 
 jsonForClient = newJsonObject(newHash(8));
 jsonObjectAdd(jsonForClient, "cgiVersion", newJsonString(CGI_VERSION));
+// the javascript track data download needs these for the GenBank output
+if (isNotEmpty(organism))
+    jsonObjectAdd(jsonForClient, "organism", newJsonString(trackHubSkipHubName(organism)));
+char *sciName = hScientificName(database);
+if (isNotEmpty(sciName))
+    jsonObjectAdd(jsonForClient, "scientificName", newJsonString(sciName));
 boolean searching = differentString(cartUsualString(cart, TRACK_SEARCH,"0"), "0");
 
 if(!trackImgOnly)
@@ -12592,6 +12826,10 @@ else
 jsInline(dy->string);
 dyStringFree(&dy);
 
+/* Output recent sessions data for session load dialog */
+if (!trackImgOnly)
+    outputRecentSessionsData(cart);
+
 if (measureTiming)
     measureTime("Time at end of doMiddle, next up cart write");
 
@@ -12664,7 +12902,7 @@ tg->longLabel = labelAddNote(tg->longLabel,
 void labelTrackAsDensityWindowSize(struct track *tg)
 /* Add text to track long label to indicate density mode because window size exceeds some threshold */
 {
-tg->longLabel = labelAddNote(tg->longLabel, "density graph: too many items, zoom in");
+tg->longLabel = labelAddNote(tg->longLabel, "density graph: window too large, zoom in");
 }
 
 void labelTrackAsDensityTooManyItems(struct track *tg)

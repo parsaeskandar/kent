@@ -6,6 +6,9 @@ their codon's genomic coordinates, rows are the 20 standard amino acids ordered 
 with a final row for nonsense.  A synonymous measurement fills the wildtype row, which is
 empty in the prediction-score heatmaps but is real measured data here.
 
+Columns come from mavedbPlace.py, the placement code shared with the MaveDB track, so a
+measurement drawn as a cell here sits at the same codon as its item in the variant track.
+
 Cells are colored by clinical call rather than by raw score.  Functional scores are on
 each score set's own arbitrary scale, so a single gradient across score sets would put
 unrelated numbers on one ramp; the ACMG evidence code and the functional class are the
@@ -20,12 +23,12 @@ import collections
 import csv
 import glob
 import os
-import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mavemdLib as lib
-from makeMaveMdVariants import (PROTEIN_TERM, calibrationColumns, clean, loadScoreSets)
+import mavedbPlace as mp
+from makeMaveMdVariants import (calibrationColumns, clean, loadScoreSets, readScoreSetCsv)
 
 csv.field_size_limit(10 ** 7)
 
@@ -46,14 +49,16 @@ def assayLine(meta):
     Method and model system come first because they are short and always present; the score
     set title can be long and is the part that gets truncated.
 
-    The separator is a plain hyphen, not a middot: the legend is drawn as raster text by
-    hgTracks, so an HTML entity from bedField() would appear literally as "&#183;".
+    The whole line is flattened to ASCII, separator included: the legend is drawn as raster
+    text by hgTracks, so anything bedField() turns into an HTML entity appears literally on
+    the image. MaveDB titles carry en dashes ("BRCA2 exons 15-26", "CARD11 exons 3-5"), so
+    the dash in the title matters as much as the one between the fields.
     """
     method = meta.get('assayMethod') or ''
     model = meta.get('assayModel') or ''
     title = meta.get('title') or ''
     head = '%s in %s' % (method, model) if method and model else (method or model)
-    return ' - '.join(p for p in (head, title) if p)
+    return mp.asciiText(' - '.join(p for p in (head, title) if p))
 
 
 def severityRank(cell):
@@ -103,6 +108,10 @@ def main():
     parser.add_argument('downloadDir')
     parser.add_argument('outBed')
     parser.add_argument('--db', default='hg38')
+    parser.add_argument('--twoBit', default='/hive/data/genomes/hg38/hg38.2bit',
+                        help='genome sequence, for the wild-type residue check')
+    parser.add_argument('--workDir', default='.',
+                        help='scratch directory for the sequence fetch')
     parser.add_argument('--classPalette', default='purple',
                         choices=sorted(lib.CLASS_PALETTES),
                         help='palette for measurements with no ACMG code')
@@ -111,170 +120,180 @@ def main():
 
     scoreSets = loadScoreSets(args.downloadDir)
 
-    # Resolve every protein accession once.
-    protAccs = set()
+    csvPaths = {}
     for path in sorted(glob.glob(os.path.join(args.downloadDir, 'variants', '*.csv'))):
-        with open(path, newline='') as fh:
-            for row in csv.DictReader(fh):
-                match = PROTEIN_TERM.match(clean(row.get('mavedb.post_mapped_hgvs_p')) or '')
-                if match:
-                    protAccs.add(match.group('acc'))
-    protToTx, unresolved = lib.loadProteinToTranscript(args.db, sorted(protAccs))
-    codonMaps, missing = lib.loadCodonMaps(args.db, sorted(set(protToTx.values())))
+        csvPaths['urn:mavedb:' + os.path.basename(path)[len('urn_mavedb_'):-len('.csv')]] = path
+    urns = sorted(u for u in csvPaths if u in scoreSets)
+
+    # The same placement the variant builder uses, so a measurement drawn as a cell here
+    # and as an item there is at the same codon. Pass 1 only collects the proteins whose
+    # codon maps are needed, so the genome is read once.
+    ref = mp.Reference(args.db).load()
+    prots = set()
+    for urn in urns:
+        rows, _, _ = readScoreSetCsv(csvPaths[urn])
+        pls, _, _ = mp.placeScoreSet(scoreSets[urn]['record'], rows, ref)
+        prots.update(p.prot for p in pls if p.status == 'placed' and p.prot)
+        prots.update(p.mavedbProt for p in pls if p.mavedbProt)
+    protToMap, unresolved = mp.loadMapsForProteins(ref, prots, args.twoBit, args.workDir)
     if unresolved:
-        sys.stderr.write("  WARNING: no transcript for %s\n" % ', '.join(unresolved))
-    if missing:
-        sys.stderr.write("  WARNING: no genePred for %s\n" % ', '.join(missing))
+        sys.stderr.write("  WARNING: no transcript or codon map for %s\n"
+                         % ', '.join(sorted(unresolved)))
 
     stats = collections.Counter()
+    placeStats = collections.Counter()
     entries = []
 
-    for path in sorted(glob.glob(os.path.join(args.downloadDir, 'variants', '*.csv'))):
-        with open(path, newline='') as fh:
-            reader = csv.DictReader(fh)
-            calCols = calibrationColumns(reader.fieldnames)
-            clinvarRelease = ''
-            for name in reader.fieldnames:
-                if name.startswith('clinvar.') and name.endswith('.clinical_significance'):
-                    clinvarRelease = name.split('.')[1]
+    for urn in urns:
+        meta = scoreSets[urn]
+        csvRows, calCols, clinvarRelease = readScoreSetCsv(csvPaths[urn])
+        pls, _, _ = mp.placeScoreSet(meta['record'], csvRows, ref)
+        placeStats.update('referenceTerm:' + k
+                          for k in mp.placeReferenceTerms(pls, ref, args.workDir).elements())
+        placeStats.update(mp.checkGenome(pls, ref, args.twoBit, args.workDir, protToMap))
 
-            # byPos[protPos] = {'wt': X, 'bases': [...], 'cells': {aa: cellDict}}
-            byPos = {}
-            urn = ''
-            codonMap = None
-            # A map has to be colored by one calibration throughout, or its cells are not
-            # comparable to each other. Where a score set has no MaveDB primary, different
-            # rows can fall to different calibrations, so the one that wins for the most
-            # variants is named and the map is rebuilt against it below.
-            calibrationVotes = collections.Counter()
-            for row in reader:
-                stats['rows'] += 1
-                urn = urn or clean(row.get('score_set.score_set_urn'))
-                protein = clean(row.get('mavedb.post_mapped_hgvs_p'))
-                match = PROTEIN_TERM.match(protein) if protein else None
-                if not match:
-                    stats['skipNoProteinTerm'] += 1
-                    continue
-                tx = protToTx.get(match.group('acc'))
-                thisMap = codonMaps.get(tx) if tx else None
-                if thisMap is None:
-                    stats['skipNoCodonMap'] += 1
-                    continue
-                if codonMap is None:
-                    codonMap = thisMap
-                elif thisMap.tx != codonMap.tx:
-                    stats['skipOtherTranscript'] += 1
-                    continue
-                protPos = int(match.group('pos'))
-                block = codonMap.codonBlock(protPos)
-                if block is None:
-                    stats['skipPositionPastCds'] += 1
-                    continue
-                # The column is drawn on the longest contiguous run of the codon's bases, so
-                # a codon split across an exon junction keeps its block on coding sequence
-                # instead of starting inside the intron.
-                blockStart, blockLen = block
-                bases = range(blockStart, blockStart + blockLen)
+        # byPos[protPos] = {'wt': X, 'bases': [...], 'cells': {aa: cellDict}}
+        byPos = {}
+        codonMap = None
+        # A map has to be colored by one calibration throughout, or its cells are not
+        # comparable to each other. Where a score set has no MaveDB primary, different
+        # rows can fall to different calibrations, so the one that wins for the most
+        # variants is named and the map is rebuilt against it below.
+        calibrationVotes = collections.Counter()
+        for pl in pls:
+            stats['rows'] += 1
+            row = pl.row
+            if pl.status != 'placed' or not pl.prot:
+                stats['skipNotPlacedOnProtein'] += 1
+                continue
+            thisMap = protToMap.get(pl.prot)
+            if thisMap is None:
+                stats['skipNoCodonMap'] += 1
+                continue
+            if codonMap is None:
+                codonMap = thisMap
+            elif thisMap.tx != codonMap.tx:
+                stats['skipOtherTranscript'] += 1
+                continue
+            protPos = pl.protPos
+            block = codonMap.codonBlock(protPos)
+            if block is None:
+                stats['skipPositionPastCds'] += 1
+                continue
+            # The column is drawn on the longest contiguous run of the codon's bases, so
+            # a codon split across an exon junction keeps its block on coding sequence
+            # instead of starting inside the intron.
+            blockStart, blockLen = block
+            bases = range(blockStart, blockStart + blockLen)
 
-                wt = lib.THREE_TO_ONE.get(match.group('wt'), match.group('wt'))
-                rawVar = match.group('var')
-                aa = wt if rawVar == '=' else lib.THREE_TO_ONE.get(rawVar, rawVar)
-                if aa not in lib.HEATMAP_ROWS:
-                    stats['skipNonStandardResidue'] += 1
-                    continue
-
-                meta = scoreSets.get(urn, {})
-                calls = []
-                for calUrn, cols in calCols.items():
-                    outcome = clean(row.get(cols.get('acmg_evidence_outcome_code', ''), ''))
-                    funcClass = clean(row.get(cols.get('functional_classification', ''), ''))
-                    if not outcome and not funcClass:
-                        continue
-                    calMeta = meta.get('calibrations', {}).get(calUrn, {})
-                    calls.append({
-                        'urn': calUrn,
-                        'title': calMeta.get('title', ''),
-                        'primary': calMeta.get('primary', False),
-                        'ruo': calMeta.get('ruo', False),
-                        'funcClass': funcClass,
-                        'acmgOutcome': outcome,
-                        'acmgCriterion': clean(row.get(cols.get('acmg_criterion', ''), '')),
-                        'acmgStrength': clean(row.get(cols.get('acmg_evidence_strength', ''), '')),
-                        'odds': calMeta.get('odds', {}).get(funcClass, ''),
-                    })
-                chosen, source = lib.pickDisplayCall(calls, meta.get('primaryTitle'))
-                if chosen:
-                    calibrationVotes[(chosen['urn'], chosen['title'], chosen['ruo'],
-                                      source)] += 1
-
-                outcome = chosen['acmgOutcome'] if chosen else ''
-                funcClass = chosen['funcClass'] if chosen else ''
-                entry = byPos.setdefault(protPos, {'wt': wt, 'bases': set(), 'cells': {}})
-                entry['bases'].update(bases)
-                cell = {
-                    'color': lib.cellColor(outcome, funcClass),
-                    'score': lib.fmtScore(clean(row.get('scores.score'))),
-                    'outcome': outcome,
-                    'funcClass': funcClass,
-                    'clinvar': clean(row.get('clinvar.%s.clinical_significance' % clinvarRelease)),
-                    'synonymous': rawVar == '=',
-                    'calls': {c['urn']: c for c in calls},
-                }
-                existing = entry['cells'].get(aa)
-                if existing is None:
-                    entry['cells'][aa] = cell
-                else:
-                    # Several nucleotide changes encode the same amino acid substitution and
-                    # were measured separately. Taking whichever came first in the CSV is not
-                    # a defined rule and flips 611 cells between pathogenic and benign
-                    # depending on row order, so the strongest evidence wins instead. Cells
-                    # whose measurements disagree in direction are marked separately from
-                    # cells that merely have more than one.
-                    stats['cellMultipleMeasurements'] += 1
-                    if conflictsInDirection(existing, cell):
-                        stats['cellConflictingDirection'] += 1
-                        existing['conflict'] = True
-                        cell['conflict'] = True
-                    cell['multi'] = True
-                    existing['multi'] = True
-                    if severityRank(cell) < severityRank(existing):
-                        cell['conflict'] = existing.get('conflict', False)
-                        entry['cells'][aa] = cell
-
-            if not byPos or codonMap is None:
-                stats['scoreSetSkipped'] += 1
-                sys.stderr.write("  no protein-level map for %s (%s)\n"
-                                 % (urn, os.path.basename(path)))
+            wt = pl.wt
+            synonymous = pl.alt == '='
+            aa = wt if synonymous else pl.alt
+            if aa not in lib.HEATMAP_ROWS:
+                stats['skipNonStandardResidue'] += 1
                 continue
 
-            meta = scoreSets.get(urn, {})
-            gene = meta.get('gene') or ''
-            if calibrationVotes:
-                (winUrn, chosenTitle, chosenRuo, chosenSource), votes = \
-                    calibrationVotes.most_common(1)[0]
-                if len(calibrationVotes) > 1:
-                    stats['scoreSetMixedCalibration'] += 1
-                    sys.stderr.write("  %s: %d calibrations competed, using %s (%d of %d)\n"
-                                     % (urn, len(calibrationVotes), chosenTitle, votes,
-                                        sum(calibrationVotes.values())))
-                recolorToCalibration(byPos, winUrn, stats)
+            calls = []
+            for calUrn, cols in calCols.items():
+                outcome = clean(row.get(cols.get('acmg_evidence_outcome_code', ''), ''))
+                funcClass = clean(row.get(cols.get('functional_classification', ''), ''))
+                if not outcome and not funcClass:
+                    continue
+                calMeta = meta.get('calibrations', {}).get(calUrn, {})
+                calls.append({
+                    'urn': calUrn,
+                    'title': calMeta.get('title', ''),
+                    'primary': calMeta.get('primary', False),
+                    'ruo': calMeta.get('ruo', False),
+                    'funcClass': funcClass,
+                    'acmgOutcome': outcome,
+                    'acmgCriterion': clean(row.get(cols.get('acmg_criterion', ''), '')),
+                    'acmgStrength': clean(row.get(cols.get('acmg_evidence_strength', ''), '')),
+                    'odds': calMeta.get('odds', {}).get(funcClass, ''),
+                })
+            chosen, source = lib.pickDisplayCall(calls, meta.get('primaryTitle'))
+            if chosen:
+                calibrationVotes[(chosen['urn'], chosen['title'], chosen['ruo'],
+                                  source)] += 1
+
+            outcome = chosen['acmgOutcome'] if chosen else ''
+            funcClass = chosen['funcClass'] if chosen else ''
+            entry = byPos.setdefault(protPos, {'wt': wt, 'bases': set(), 'cells': {}})
+            entry['bases'].update(bases)
+            cell = {
+                'color': lib.cellColor(outcome, funcClass),
+                'score': mp.fmtScore(clean(row.get('scores.score'))),
+                'outcome': outcome,
+                'funcClass': funcClass,
+                'clinvar': clean(row.get('clinvar.%s.clinical_significance' % clinvarRelease)),
+                'synonymous': synonymous,
+                'calls': {c['urn']: c for c in calls},
+            }
+            existing = entry['cells'].get(aa)
+            if existing is None:
+                entry['cells'][aa] = cell
             else:
-                winUrn = None
-                chosenTitle = chosenSource = ''
-                chosenRuo = False
-            entries.append(buildEntry(urn, gene, meta, byPos, codonMap,
-                                      chosenTitle, chosenSource, chosenRuo, stats))
+                # Several nucleotide changes encode the same amino acid substitution and
+                # were measured separately. Taking whichever came first in the CSV is not
+                # a defined rule and flips 611 cells between pathogenic and benign
+                # depending on row order, so the strongest evidence wins instead. Cells
+                # whose measurements disagree in direction are marked separately from
+                # cells that merely have more than one.
+                stats['cellMultipleMeasurements'] += 1
+                if conflictsInDirection(existing, cell):
+                    stats['cellConflictingDirection'] += 1
+                    existing['conflict'] = True
+                    cell['conflict'] = True
+                cell['multi'] = True
+                existing['multi'] = True
+                if severityRank(cell) < severityRank(existing):
+                    cell['conflict'] = existing.get('conflict', False)
+                    entry['cells'][aa] = cell
+
+        if not byPos or codonMap is None:
+            stats['scoreSetSkipped'] += 1
+            sys.stderr.write("  no protein-level map for %s\n" % urn)
+            continue
+
+        gene = meta.get('gene') or ''
+        if calibrationVotes:
+            (winUrn, chosenTitle, chosenRuo, chosenSource), votes = \
+                calibrationVotes.most_common(1)[0]
+            if len(calibrationVotes) > 1:
+                stats['scoreSetMixedCalibration'] += 1
+                sys.stderr.write("  %s: %d calibrations competed, using %s (%d of %d)\n"
+                                 % (urn, len(calibrationVotes), chosenTitle, votes,
+                                    sum(calibrationVotes.values())))
+            recolorToCalibration(byPos, winUrn, stats)
+        else:
+            winUrn = None
+            chosenTitle = chosenSource = ''
+            chosenRuo = False
+        entry = buildEntry(urn, gene, meta, byPos, codonMap,
+                           lib.calibrationLabel(chosenTitle, chosenRuo),
+                           chosenSource, chosenRuo, stats)
+        if entry:
+            entries.append(entry)
             stats['scoreSetsWritten'] += 1
+
+    # checkGenome() drops an accession whose genome residues disagree too often, and
+    # crossCheckGate() stops the build when MaveDB's own genomic terms fall outside the
+    # codon we chose across the run. Both are the variant builder's guards, run here on
+    # the same placements, so the two tracks cannot diverge on what they consider placed.
+    mp.crossCheckGate(placeStats)
 
     entries = [e for e in entries if e]
     entries.sort(key=lambda f: (f[0], int(f[1])))
     with open(args.outBed, 'w') as out:
         for fields in entries:
-            out.write('\t'.join(lib.bedField(f) for f in fields) + '\n')
+            out.write('\t'.join(mp.bedField(f) for f in fields) + '\n')
 
     sys.stderr.write("\nHeatmap summary\n")
     for key in sorted(stats):
-        sys.stderr.write("  %-32s %d\n" % (key, stats[key]))
+        sys.stderr.write("  %-36s %d\n" % (key, stats[key]))
+    sys.stderr.write("Placement checks\n")
+    for key in sorted(placeStats):
+        sys.stderr.write("  %-36s %d\n" % (key, placeStats[key]))
 
 
 def buildEntry(urn, gene, meta, byPos, codonMap, calTitle, calSource, calRuo, stats):

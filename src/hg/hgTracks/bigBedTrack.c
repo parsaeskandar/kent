@@ -32,6 +32,7 @@
 #include "quickLift.h"
 #include "hgConfig.h"
 #include "heatmap.h"
+#include "dotBracketTrack.h"
 
 static unsigned getFieldNum(struct bbiFile *bbi, char *field)
 // get field number for field name in bigBed.  errAbort if field not found.
@@ -151,24 +152,6 @@ else
 filter->isHighlight = isHighlight;
 
 return filter;
-}
-
-char *getHighlightType(struct cart *cart, struct trackDb *tdb, char *field, char *def)
-{
-char settingString[4096];
-safef(settingString, sizeof settingString, "%s.%s", HIGHLIGHT_TYPE_NAME_LOW, field);
-char *setting = cartOrTdbString(cart, tdb, settingString, NULL);
-if (setting == NULL)
-    {
-    safef(settingString, sizeof settingString, "%s.%s", field, HIGHLIGHT_TYPE_NAME_CAP);
-    setting = cartOrTdbString(cart, tdb, settingString, NULL);
-    }
-if (setting == NULL)
-    {
-    safef(settingString, sizeof settingString, "%s%s", field, HIGHLIGHT_TYPE_NAME_CAP);
-    setting = cartOrTdbString(cart, tdb, settingString, def);
-    }
-return setting;
 }
 
 struct bigBedFilter *bigBedMakeFilterBy(struct cart *cart, struct bbiFile *bbi, struct trackDb *tdb, char *field, struct slName *choices, boolean isHighlight)
@@ -849,7 +832,8 @@ for (bb = bbList; bb != NULL; bb = bb->next)
             // Move the alignment's target side onto the reference.  Ask the lifted
             // alignment about its own block sizes rather than reusing isProt:  the lift
             // puts a protein alignment into nucleotide space on the way through.
-            struct psl *lifted = quickLiftPsl(chainHash, &mapPsls, psl);
+            struct psl *lifted = quickLiftPsl(quickLiftChainHashForItem(chainHash, bb),
+                                              &mapPsls, psl);
             pslFree(&psl);
             psl = lifted;
             }
@@ -1171,5 +1155,7 @@ if (sameWordOk(trackDbSetting(tdb, "style"), "heatmap"))
     // maybe some combo of row count and labels.
     heatmapMethods(track);
     }
+else if (trackDbSetting(tdb, DOT_BRACKET_FIELD) != NULL)
+    dotBracketMethods(track);
 }
 
