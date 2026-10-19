@@ -134,11 +134,12 @@ function pgpScales(panel, pts) {
     };
 }
 
-// How spread out a set of points is: the centroid, the RMS distance from it,
-// and the 1-SD ellipse of their covariance.  The RMS is the single number -
-// "dispersion" in one figure - and the ellipse is there because one number
-// hides direction: fifty haplotypes strung along PC1 and fifty in a disc have
-// the same RMS and mean very different things.
+// How spread out a set of points is: the centroid, which the plot marks, and
+// the RMS distance from it, which is the dispersion figure under the plot.
+// major, minor and ang are the axes of the points' 1-SD covariance ellipse.
+// The plot used to draw that ellipse; it no longer does, but the axes are kept
+// because one number hides direction - fifty haplotypes strung along PC1 and
+// fifty in a disc have the same RMS and mean very different things.
 //
 // Sample covariance (n-1), so the figure is an estimate of the spread of the
 // haplotypes that carry this sequence rather than of these fifty exactly.
@@ -163,22 +164,6 @@ function pgpSpread(pts) {
             major: Math.sqrt(Math.max(0, tr / 2 + disc)),
             minor: Math.sqrt(Math.max(0, tr / 2 - disc)),
             ang: 0.5 * Math.atan2(2 * sxy, sxx - syy)};
-}
-
-// The ellipse as a closed polyline in screen space.  It cannot be drawn as a
-// rotated SVG ellipse: PC1 and PC2 have different units per pixel here, so the
-// shape is built in data space and each point put through the scales.
-function pgpEllipse(sp, scale, sds) {
-    var pts = [], k = sds || 1, steps = 72;
-    for (var i = 0; i <= steps; i++) {
-        var t = i / steps * 2 * Math.PI;
-        var u = k * sp.major * Math.cos(t), v = k * sp.minor * Math.sin(t);
-        var dx = u * Math.cos(sp.ang) - v * Math.sin(sp.ang);
-        var dy = u * Math.sin(sp.ang) + v * Math.cos(sp.ang);
-        pts.push(scale.X(sp.cx + dx).toFixed(1) + "," +
-                 scale.Y(sp.cy + dy).toFixed(1));
-    }
-    return pts.join(" ");
 }
 
 // Coincident hits are gathered into one mark.  Measured on a real 48-haplotype
@@ -560,11 +545,8 @@ function pgpDraw() {
     });
     o.push('</g>');
 
-    // The 1-SD ellipse and the centroid, under the hits so they never hide one.
-    if (sp !== null && sp.n >= 2 && sp.major > 0) {
-        o.push('<polyline points="' + pgpEllipse(sp, s, 1) + '" fill="none" ' +
-               'stroke="#1e2833" stroke-width="1.2" stroke-dasharray="5,4" ' +
-               'opacity="0.55"/>');
+    // The centroid of the hits, under them so it never hides one.
+    if (sp !== null && sp.n >= 2) {
         var ccx = s.X(sp.cx).toFixed(1), ccy = s.Y(sp.cy).toFixed(1);
         o.push('<line x1="' + (ccx - 5) + '" y1="' + ccy + '" x2="' + (+ccx + 5) +
                '" y2="' + ccy + '" stroke="#1e2833" stroke-width="1.2" opacity="0.7"/>');
@@ -663,23 +645,18 @@ function pgpDraw() {
            'stroke="#1e2833" stroke-width="1.6"/>');
     o.push('<text x="' + (lx + 15) + '" y="' + hy + '" font-size="10" fill="#1e2833">' +
            "a hit, in pcLAI's own colour</text>");
-    o.push('<circle cx="' + (lx + 7) + '" cy="' + (hy + 46) + '" r="11" ' +
+    o.push('<circle cx="' + (lx + 7) + '" cy="' + (hy + 38) + '" r="11" ' +
            'fill="#d8c0f0" fill-opacity="0.85" stroke="#1e2833" stroke-width="1.6"/>');
-    o.push('<text x="' + (lx + 7) + '" y="' + (hy + 49.6) + '" font-size="9.5" ' +
+    o.push('<text x="' + (lx + 7) + '" y="' + (hy + 41.6) + '" font-size="9.5" ' +
            'font-weight="600" fill="#1e2833" text-anchor="middle">n</text>');
-    o.push('<text x="' + (lx + 22) + '" y="' + (hy + 49.6) + '" font-size="10" ' +
+    o.push('<text x="' + (lx + 22) + '" y="' + (hy + 41.6) + '" font-size="10" ' +
            'fill="#1e2833">n of them, too close to split</text>');
     o.push('<circle cx="' + (lx + 4) + '" cy="' + (hy + 12.5) + '" r="9" fill="none" ' +
            'stroke="#1664c0" stroke-width="2.6"/>');
     o.push('<circle cx="' + (lx + 4) + '" cy="' + (hy + 12.5) + '" r="5" fill="#d8c0f0" ' +
            'stroke="#1e2833" stroke-width="1.6"/>');
     o.push('<text x="' + (lx + 19) + '" y="' + (hy + 16) + '" font-size="10" fill="#1e2833">ticked in the table</text>');
-    o.push('<polyline points="' + (lx - 1) + ',' + (hy + 26) + ' ' + (lx + 9) + ',' +
-           (hy + 26) + '" fill="none" stroke="#1e2833" stroke-width="1.2" ' +
-           'stroke-dasharray="5,4" opacity="0.55"/>');
-    o.push('<text x="' + (lx + 15) + '" y="' + (hy + 29.5) + '" font-size="10" ' +
-           'fill="#1e2833">1 SD of the hits</text>');
-    o.push('<text x="' + lx + '" y="' + (hy + 72) + '" font-size="9.6" fill="#5b6572">' +
+    o.push('<text x="' + lx + '" y="' + (hy + 64) + '" font-size="9.6" fill="#5b6572">' +
            'Click a mark for details.</text>');
     o.push('</svg>');
 
