@@ -37,6 +37,9 @@ loadClient.js   Loads js/hgPangenome.js (and the mock) into a node vm with a
                 for a working element tree (used by the render layer).
 unitTests.js    LAYER 1: pure-function unit tests.
 renderTests.js  LAYER 3: contract/rendering tests over canned responses.
+resultsTests.js Results page (js/hgPangenomeResults.js): the table's cell
+                renderers, row order, tab-separated download and record
+                parsing, tested as functions - no DataTable, no network.
 mockMiddleware.py
                 Stand-in middleware for Layer 2: configurable status/body/delay,
                 and records every request (method, path, headers, body) as JSON

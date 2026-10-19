@@ -1,0 +1,181 @@
+/* resultsTests.js - tests for the results page (js/hgPangenomeResults.js).
+ *
+ * The page is hgBlat's new results table: a DataTable whose cells, detail
+ * panel and download are drawn by functions in that file.  These test those
+ * functions directly - the cell renderers, the row order, the tab-separated
+ * download, the record parsing - so that the presentation can change without
+ * the meaning of a number changing with it.  No DataTable, no network: the
+ * file is loaded into a vm with just enough of a window to evaluate.
+ *
+ * Run:  node resultsTests.js
+ */
+
+'use strict';
+
+var t = require('./testLib.js');
+var fs = require('fs');
+var path = require('path');
+var vm = require('vm');
+
+var JS = path.resolve(__dirname, '../../js');
+
+// The results page's file defines its functions at top level (no module
+// wrapper), so they land on the vm context and can be called from here.
+function loadResults(extra) {
+    var ctx = {
+        window: { location: { pathname: '/cgi-bin/hgPangenome' },
+                  sessionStorage: { getItem: function () { return null; }, setItem: function () {} } },
+        document: { readyState: 'complete', getElementById: function () { return null; },
+                    addEventListener: function () {} },
+        console: { log: function () {}, error: function () {} },
+        setTimeout: function () {},
+        fetch: function () { return new Promise(function () {}); },
+        Promise: Promise, Math: Math, JSON: JSON, Date: Date, Object: Object,
+        String: String, Number: Number, Array: Array, RegExp: RegExp, isNaN: isNaN
+    };
+    Object.keys(extra || {}).forEach(function (k) { ctx[k] = extra[k]; });
+    vm.createContext(ctx);
+    vm.runInContext(fs.readFileSync(path.join(JS, 'hgPangenomeAssemblies.js'), 'utf8'), ctx);
+    ctx.pangenomeAssemblies = ctx.window.pangenomeAssemblies;
+    vm.runInContext(fs.readFileSync(path.join(JS, 'hgPangenomeResults.js'), 'utf8'), ctx);
+    return ctx;
+}
+
+var R = loadResults({ pangenomePclai: false });
+
+function row(over) {
+    var r = { query: 'q1', queryLength: 1000, placement: 0, placements: 1, hap: 'HG00097#2',
+              db: 'GCA_044164745.1', contig: 'CM094075.1', start: 999, end: 1999,
+              strand: '+', identity: 99.5, coverage: 98.25, surjMapq: 60, mapq: 60,
+              matches: 990, mismatches: 5, inserted: 2, deleted: 3, cigar: '1000M',
+              qStart: 0, qEnd: 1000, rank: 0 };
+    Object.keys(over || {}).forEach(function (k) { r[k] = over[k]; });
+    return r;
+}
+
+t.suite('identity colours match hgBlat');
+t.test('the four bands', function () {
+    t.eq(R.pgrIdColor(100), '#1f7a34', '>=98');
+    t.eq(R.pgrIdColor(98), '#1f7a34', 'boundary 98');
+    t.eq(R.pgrIdColor(97.9), '#4d7c0f', '>=95');
+    t.eq(R.pgrIdColor(92), '#b45309', '>=90');
+    t.eq(R.pgrIdColor(89.9), '#b1301f', 'below 90');
+});
+
+t.suite('position cell');
+t.test('a placed row links its 1-based position, with a new-tab link', function () {
+    var h = R.pgrPositionCell(row());
+    t.contains(h, 'CM094075.1:1,000-1,999', '1-based start, commas');
+    t.contains(h, 'data-act="browser"', 'opens the browser');
+    t.contains(h, 'data-act="newtab"', 'and a new tab');
+    t.contains(h, 'data-rank="0"', 'names its row');
+});
+t.test('an unplaced row says why instead of linking', function () {
+    t.contains(R.pgrPositionCell(row({ contig: null, placeStatus: 'no_anchors' })), 'not present', 'no anchors');
+    t.contains(R.pgrPositionCell(row({ contig: null, placeStatus: 'surjection_failed' })), 'no alignment', 'failed');
+    t.contains(R.pgrPositionCell(row({ contig: null })), 'not placed', 'anything else');
+    t.notOk(/data-act/.test(R.pgrPositionCell(row({ contig: null }))), 'nothing to click');
+    t.eq(R.pgrActionsCell(row({ contig: null })), '', 'no Alignment link either');
+});
+t.test('a contig name cannot inject markup', function () {
+    var h = R.pgrPositionCell(row({ contig: '<img src=x onerror=alert(1)>' }));
+    t.notOk(/<img/.test(h), 'escaped');
+});
+
+t.suite('coverage cell');
+t.test('the bar covers the aligned extent, the figure is the coverage', function () {
+    var h = R.pgrCoverageCell(row({ qStart: 250, qEnd: 750, coverage: 49.5 }));
+    t.contains(h, 'left:25.0%;width:50.0%', 'extent 251-750 of 1000');
+    t.contains(h, '49.5%', 'coverage figure');
+    t.contains(h, 'Bases 251-750 of your 1,000 bp', 'tooltip is 1-based');
+});
+t.test('a row with no extent still shows its coverage', function () {
+    var h = R.pgrCoverageCell(row({ qStart: null, qEnd: null }));
+    t.contains(h, '98.3%', 'figure');
+    t.notOk(/pgrCov"/.test(h), 'no bar');
+});
+t.test('no coverage at all draws nothing', function () {
+    t.eq(R.pgrCoverageCell(row({ coverage: null })), '', 'empty');
+});
+
+t.suite('MAPQ and the plot box');
+t.test('a low MAPQ is marked, a good one is not', function () {
+    t.contains(R.pgrMapqCell(row({ surjMapq: 3 })), 'pgrLowMapq', 'marked under 10');
+    t.eq(R.pgrMapqCell(row({ surjMapq: 60 })), '60', 'plain');
+    t.eq(R.pgrMapqCell(row({ surjMapq: null, mapq: 12 })), '12', 'falls back to the mapping MAPQ');
+});
+t.test('a MAPQ that is not a number prints nothing, not itself', function () {
+    t.eq(R.pgrMapqCell(row({ surjMapq: '<b>60</b>' })), '', 'markup dropped');
+    t.eq(R.pgrMapqCell(row({ surjMapq: '7' })), R.pgrMapqCell(row({ surjMapq: 7 })), 'numeric string as number');
+});
+t.test('no box on a row the plot cannot draw', function () {
+    var P = loadResults({ pangenomePclai: true, pgpInit: function () {} });
+    t.contains(P.pgrPickCell(row()), 'pgrPick', 'a GenArk haplotype gets one');
+    t.eq(P.pgrPickCell(row({ hap: 'GRCh38#0', db: 'hg38' })), '', 'GRCh38 does not');
+    t.eq(P.pgrPickCell(row({ hap: 'CHM13#0', db: 'hs1' })), '', 'nor CHM13');
+    t.eq(P.pgrPickCell(row({ contig: null })), '', 'nor an unplaced row');
+});
+
+t.suite('row order follows hgBlat: query, then placement, then identity');
+t.test('queries in the order given, placements in turn, best identity first', function () {
+    var rows = [
+        row({ query: 'B', placement: 0, identity: 99 }),
+        row({ query: 'A', placement: 1, identity: 100 }),
+        row({ query: 'A', placement: 0, identity: 98 }),
+        row({ query: 'B', placement: 0, identity: 100 }),
+        row({ query: 'A', placement: 0, identity: 99.9 })
+    ];
+    rows.sort(R.pgrRowOrder(['A', 'B']));
+    t.eq(rows.map(function (r) { return r.query + r.placement + ':' + r.identity; }).join(' '),
+         'A0:99.9 A0:98 A1:100 B0:100 B0:99', 'order');
+});
+t.test('a query not in the list sorts after those that are', function () {
+    var rows = [row({ query: 'zz' }), row({ query: 'A' })];
+    rows.sort(R.pgrRowOrder(['A']));
+    t.eq(rows[0].query, 'A', 'known first');
+});
+
+t.suite('download table');
+t.test('one header and one line per row, 20 columns, positions 1-based', function () {
+    var tsv = R.pgrRowsToTsv([row(), row({ contig: null })]);
+    var lines = tsv.trim().split('\n');
+    t.eq(lines.length, 3, 'header + 2');
+    lines.forEach(function (l, i) { t.eq(l.split('\t').length, 20, 'columns on line ' + i); });
+    var f = lines[1].split('\t');
+    t.eq(f[6], '1000', 'start is 1-based');
+    t.eq(f[7], '1999', 'end');
+    t.eq(f[8], '1000', 'span');
+    t.eq(f[12], '1', 'qStart is 1-based');
+    t.eq(lines[2].split('\t')[4], '', 'an unplaced row has no contig');
+});
+t.test('a tab or newline in a query name cannot break the columns', function () {
+    var l = R.pgrRowsToTsv([row({ query: 'a\tb\nc' })]).trim().split('\n');
+    t.eq(l.length, 2, 'still one data line');
+    t.eq(l[1].split('\t').length, 20, 'still 20 columns');
+});
+t.test('the query FASTA wraps at 60 bases', function () {
+    var fa = R.pgrFasta([{ name: 'x', seq: new Array(131).join('a') }]);
+    t.eq(fa.split('\n')[0], '>x', 'header');
+    t.eq(fa.split('\n')[1].length, 60, 'first line');
+    t.eq(fa.split('\n')[3].length, 10, 'remainder');
+    t.contains(fa, 'AAAA', 'upper-cased');
+});
+
+t.suite('surjection records');
+t.test('the query extent is carried for the coverage bar', function () {
+    var r = {};
+    R.pgrApplyRecord(r, { status: 'ok', haplotype: 'HG00097#2#CM094075.1', target_start: 10,
+                          target_end: 20, query_start: 3, query_end: 13, coverage: 99,
+                          identity: 0.995, strand: '+', cigar: '10M', mapping_quality: 60 });
+    t.eq(r.qStart, 3, 'qStart');
+    t.eq(r.qEnd, 13, 'qEnd');
+    t.eq(r.identity, 99.5, 'identity as a percentage');
+});
+t.test('a record without one leaves it unset, not zero', function () {
+    var r = {};
+    R.pgrApplyRecord(r, { status: 'ok', haplotype: 'HG00097#2#CM094075.1', target_start: 10,
+                          target_end: 20, coverage: 99, identity: 1, strand: '+', cigar: '10M' });
+    t.ok(r.qStart === undefined, 'unset');
+});
+
+process.exit(t.report());

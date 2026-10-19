@@ -302,3 +302,108 @@
 #pgFormBox .pgProgress { background:none; border:0; padding:4px 0; font-size:14px;
     color:var(--muted); }
 #pgFormBox .pgSpinner { border-color:var(--lineSoft); border-top-color:var(--navy); }
+
+/* ==== results page (pgrDraw in hgPangenomeResults.js) =====================
+ * Mirrors the results rules of hgBlat.css (#blatTable, .blatDetail, ...). */
+#pgrResults { font-family:'Helvetica Neue',Helvetica,Arial,sans-serif; color:var(--ink); font-size:14px; }
+.pgrHeadActions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.pgrMsg { display:flex; align-items:center; gap:14px; padding:16px 18px; font-size:14px; }
+.pgrMsg a { color:var(--accent); }
+.pgrMsg a:hover { color:var(--accentHover); }
+.pgrErr { padding:10px 18px; border-bottom:1px solid #e3b3b3; background:#fdf2f2;
+    border-left:3px solid #8b1a1a; color:var(--ink); font-size:14px; }
+.pgrSeqBar { flex:1 1 100%; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.pgrSeqText { flex:1 1 100%; min-height:150px; margin-top:10px; padding:8px; white-space:pre;
+    font-family:'Roboto Mono','Courier New',monospace; font-size:13px; color:var(--ink);
+    border:1px solid var(--btnLine); background:#fff; overflow:auto; }
+/* The ancestry plot, opened from the strip: a panel between the strip and the
+ * table, as hgBlat opens its query-sequence and share panels. */
+.pgrPanel { padding:14px 18px; border-bottom:1px solid var(--line); background:var(--panel); overflow-x:auto; }
+.pgrNotes { padding:2px 18px 6px; }
+.pgrNote { font-size:13px; color:var(--muted); line-height:1.5; margin-top:4px; }
+
+#pgrTable { font-size:13px; width:100%; border-collapse:collapse; }
+/* hgBlat.css lets its position column wrap; here it does not.  BLAT's chrom
+ * names are short and never trigger it, but a haplotype's contig is a long
+ * accession, and a coordinate broken in half is harder to read than a table
+ * that scrolls sideways, which #pgrTable_wrapper does when it has to. */
+#pgrTable td.posCol { white-space:nowrap; }
+#pgrTable td.covCol { min-width:150px; }
+#pgrTable thead th { background:var(--headrow); border-bottom:1px solid var(--headrowLine);
+    font-size:12px; color:var(--navy); font-weight:700; padding:8px 12px; white-space:nowrap; }
+/* As in hgBlat.css: the th background above wipes out DataTables' sort-arrow
+ * images, so sortable columns get a text triangle - grey while unsorted, navy
+ * and pointing the right way once sorted by that column. */
+#pgrTable thead th.sorting::after, #pgrTable thead th.sorting_asc::after,
+#pgrTable thead th.sorting_desc::after { content:"\25BE"; margin-left:5px; color:var(--muted); }
+#pgrTable thead th.sorting_asc::after { content:"\25B4"; color:var(--navy); }
+#pgrTable thead th.sorting_desc::after { color:var(--navy); }
+#pgrTable tbody td { padding:8px 12px; border-bottom:1px solid var(--lineSoft); white-space:nowrap;
+    vertical-align:middle; }
+#pgrTable tbody tr { cursor:pointer; }
+#pgrTable tbody tr:nth-child(even) { background:var(--stripe); }
+#pgrTable tbody tr:hover { background:var(--hover); }
+#pgrTable tbody tr.pgrSel { background:var(--sel); box-shadow:inset 3px 0 0 var(--navy); }
+/* Every column left-justified, as hgBlat's (#38086 note-37); numbers keep
+ * tabular figures so their digits still line up. */
+#pgrTable thead th, #pgrTable tbody td { text-align:left; }
+#pgrTable td.rankCol, #pgrTable td.identCol, #pgrTable td.mapqCol, #pgrTable td.spanCol,
+#pgrTable td.placeCol { font-variant-numeric:tabular-nums; }
+#pgrTable td.rankCol { color:var(--faint); }
+#pgrTable td.strandCol { color:var(--muted); }
+#pgrTable td.pickCol { padding-right:4px; }
+#pgrTable td.pickCol input { margin:0; cursor:pointer; }
+#pgrTable td.actionsCol a { color:var(--accent); font-weight:700; }
+#pgrTable a { color:var(--accent); text-decoration:none; }
+#pgrTable a:hover { color:var(--accentHover); text-decoration:underline; }
+/* The new-tab icon, as a CSS background so it is not repeated in every row's
+ * markup - the same image hgBlat.css uses. */
+#pgrTable a.pgrNewTab { display:inline-block; width:11px; height:11px;
+    margin-left:4px; vertical-align:-1px; background-repeat:no-repeat; background-position:center;
+    background-size:contain; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Cpath fill='%23003a72' d='M320 0c-17.7 0-32 14.3-32 32s14.3 32 32 32h82.7L201.4 265.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0L448 109.3V192c0 17.7 14.3 32 32 32s32-14.3 32-32V32c0-17.7-14.3-32-32-32H320zM80 32C35.8 32 0 67.8 0 112V432c0 44.2 35.8 80 80 80H400c44.2 0 80-35.8 80-80V320c0-17.7-14.3-32-32-32s-32 14.3-32 32V432c0 8.8-7.2 16-16 16H80c-8.8 0-16-7.2-16-16V112c0-8.8 7.2-16 16-16H192c17.7 0 32-14.3 32-32s-14.3-32-32-32H80z'/%3E%3C/svg%3E"); }
+#pgrTable a.pgrNewTab:hover { opacity:.65; text-decoration:none; }
+.pgrUnplaced { color:var(--muted); font-style:italic; }
+.pgrIdPct { font-size:13px; font-weight:700; font-variant-numeric:tabular-nums; }
+.pgrLowMapq { color:#b1301f; font-weight:700; cursor:help; }
+.pgrCovWrap { display:flex; align-items:center; gap:8px; }
+.pgrCov { position:relative; display:block; flex:0 0 110px; height:10px; background:var(--headrow);
+    border:1px solid var(--headrowLine); }
+.pgrCov > i { position:absolute; top:0; bottom:0; background:var(--accent); }
+.pgrCovNum { font-size:13px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+#pgrTable_filter { float:left; margin:0 0 10px; }
+#pgrTable_filter input { width:300px; max-width:55vw; border:1px solid var(--btnLine);
+    border-radius:0; padding:5px 9px; font-size:14px; }
+#pgrTable_wrapper { padding:6px 0 4px; overflow-x:auto; }
+
+.pgrDetail { border-bottom:1px solid var(--line); background:var(--panel); padding:14px 18px 16px; }
+.pgrDetail .dhead { display:flex; align-items:baseline; gap:10px; margin-bottom:12px; flex-wrap:wrap; }
+.pgrDetail .dhead .lab { font-size:13px; color:var(--muted); }
+.pgrDetail .dhead .loc { font-size:14px; font-weight:700; color:var(--ink); }
+.pgrSelectHint { font-size:14px; color:var(--ink); }
+.pgrDetailCard { display:flex; gap:26px; flex-wrap:wrap; padding:14px 16px; background:var(--card);
+    border:1px solid var(--line); }
+.pgrTiles { display:grid; grid-template-columns:repeat(5,auto); gap:14px 30px; }
+@media (max-width:900px) { .pgrTiles { grid-template-columns:repeat(3,auto); } }
+.pgrTile .k { font-size:13px; color:var(--muted); cursor:help; }
+.pgrTile .v { font-size:14px; font-weight:700; color:var(--ink); }
+.pgrDetailActions { display:flex; gap:8px; margin-top:14px; flex-wrap:wrap; }
+
+/* ---- ancestry plot (hgPangenomePclai.js), inside .pgrPanel ---- */
+.pgpControls { display:flex; align-items:center; gap:22px; flex-wrap:wrap; margin:0 0 10px;
+    font-size:13px; color:var(--ink); }
+.pgpCtl { display:flex; align-items:center; gap:6px; cursor:pointer; }
+.pgpCtl input[type=number] { width:4.5em; padding:4px 6px; font-size:14px; font-family:inherit;
+    border:1px solid var(--btnLine); border-radius:0; background:#fff; color:var(--ink); }
+.pgpCtl input[type=checkbox] { margin:0; }
+.pgpCtlNote { color:var(--muted); }
+/* A dot's details: the results page's detail panel (.pgrTile, .pgrDetailCard,
+ * .pgrDetailActions above), set below the plot. */
+.pgpDetail { margin:12px 0 0; padding-top:12px; border-top:1px solid var(--line); max-width:900px; }
+.pgpDetail .dhead { display:flex; align-items:baseline; gap:10px; margin-bottom:12px; flex-wrap:wrap; }
+.pgpDetail .dhead .lab { font-size:13px; color:var(--muted); }
+.pgpDetail .dhead .loc { font-size:14px; font-weight:700; color:var(--ink); }
+.pgpGroupList { display:flex; flex-wrap:wrap; gap:6px 18px; font-size:13px; }
+.pgpGroupList a { color:var(--accent); text-decoration:none; white-space:nowrap; }
+.pgpGroupList a:hover { color:var(--accentHover); text-decoration:underline; }
+.pgpSwatch { display:inline-block; width:10px; height:10px; border:1px solid var(--btnLine);
+    vertical-align:-1px; margin-right:5px; }

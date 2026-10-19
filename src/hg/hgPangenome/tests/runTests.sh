@@ -52,6 +52,12 @@ runJs renderTests.js
 
 echo
 echo "############################################################"
+echo "# Results page: cells, row order, download                  #"
+echo "############################################################"
+runJs resultsTests.js
+
+echo
+echo "############################################################"
 echo "# Coordinate conversion page (canned responses)             #"
 echo "############################################################"
 runJs convertTests.js

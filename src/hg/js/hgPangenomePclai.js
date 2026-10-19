@@ -446,7 +446,7 @@ function pgpSpotFor(p) {
 // and a plain light fill where it did not, so a mark is never invisible.
 function pgpFill(p) {
     return (p && typeof p.rgb === "string" && /^[0-9]+,[0-9]+,[0-9]+$/.test(p.rgb))
-           ? "rgb(" + p.rgb + ")" : "#fcfcfb";
+           ? "rgb(" + p.rgb + ")" : "#ffffff";
 }
 
 function pgpTipHtml(m) {
@@ -455,7 +455,7 @@ function pgpTipHtml(m) {
         // A reference haplotype: who it is and which population places it.
         return "<b>" + pgpEsc(m.name) + "</b><br>" +
                (m.pop ? pgpEsc(m.pop) + "<br>" : "") +
-               '<span style="color:#6b6b67">' + coord + "</span>";
+               '<span style="color:#5b6572">' + coord + "</span>";
     }
     if (m.group && m.group.members.length > 1) {
         var names = m.group.members.slice(0, 4).map(function (x) {
@@ -463,16 +463,16 @@ function pgpTipHtml(m) {
         var more = m.group.members.length - 4;
         return "<b>" + m.group.members.length + " haplotypes here</b><br>" +
                names + (more > 0 ? ", and " + more + " more" : "") +
-               '<br><span style="color:#6b6b67">' + coord +
+               '<br><span style="color:#5b6572">' + coord +
                " \u2014 click to list them</span>";
     }
     var out = "<b>" + pgpEsc(m.name) + "</b><br>" + coord +
-              '<br><span style="color:#6b6b67">pcLAI confidence ' + m.conf +
+              '<br><span style="color:#5b6572">pcLAI confidence ' + m.conf +
               "/1000</span>";
     if (m.spot) {
         // Where this haplotype was read, which is its own match and not a
         // position shared with the others.
-        out += '<br><span style="color:#6b6b67">' + pgpEsc(m.spot.contig) + ":" +
+        out += '<br><span style="color:#5b6572">' + pgpEsc(m.spot.contig) + ":" +
                (m.spot.start + 1).toLocaleString() + "-" +
                m.spot.end.toLocaleString() + "</span>";
     }
@@ -512,12 +512,12 @@ function pgpDraw() {
     o.push('<svg width="' + PGP_W + '" height="' + PGP_H + '" viewBox="0 0 ' +
            PGP_W + ' ' + PGP_H + '" style="max-width:100%;height:auto" ' +
            'font-family="Helvetica,Arial,sans-serif">');
-    o.push('<rect width="' + PGP_W + '" height="' + PGP_H + '" fill="#fcfcfb"/>');
-    o.push('<text x="' + PGP_L + '" y="24" font-size="15" font-weight="600" fill="#1a1a19">' +
+    o.push('<rect width="' + PGP_W + '" height="' + PGP_H + '" fill="#ffffff"/>');
+    o.push('<text x="' + PGP_L + '" y="24" font-size="15" font-weight="600" fill="#1e2833">' +
            'Position in ancestry space</text>');
     // No shared locus to name: each haplotype is read where the query matched
     // it, in that assembly's own coordinates.
-    o.push('<text x="' + PGP_L + '" y="41" font-size="11.5" fill="#6b6b67">' +
+    o.push('<text x="' + PGP_L + '" y="41" font-size="11.5" fill="#5b6572">' +
            pts.length + (dropped ? ' of ' + all.length + ' placed hits' :
                          ' of ' + pgpData.asked + ' haplotypes placed') +
            ', each read at its own match' +
@@ -530,27 +530,27 @@ function pgpDraw() {
                   return {x: p[0], y: p[1]}; }));
     if (sp !== null && sp.n >= 2 && ref !== null && ref.rms > 0) {
         o.push('<text x="' + PGP_L + '" y="' + PGP_DISP_Y +
-               '" font-size="11" fill="#1a1a19">Dispersion ' + sp.rms.toFixed(3) +
+               '" font-size="11" fill="#1e2833">Dispersion ' + sp.rms.toFixed(3) +
                ' (' + Math.round(sp.rms / ref.rms * 100) + '% of the reference ' +
                "panel's " + ref.rms.toFixed(3) + ')</text>');
     }
 
     pgpTicks(s.x0, s.x1).forEach(function (t) {
         o.push('<line x1="' + s.X(t).toFixed(1) + '" y1="' + PGP_T + '" x2="' +
-               s.X(t).toFixed(1) + '" y2="' + (PGP_H - PGP_B) + '" stroke="#e4e3df"/>');
+               s.X(t).toFixed(1) + '" y2="' + (PGP_H - PGP_B) + '" stroke="#ececec"/>');
         o.push('<text x="' + s.X(t).toFixed(1) + '" y="' + PGP_TICK_Y +
-               '" font-size="10.5" fill="#6b6b67" text-anchor="middle">' + t + '</text>');
+               '" font-size="10.5" fill="#5b6572" text-anchor="middle">' + t + '</text>');
     });
     pgpTicks(s.y0, s.y1).forEach(function (t) {
         o.push('<line x1="' + PGP_L + '" y1="' + s.Y(t).toFixed(1) + '" x2="' +
-               (PGP_W - PGP_R) + '" y2="' + s.Y(t).toFixed(1) + '" stroke="#e4e3df"/>');
+               (PGP_W - PGP_R) + '" y2="' + s.Y(t).toFixed(1) + '" stroke="#ececec"/>');
         o.push('<text x="' + (PGP_L - 8) + '" y="' + (s.Y(t) + 3.5).toFixed(1) +
-               '" font-size="10.5" fill="#6b6b67" text-anchor="end">' + t + '</text>');
+               '" font-size="10.5" fill="#5b6572" text-anchor="end">' + t + '</text>');
     });
     o.push('<text x="' + ((PGP_L + PGP_W - PGP_R) / 2).toFixed(0) + '" y="' + PGP_AXIS_Y +
-           '" font-size="11.5" fill="#1a1a19" text-anchor="middle">PC1</text>');
+           '" font-size="11.5" fill="#1e2833" text-anchor="middle">PC1</text>');
     o.push('<text transform="translate(17,' + ((PGP_T + PGP_H - PGP_B) / 2).toFixed(0) +
-           ') rotate(-90)" font-size="11.5" fill="#1a1a19" text-anchor="middle">PC2</text>');
+           ') rotate(-90)" font-size="11.5" fill="#1e2833" text-anchor="middle">PC2</text>');
 
     // the reference cloud, coloured by population
     o.push('<g>');
@@ -563,13 +563,13 @@ function pgpDraw() {
     // The 1-SD ellipse and the centroid, under the hits so they never hide one.
     if (sp !== null && sp.n >= 2 && sp.major > 0) {
         o.push('<polyline points="' + pgpEllipse(sp, s, 1) + '" fill="none" ' +
-               'stroke="#1a1a19" stroke-width="1.2" stroke-dasharray="5,4" ' +
+               'stroke="#1e2833" stroke-width="1.2" stroke-dasharray="5,4" ' +
                'opacity="0.55"/>');
         var ccx = s.X(sp.cx).toFixed(1), ccy = s.Y(sp.cy).toFixed(1);
         o.push('<line x1="' + (ccx - 5) + '" y1="' + ccy + '" x2="' + (+ccx + 5) +
-               '" y2="' + ccy + '" stroke="#1a1a19" stroke-width="1.2" opacity="0.7"/>');
+               '" y2="' + ccy + '" stroke="#1e2833" stroke-width="1.2" opacity="0.7"/>');
         o.push('<line x1="' + ccx + '" y1="' + (ccy - 5) + '" x2="' + ccx +
-               '" y2="' + (+ccy + 5) + '" stroke="#1a1a19" stroke-width="1.2" opacity="0.7"/>');
+               '" y2="' + (+ccy + 5) + '" stroke="#1e2833" stroke-width="1.2" opacity="0.7"/>');
     }
 
     // One mark per hit.  The fill is the authors' own colour for that
@@ -600,7 +600,7 @@ function pgpDraw() {
         // the pale background and a dense patch of cloud.
         if (g.picked) {
             o.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + (r + 4).toFixed(1) +
-                   '" fill="none" stroke="#fcfcfb" stroke-width="5"/>');
+                   '" fill="none" stroke="#ffffff" stroke-width="5"/>');
             o.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + (r + 4).toFixed(1) +
                    '" fill="none" stroke="#1664c0" stroke-width="2.6"/>');
         }
@@ -608,12 +608,12 @@ function pgpDraw() {
                pgpEsc(String(g.members.length)) + '" cx="' + cx + '" cy="' + cy +
                '" r="' + r.toFixed(1) + '" fill="' + pgpFill(g.rep) +
                '" fill-opacity="' + (g.members.length > 1 ? "0.85" : "1") +
-               '" stroke="#1a1a19" stroke-width="1.6"/>');
+               '" stroke="#1e2833" stroke-width="1.6"/>');
         // The count, once the mark is big enough to hold it legibly.
         if (g.members.length > 1 && r >= 10) {
             o.push('<text x="' + cx + '" y="' + (g.y + 3.6).toFixed(1) +
                    '" font-size="' + (r >= 14 ? 11 : 9.5) + '" font-weight="600" ' +
-                   'fill="#1a1a19" text-anchor="middle" style="pointer-events:none">' +
+                   'fill="#1e2833" text-anchor="middle" style="pointer-events:none">' +
                    g.members.length + '</text>');
         }
     });
@@ -640,7 +640,7 @@ function pgpDraw() {
                      'text-anchor="' + (right ? "start" : "end") + '" ' +
                      'style="pointer-events:none"';
         o.push('<text x="' + lx2 + '"' + common + ' fill="none" ' +
-               'stroke="#fcfcfb" stroke-width="3" stroke-linejoin="round">' +
+               'stroke="#ffffff" stroke-width="3" stroke-linejoin="round">' +
                pgpEsc(label) + '</text>');
         o.push('<text x="' + lx2 + '"' + common + ' fill="#1664c0">' +
                pgpEsc(label) + '</text>');
@@ -650,36 +650,36 @@ function pgpDraw() {
     // legend: the populations, then what our own mark means
     var lx = PGP_W - PGP_R + 24, ly = PGP_T + 6;
     o.push('<text x="' + lx + '" y="' + (ly - 6) + '" font-size="11" font-weight="600" ' +
-           'fill="#1a1a19">1000 Genomes reference</text>');
+           'fill="#1e2833">1000 Genomes reference</text>');
     (panel.labels || []).forEach(function (lab, i) {
         var yy = ly + 13 + i * 12.6;
         o.push('<circle cx="' + (lx + 4) + '" cy="' + (yy - 3.5).toFixed(1) +
                '" r="3.2" fill="' + PGP_HUES[i % PGP_HUES.length] + '"/>');
         o.push('<text x="' + (lx + 13) + '" y="' + yy.toFixed(1) +
-               '" font-size="9.6" fill="#6b6b67">' + pgpEsc(lab) + '</text>');
+               '" font-size="9.6" fill="#5b6572">' + pgpEsc(lab) + '</text>');
     });
     var hy = ly + 13 + (panel.labels || []).length * 12.6 + 14;
     o.push('<circle cx="' + (lx + 4) + '" cy="' + (hy - 3.5) + '" r="5" fill="#d8c0f0" ' +
-           'stroke="#1a1a19" stroke-width="1.6"/>');
-    o.push('<text x="' + (lx + 15) + '" y="' + hy + '" font-size="10" fill="#1a1a19">' +
+           'stroke="#1e2833" stroke-width="1.6"/>');
+    o.push('<text x="' + (lx + 15) + '" y="' + hy + '" font-size="10" fill="#1e2833">' +
            "a hit, in pcLAI's own colour</text>");
     o.push('<circle cx="' + (lx + 7) + '" cy="' + (hy + 46) + '" r="11" ' +
-           'fill="#d8c0f0" fill-opacity="0.85" stroke="#1a1a19" stroke-width="1.6"/>');
+           'fill="#d8c0f0" fill-opacity="0.85" stroke="#1e2833" stroke-width="1.6"/>');
     o.push('<text x="' + (lx + 7) + '" y="' + (hy + 49.6) + '" font-size="9.5" ' +
-           'font-weight="600" fill="#1a1a19" text-anchor="middle">n</text>');
+           'font-weight="600" fill="#1e2833" text-anchor="middle">n</text>');
     o.push('<text x="' + (lx + 22) + '" y="' + (hy + 49.6) + '" font-size="10" ' +
-           'fill="#1a1a19">n of them, too close to split</text>');
+           'fill="#1e2833">n of them, too close to split</text>');
     o.push('<circle cx="' + (lx + 4) + '" cy="' + (hy + 12.5) + '" r="9" fill="none" ' +
            'stroke="#1664c0" stroke-width="2.6"/>');
     o.push('<circle cx="' + (lx + 4) + '" cy="' + (hy + 12.5) + '" r="5" fill="#d8c0f0" ' +
-           'stroke="#1a1a19" stroke-width="1.6"/>');
-    o.push('<text x="' + (lx + 19) + '" y="' + (hy + 16) + '" font-size="10" fill="#1a1a19">ticked in the table</text>');
+           'stroke="#1e2833" stroke-width="1.6"/>');
+    o.push('<text x="' + (lx + 19) + '" y="' + (hy + 16) + '" font-size="10" fill="#1e2833">ticked in the table</text>');
     o.push('<polyline points="' + (lx - 1) + ',' + (hy + 26) + ' ' + (lx + 9) + ',' +
-           (hy + 26) + '" fill="none" stroke="#1a1a19" stroke-width="1.2" ' +
+           (hy + 26) + '" fill="none" stroke="#1e2833" stroke-width="1.2" ' +
            'stroke-dasharray="5,4" opacity="0.55"/>');
     o.push('<text x="' + (lx + 15) + '" y="' + (hy + 29.5) + '" font-size="10" ' +
-           'fill="#1a1a19">1 SD of the hits</text>');
-    o.push('<text x="' + lx + '" y="' + (hy + 72) + '" font-size="9.6" fill="#6b6b67">' +
+           'fill="#1e2833">1 SD of the hits</text>');
+    o.push('<text x="' + lx + '" y="' + (hy + 72) + '" font-size="9.6" fill="#5b6572">' +
            'Click a mark for details.</text>');
     o.push('</svg>');
 
@@ -712,23 +712,21 @@ function pgpDraw() {
 // every draw, so their markup carries the current values and nothing has to be
 // kept in sync with the DOM.
 function pgpControlsHtml(shown, total, dropped) {
-    var o = ['<div id="pgpControls" style="margin:0.4em 0;font-size:11.5px">'];
-    o.push('<label for="pgpCovFloor">Plot hits covering at least </label>' +
+    var o = ['<div id="pgpControls" class="pgpControls">'];
+    o.push('<label class="pgpCtl">Plot hits covering at least ' +
            '<input id="pgpCovFloor" type="number" min="0" max="100" step="5" ' +
-           'value="' + pgpMinCov + '" style="width:4.5em"> % of the query');
+           'value="' + pgpMinCov + '"> % of the query</label>');
     if (pgpHasPlacements()) {
         // A query that maps to several loci gets one set of haplotypes per
         // locus.  Their ancestry is read at different places in the genome, so
         // plotting them together averages positions that have nothing to do
         // with each other - the best placement alone is the default.
-        o.push('<label style="margin-left:1.4em">' +
-               '<input id="pgpBestOnly" type="checkbox"' +
-               (pgpBestOnly ? ' checked' : '') + '> best placement only</label>');
+        o.push('<label class="pgpCtl"><input id="pgpBestOnly" type="checkbox"' +
+               (pgpBestOnly ? ' checked' : '') + '> Best placement only</label>');
     }
     if (dropped > 0) {
-        o.push('<span style="margin-left:1.2em;color:#6b6b67">' + shown +
-               ' of ' + total + ' shown, ' + dropped + ' filtered out ' +
-               '(still listed in the table)</span>');
+        o.push('<span class="pgpCtlNote">' + shown + ' of ' + total + ' shown, ' +
+               dropped + ' filtered out (still listed in the table)</span>');
     }
     o.push('</div>');
     return o.join("");
@@ -758,30 +756,30 @@ function pgpBindControls() {
 // page with the spot, so they read exactly as the table's do; what is added
 // here is the part only the plot knows - where the haplotype sits in ancestry
 // space and how confident pcLAI is about that.
+function pgpSwatch(p) {
+    // The authors' colour for this coordinate - the same one the dot carries and
+    // the same one the pcLAI tracks paint with.
+    return '<span class="pgpSwatch" style="background:' + pgpFill(p) + '"></span>';
+}
+
 function pgpDetailHtml() {
     // A crowded mark lists what it holds, so a haplotype that cannot be aimed
     // at in the plot can still be reached in two clicks.
     if (pgpSelected === null && pgpSelGroup !== null && pgpSelGroup.length > 1) {
-        var o = ['<div id="pgpDetail" style="margin:0.6em 0 0 0;padding:0.6em 0.8em;' +
-                 'border:1px solid #cfcfc8;background:#fcfcfb;max-width:820px">'];
-        o.push('<div style="font-weight:600;font-size:13px;margin-bottom:0.2em">' +
-               pgpSelGroup.length + ' haplotypes at this point</div>');
-        o.push('<div style="font-size:11.5px;color:#6b6b67;margin-bottom:0.5em">' +
-               'They sit within ' + PGP_GROUP_R + ' units of one another, which is ' +
-               'closer than one mark is wide. Pick one for its details.</div>');
-        o.push('<div style="font-size:11.5px;line-height:1.9">');
+        var g = ['<div id="pgpDetail" class="pgpDetail">'];
+        g.push('<div class="dhead"><span class="loc">' + pgpSelGroup.length +
+               ' haplotypes at this point</span><span class="lab">They sit within ' +
+               PGP_GROUP_R + ' units of one another, closer than one mark is wide. ' +
+               'Pick one for its details.</span></div>');
+        g.push('<div class="pgpGroupList">');
         pgpSelGroup.slice().sort(function (a, b) {
             return a.hap < b.hap ? -1 : (a.hap > b.hap ? 1 : 0);
         }).forEach(function (m) {
-            o.push('<a href="#" data-pgp-hap="' + pgpEsc(pgpKeyOf(m)) + '" ' +
-                   'style="display:inline-block;margin-right:1.1em;white-space:nowrap">' +
-                   '<span style="display:inline-block;width:9px;height:9px;' +
-                   'border:1px solid #8a8a85;background:' + pgpFill(m) +
-                   ';vertical-align:-1px;margin-right:4px"></span>' +
-                   pgpEsc(m.hap) + '</a>');
+            g.push('<a href="#" data-pgp-hap="' + pgpEsc(pgpKeyOf(m)) + '">' +
+                   pgpSwatch(m) + pgpEsc(m.hap) + '</a>');
         });
-        o.push('</div></div>');
-        return o.join("");
+        g.push('</div></div>');
+        return g.join("");
     }
     if (pgpSelected === null) { return ""; }
     var point = null;
@@ -790,49 +788,41 @@ function pgpDetailHtml() {
     });
     var spot = pgpSpotFor(point || pgpSelected);
 
-    var o = ['<div id="pgpDetail" style="margin:0.6em 0 0 0;padding:0.6em 0.8em;' +
-             'border:1px solid #cfcfc8;background:#fcfcfb;max-width:820px">'];
-    o.push('<div style="font-weight:600;font-size:13px;margin-bottom:0.45em">' +
-           pgpEsc((spot && spot.hap) || pgpSelected) + '</div>');
-    o.push('<table style="border-collapse:collapse;font-size:11.5px">');
-    function row(label, value) {
-        o.push('<tr><td style="padding:1px 10px 1px 0;color:#6b6b67;' +
-               'vertical-align:top;white-space:nowrap">' + pgpEsc(label) +
-               '</td><td style="padding:1px 0">' + value + '</td></tr>');
+    // The same tiles as the results page's detail panel (.pgrTile), so a dot
+    // and a row answer in the same form.
+    var tiles = [];
+    function tile(k, v) {
+        tiles.push('<div class="pgrTile"><div class="k">' + pgpEsc(k) +
+                   '</div><div class="v">' + v + '</div></div>');
     }
     if (point !== null) {
-        // The swatch is the authors' colour for this coordinate - the same one
-        // the dot carries and the same one the pcLAI tracks paint with.
-        var sw = '<span style="display:inline-block;width:10px;height:10px;' +
-                 'border:1px solid #8a8a85;background:' + pgpFill(point) +
-                 ';vertical-align:-1px;margin-right:5px"></span>';
-        row("Ancestry", sw + "PC1 " + pgpFmtNum(point.x) + ", PC2 " +
-                        pgpFmtNum(point.y));
-        row("Confidence", point.conf + "/1000");
+        tile("Ancestry", pgpSwatch(point) + "PC1 " + pgpFmtNum(point.x) + ", PC2 " +
+                         pgpFmtNum(point.y));
+        tile("Confidence", point.conf + "/1000");
         // Where this haplotype sits relative to the rest of the hits, which is
         // the dispersion read one haplotype at a time.
         var sp = pgpSpread(pgpData.points || []);
         if (sp !== null && sp.n >= 2) {
-            var d = Math.sqrt(Math.pow(point.x - sp.cx, 2) +
-                              Math.pow(point.y - sp.cy, 2));
-            row("From centroid", d.toFixed(3) + " of " + sp.rms.toFixed(3) +
-                                 " (the hits' dispersion)");
+            var d = Math.sqrt(Math.pow(point.x - sp.cx, 2) + Math.pow(point.y - sp.cy, 2));
+            tile("From centroid", d.toFixed(3) + " of " + sp.rms.toFixed(3));
         }
     }
-    ((spot && spot.info) || []).forEach(function (pair) {
-        row(pair[0], pgpEsc(pair[1]));
-    });
-    o.push('</table>');
-    // The same link the table rows carry, answered by the results page's own
+    ((spot && spot.info) || []).forEach(function (pair) { tile(pair[0], pgpEsc(pair[1])); });
+
+    var o = ['<div id="pgpDetail" class="pgpDetail">'];
+    o.push('<div class="dhead"><span class="lab">Selected</span><span class="loc">' +
+           pgpEsc((spot && spot.hap) || pgpSelected) + '</span></div>');
+    o.push('<div class="pgrDetailCard"><div class="pgrTiles">' + tiles.join("") + '</div></div>');
+    // The same links the table rows carry, answered by the results page's own
     // click delegation - the plot does not need to know how a lift is armed.
     if (spot && spot.rank != null) {
-        o.push('<div style="margin-top:0.5em;font-size:11.5px">' +
-               '<a href="#" data-rank="' + spot.rank + '" data-act="browser">' +
-               'View in Genome Browser</a> &nbsp;' +
-               '<a href="#" data-rank="' + spot.rank + '" data-act="details">' +
-               'Alignment</a>' +
+        o.push('<div class="pgrDetailActions">' +
+               '<a class="gbPill primary" href="#" data-rank="' + spot.rank +
+               '" data-act="browser">View in Genome Browser</a>' +
+               '<a class="gbPill" href="#" data-rank="' + spot.rank +
+               '" data-act="details">Alignment</a>' +
                ((pgpSelGroup !== null && pgpSelGroup.length > 1)
-                ? ' &nbsp;<a href="#" data-pgp-hap="">\u2039 the ' +
+                ? '<a class="gbPill" href="#" data-pgp-hap="">\u2039 The ' +
                   pgpSelGroup.length + ' here</a>' : "") +
                '</div>');
     }

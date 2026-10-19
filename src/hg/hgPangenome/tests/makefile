@@ -31,6 +31,7 @@ Individual layers:\n\
   node unitTests.js     pure-function unit tests (Layer 1)\n\
   ./proxyTests.sh       CGI proxy tests against a mock middleware (Layer 2)\n\
   node renderTests.js   contract/rendering tests (Layer 3)\n\
+  node resultsTests.js  results page: cells, row order, download\n\
 \n\
 To test a specific CGI binary:  PG_CGI=/path/to/hgPangenome ./proxyTests.sh\n"
 

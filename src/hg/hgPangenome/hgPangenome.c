@@ -2382,6 +2382,49 @@ if (strlen(clean) > 255)
 return isEmpty(clean) ? "query" : clean;
 }
 
+static void pgJsonQuerySeqs(struct jsonWrite *jw, char *field, char *jobId)
+/* The job's query sequences as [{name, seq}, ...], read back from the copy
+ * taken at submit time, for the results page's "Show Query Sequence".  hgBlat
+ * puts its queries on its results page the same way.  Nothing is written - not
+ * even an empty list - when the job is unknown or its copy has been swept, so
+ * the page can tell "no sequence to show" from "an empty one". */
+{
+if (!pgValidJobId(jobId))
+    return;
+char path[PATH_LEN];
+pgJobFaPath(jobId, path, sizeof(path));
+struct lineFile *lf = lineFileMayOpen(path, TRUE);
+if (lf == NULL)
+    return;
+jsonWriteListStart(jw, field);
+struct dyString *seq = dyStringNew(1024);
+char *name = NULL, *line;
+while (TRUE)
+    {
+    boolean more = lineFileNext(lf, &line, NULL);
+    if (!more || line[0] == '>')
+        {
+        if (name != NULL)
+            {
+            jsonWriteObjectStart(jw, NULL);
+            jsonWriteString(jw, "name", name);
+            jsonWriteString(jw, "seq", seq->string);
+            jsonWriteObjectEnd(jw);
+            freez(&name);
+            }
+        if (!more)
+            break;
+        name = cloneString(trimSpaces(line + 1));
+        dyStringClear(seq);
+        }
+    else if (name != NULL)
+        dyStringAppend(seq, trimSpaces(line));
+    }
+jsonWriteListEnd(jw);
+dyStringFree(&seq);
+lineFileClose(&lf);
+}
+
 static char *pgSeqFromJobFa(char *jobId, char *name)
 /* The named query sequence from the FASTA stashed when the job was submitted,
  * or NULL.  The results page is reached by a plain URL that carries only the
@@ -3073,12 +3116,41 @@ if (sameOk(cgiOptionalString("page"), "results"))
     cartWebStart(cart, NULL, "Pangenome Mapping Results");
     if (issueBotWarning)
         botDelayMessage(getenv("REMOTE_ADDR"), botDelayMillis);
-    /* Nothing beyond the standard page style: the table is hgBlat's classic
-     * <TT><PRE> listing, which takes its look from the web shell. */
-    printf("<div id='pgrResults'></div>\n");
+    /* The results page of hgBlat's new design: hgPangenomeResults.js builds the
+     * summary strip, the sortable DataTable and the detail panel inside this
+     * container, from the shared house style in gbModern.css and this tool's
+     * own layout in hgPangenome.css, as hgBlat.js does from hgBlat.css. */
+    jsIncludeDataTablesLibs();
+    webIncludeResourceFile("gbModern.css");   // shared house-style components (.gbPill, .gbCard, ...)
+    webIncludeResourceFile("hgPangenome.css");
+    printf("<div id='pgrResults' class='gbApp'></div>\n");
     injectConfig();
-    jsInlineF("var pangenomeJobId = '%s';\n",
-              jsonStringEscape(cgiUsualString("job_id", "")));
+    char *jobId = cgiUsualString("job_id", "");
+    jsInlineF("var pangenomeJobId = '%s';\n", jsonStringEscape(jobId));
+
+    /* What the page needs that the mapping job does not carry: the queries
+     * themselves, for "Show Query Sequence", and where its two header buttons go.
+     * "Back to Genome Browser" is offered, as on hgBlat's results page, only
+     * when the cart has a position to go back to. */
+    struct jsonWrite *jw = jsonWriteNew();
+    jsonWriteObjectStart(jw, NULL);
+    pgJsonQuerySeqs(jw, "querySeqs", jobId);
+    jsonWriteStringf(jw, "newSearchUrl", "hgPangenome?%s=%s",
+                     cartSessionVarName(), cartSessionId(cart));
+    char *backPos = cartOptionalString(cart, "position");
+    char *backDb = cartOptionalString(cart, "db");
+    if (!isEmpty(backPos) && !isEmpty(backDb))
+        {
+        jsonWriteStringf(jw, "backUrl", "hgTracks?db=%s&%s=%s",
+                         backDb, cartSessionVarName(), cartSessionId(cart));
+        jsonWriteString(jw, "backPos", backPos);
+        }
+    jsonWriteString(jw, "graphLabel",
+                    cfgOr("pangenome.graphLabel",
+                          "Human Pangenome Reference Consortium, release 2"));
+    jsonWriteObjectEnd(jw);
+    jsInlineF("var pangenomeResultsPage = %s;\n", jw->dy->string);
+    jsonWriteFree(&jw);
 
     /* How many haplotypes the batch surjection places.  Everything else in the
      * table comes free with the mapping; these come in one request, so this can

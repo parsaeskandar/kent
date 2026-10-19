@@ -107,6 +107,22 @@ function pgrIdentityOf(row) {
     return row.identity == null ? row.listIdentity : row.identity;
 }
 
+// The table's order, as hgBlat's results are sorted: by query and then by
+// quality.  Each query's rows together, in the order the queries were given;
+// then each of its placements in turn, the best first; and within one, best
+// identity first.  For one query placed once, this is just the last.
+function pgrRowOrder(queryNames) {
+    var order = Object.create(null);
+    (queryNames || []).forEach(function (n, i) { if (!(n in order)) { order[n] = i; } });
+    var rankOf = function (q) { return (q in order) ? order[q] : 1e9; };
+    return function (a, b) {
+        var qa = rankOf(a.query), qb = rankOf(b.query);
+        if (qa !== qb) { return qa - qb; }
+        if (a.placement !== b.placement) { return a.placement - b.placement; }
+        return pgrByIdentity(a, b);
+    };
+}
+
 function pgrByIdentity(a, b) {
     var ia = pgrIdentityOf(a), ib = pgrIdentityOf(b);
     ia = (ia == null) ? -1 : ia;
@@ -353,6 +369,13 @@ function pgrApplyRecord(row, rec) {
     row.deleted = rec.deleted;
     row.alignedBases = rec.aligned_bases;
     row.identity = rec.identity == null ? null : rec.identity * 100;
+    // Where on the query the alignment runs, 0-based and half-open like the
+    // target coordinates, for the coverage bar.  Optional: an older service
+    // does not send them, and the bar then says only how much, not where.
+    if (rec.query_start != null && rec.query_end != null) {
+        row.qStart = rec.query_start;
+        row.qEnd = rec.query_end;
+    }
 }
 
 // The mapping's own surjection, which is against the representative and comes
@@ -396,135 +419,107 @@ function pgrTruncNote() {
 // widths are measured from the data first, as showAliPlaces() does, so nothing
 // is truncated and nothing is padded further than it needs to be.
 
-function pgrPad(text, width) {
-    var n = width - text.length;
-    return text + (n > 0 ? new Array(n + 1).join(" ") : "");
+// ---- the results table: cell renderers -------------------------------------
+//
+// The table is hgBlat's new results table - a DataTable whose cells are drawn
+// here - in hgBlat.js's design: the position as a link with a new-tab icon
+// after it, an "Alignment" link, a bar for the part of the query that aligned,
+// and identity in hgBlat's semantic colours.  The links cannot be plain hrefs
+// the way BLAT's are: the cart has to be armed with the PSL and the query FASTA
+// first, and that is a POST, so each carries the row's rank and an action and
+// goes through pgrAct() when clicked.
+
+// hgBlat.js's identity colours, so a percentage reads the same in both tools.
+function pgrIdColor(id) {
+    if (id >= 98) { return "#1f7a34"; }
+    if (id >= 95) { return "#4d7c0f"; }
+    if (id >= 90) { return "#b45309"; }
+    return "#b1301f";
 }
 
-function pgrLPad(text, width) {
-    var n = width - text.length;
-    return (n > 0 ? new Array(n + 1).join(" ") : "") + text;
+// A row with no position: there is nothing to open, so say why instead.
+function pgrUnplacedText(r) {
+    if (r.placeStatus === "no_anchors") { return "not present"; }
+    if (r.placeStatus === "surjection_failed") { return "no alignment"; }
+    return "not placed";
 }
 
-// The new-tab icon hgBlat.c puts after its "new tab" link.
-var PGR_NEWTAB_ICON =
-    "<svg style='height:10px; padding-left:2px' xmlns='http://www.w3.org/2000/svg' " +
-    "viewBox='0 0 512 512'><path d='M320 0c-17.7 0-32 14.3-32 32s14.3 32 32 32h82.7" +
-    "L201.4 265.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0L448 109.3V192c0 17.7 " +
-    "14.3 32 32 32s32-14.3 32-32V32c0-17.7-14.3-32-32-32H320zM80 32C35.8 32 0 67.8 0 " +
-    "112V432c0 44.2 35.8 80 80 80H400c44.2 0 80-35.8 80-80V320c0-17.7-14.3-32-32-32s" +
-    "-32 14.3-32 32V432c0 8.8-7.2 16-16 16H80c-8.8 0-16-7.2-16-16V112c0-8.8 7.2-16 " +
-    "16-16H192c17.7 0 32-14.3 32-32s-14.3-32-32-32H80z'/></svg>";
-
-// ACTIONS, for a row we have a position for.  The three links are the ones
-// hgBlat offers, in the same order.  They cannot be plain hrefs the way BLAT's
-// are: the cart has to be armed with the PSL and the query FASTA first, and
-// that is a POST, so each one goes through a click handler.
-function pgrActions(row) {
-    if (row.contig == null) { return ""; }
-    var r = ' data-rank="' + row.rank + '"';
-    return '<a title="Open a Genome Browser showing this match" href="#"' + r +
-           ' data-act="browser">browser</a>&nbsp;' +
-           '<a title="Open a Genome Browser showing this match, in a new tab" href="#"' + r +
-           ' data-act="newtab">new tab' + PGR_NEWTAB_ICON + "</a>&nbsp;" +
-           '<a title="Show the base-by-base alignment of your sequence here" href="#"' + r +
-           ' data-act="details">details</a>';
+function pgrPositionCell(r) {
+    if (r.contig == null) {
+        return '<span class="pgrUnplaced">' + pgrUnplacedText(r) + "</span>";
+    }
+    var rank = ' data-rank="' + r.rank + '"';
+    return '<a href="#"' + rank + ' data-act="browser" ' +
+           'title="Open the Genome Browser on this haplotype, with your sequence drawn on it">' +
+           pgrEsc(r.contig) + ":" + pgrFmt(r.start + 1) + "-" + pgrFmt(r.end) + "</a>" +
+           ' <a class="pgrNewTab" href="#"' + rank + ' data-act="newtab" ' +
+           'title="Open in a new tab" aria-label="Open in a new tab"></a>';
 }
 
-// Plain text of the ACTIONS cell, for measuring: the markup is far wider than
-// what it draws, so widths have to be taken from the visible text.
-function pgrActionsText(row) {
-    return row.contig == null ? "" : "browser new tab details";
+function pgrActionsCell(r) {
+    if (r.contig == null) { return ""; }
+    return '<a href="#" data-rank="' + r.rank + '" data-act="details" ' +
+           'title="Show the base-by-base alignment of your sequence to this haplotype">' +
+           "Alignment</a>";
 }
 
-function pgrTableHtml(rows, opt) {
-    var w = {
-        act: Math.max(7, "browser new tab details".length),
-        hap: 9, asm: 8, query: 5, place: 5,
-        contig: 6, start: 5, end: 5, span: 4
-    };
-    rows.forEach(function (r) {
-        w.hap = Math.max(w.hap, r.hap.length);
-        w.asm = Math.max(w.asm, pgrAssemblyLabel(r.db).length);
-        w.query = Math.max(w.query, String(r.query || "").length);
-        if (r.contig != null) {
-            w.contig = Math.max(w.contig, r.contig.length);
-            w.start = Math.max(w.start, pgrFmt(r.start + 1).length);
-            w.end = Math.max(w.end, pgrFmt(r.end).length);
-            w.span = Math.max(w.span, pgrFmt(r.end - r.start).length);
-        }
-    });
+// The bar shows where on the query the alignment runs; the figure after it is
+// the coverage - the share of the query's bases that aligned.  hgBlat prints
+// the query start and end there instead, which is what a primer search needs;
+// here the coverage is the figure people compare haplotypes by, so it takes
+// that place and the range goes in the tooltip.  A row from the graded list,
+// which has no extent, still gets its figure.
+function pgrCoverageCell(r) {
+    if (r.coverage == null) { return ""; }
+    var pct = r.coverage.toFixed(1) + "%";
+    var qSize = r.queryLength;
+    if (r.qStart == null || !qSize) {
+        return '<span class="pgrCovNum">' + pct + "</span>";
+    }
+    var left = r.qStart / qSize * 100;
+    var width = (r.qEnd - r.qStart) / qSize * 100;
+    var tip = "Bases " + pgrFmt(r.qStart + 1) + "-" + pgrFmt(r.qEnd) + " of your " +
+              pgrFmt(qSize) + " bp sequence aligned here, " + pct + " of it in all";
+    return '<span class="pgrCovWrap" title="' + tip + '"><span class="pgrCov">' +
+           '<i style="left:' + left.toFixed(1) + "%;width:" + width.toFixed(1) + '%"></i>' +
+           '</span><span class="pgrCovNum">' + pct + "</span></span>";
+}
 
-    var head = (opt.pclai ? "    " : "") + "   " + pgrPad("ACTIONS", w.act) + " ";
-    if (opt.multiQuery) { head += pgrPad("QUERY", w.query) + " "; }
-    if (opt.multiPlace) { head += pgrPad("PLACE", w.place) + " "; }
-    head += pgrPad("HAPLOTYPE", w.hap) + " " + pgrPad("ASSEMBLY", w.asm) +
-            " IDENTITY COVERAGE MAPQ  " + pgrPad("CONTIG", w.contig) +
-            " STRAND " + pgrLPad("START", w.start) + " " + pgrLPad("END", w.end) +
-            " " + pgrLPad("SPAN", w.span);
-    var rule = new Array(head.length + 1).join("-");
+function pgrIdentityCell(r) {
+    var id = pgrIdentityOf(r);
+    if (id == null) { return ""; }
+    return '<span class="pgrIdPct" style="color:' + pgrIdColor(id) + '">' +
+           id.toFixed(1) + "%</span>";
+}
 
-    var out = [head, rule];
-    rows.forEach(function (r) {
-        // The box bolds this haplotype's point in the ancestry plot.  Rows with
-        // no position have no point, so they get the space but no box.
-        var line = "";
-        if (opt.pclai) {
-            // Only a row the plot can actually draw gets a box.  The two
-            // references are the case that matters: GRCh38 has no pcLAI at all
-            // - it is a mosaic, not a sampled haplotype - and CHM13 has none in
-            // assembly coordinates, so ticking either could only ever do
-            // nothing.  A box that does nothing is worse than no box.
-            // A row the plot cannot draw keeps a box, hidden.  Spaces will not
-            // do: a checkbox is an inline-block whose height props the line
-            // open and whose width is not four characters, so a row without one
-            // sits closer to its neighbours and starts further left - visible
-            // on GRCh38 and CHM13, which are always in the list.  The hidden box
-            // holds exactly the space a real one would, whatever the browser
-            // makes a checkbox, and carries no class so the click handler
-            // passes over it.
-            line += pgrPclaiSpot(r)
-                ? '<input type="checkbox" class="pgrPick" data-hap="' +
-                  pgrEsc(r.hap) + '"> '
-                : '<input type="checkbox" disabled style="visibility:hidden"> ';
-        }
-        line += "   " + pgrPad(pgrActionsText(r), w.act) + " ";
-        // The links are substituted after padding, so the columns line up on the
-        // text that is actually drawn rather than on the length of the markup.
-        line = line.replace(pgrActionsText(r), pgrActions(r) || "");
-        if (opt.multiQuery) { line += pgrPad(pgrEsc(String(r.query || "")), w.query) + " "; }
-        if (opt.multiPlace) { line += pgrPad(String(r.placement + 1), w.place) + " "; }
-        line += pgrPad(pgrEsc(r.hap), w.hap) + " ";
-        line += pgrPad(pgrEsc(pgrAssemblyLabel(r.db)), w.asm) + " ";
+function pgrMapqOf(r) {
+    return (r.surjMapq == null) ? r.mapq : r.surjMapq;
+}
 
-        var id = pgrIdentityOf(r);
-        line += pgrLPad(id == null ? "" : id.toFixed(1) + "%", 8) + " ";
-        line += pgrLPad(r.coverage == null ? "" : r.coverage.toFixed(1) + "%", 8) + " ";
-        // The mapper's own confidence that it picked the right copy of a
-        // repeated region.  Shown as the number rather than as a flag: a reader
-        // who knows what MAPQ is can weigh it, and one who does not is told
-        // below the table what a low value means.
-        var mapq = (r.surjMapq == null) ? r.mapq : r.surjMapq;
-        line += pgrLPad(mapq == null ? "" : String(mapq), 4) + "  ";
+// MAPQ is shown as the number, so a reader who knows it can weigh it; a low one
+// is marked, with the explanation on the mouse-over, since it is the one value
+// in a row that says the position itself may be wrong.
+function pgrMapqCell(r) {
+    var q = pgrMapqOf(r);
+    if (q == null || isNaN(Number(q))) { return ""; }
+    q = Number(q);
+    if (q < 10) {
+        return '<span class="pgrLowMapq" title="Low mapping quality: the mapper could not ' +
+               'tell which copy of a duplicated region this sequence came from, so this ' +
+               'position may belong to another copy.">' + q + "</span>";
+    }
+    return String(q);
+}
 
-        if (r.contig == null) {
-            // Not placed.  Usually that just means it fell outside the batch,
-            // and the row is here for its identity and coverage; where the
-            // service gave a reason, say it.  Nothing follows, so nothing is
-            // padded.
-            if (r.placeStatus === "no_anchors") { line += "not present"; }
-            else if (r.placeStatus === "surjection_failed") { line += "no alignment"; }
-            out.push(line.replace(/\s+$/, ""));
-            return;
-        }
-        line += pgrPad(pgrEsc(r.contig), w.contig) + "   " +
-                pgrPad(r.strand || "", 4) + " " +
-                pgrLPad(pgrFmt(r.start + 1), w.start) + " " +
-                pgrLPad(pgrFmt(r.end), w.end) + " " +
-                pgrLPad(pgrFmt(r.end - r.start), w.span);
-        out.push(line);
-    });
-    return "<TT><PRE>" + out.join("\n") + "\n</PRE></TT>";
+// The box picks this haplotype out in the ancestry plot.  Only a row the plot
+// can draw has one: GRCh38 has no pcLAI at all - it is a mosaic, not a sampled
+// haplotype - and CHM13 has none in assembly coordinates, so a box on either
+// could only ever do nothing.
+function pgrPickCell(r) {
+    if (!pgrPclaiSpot(r)) { return ""; }
+    var on = (typeof pgpPicked !== "undefined") && pgpPicked[r.hap];
+    return '<input type="checkbox" class="pgrPick" data-hap="' + pgrEsc(r.hap) + '"' +
+           (on ? " checked" : "") + ' title="Pick this haplotype out in the ancestry plot">';
 }
 
 // ---- opening a row in the browser -----------------------------------------
@@ -616,81 +611,384 @@ function pgrCacheWrite(job, results, rows, note) {
 
 // ---- page ------------------------------------------------------------------
 
+function pgrPage() {
+    return (typeof pangenomeResultsPage !== "undefined" && pangenomeResultsPage) || {};
+}
+
+// A problem with one action - an alignment that would not open, say - goes in a
+// line at the top of the results card, where it is seen without hiding them.
 function pgrFail(msg) {
-    var el = document.getElementById("pgrResults");
-    var div = document.createElement("div");
-    div.style.color = "#a00";
-    div.textContent = msg;
-    el.insertBefore(div, el.firstChild);
+    var slot = document.getElementById("pgrErr");
+    if (!slot) {
+        var el = document.getElementById("pgrResults");
+        slot = document.createElement("div");
+        slot.id = "pgrErr";
+        el.insertBefore(slot, el.firstChild);
+    }
+    slot.className = "pgrErr";
+    slot.textContent = msg;
+}
+
+// ---- summary strip, detail panel, downloads --------------------------------
+
+function pgrStat(k, v) {
+    return '<div class="gbStat"><span class="k">' + k + '</span><span class="v">' + v + "</span></div>";
+}
+
+function pgrSummaryStrip(queries, rows, multiPlace) {
+    var div = '<span class="gbDiv"></span>';
+    var stats;
+    if (queries > 1) {
+        stats = pgrStat("Queries", pgrFmt(queries));
+    } else {
+        var r0 = rows[0] || {};
+        stats = pgrStat("Query", pgrEsc(r0.query || "")) + div +
+                pgrStat("Length", pgrFmt(r0.queryLength || 0) + " bp");
+        if (multiPlace) { stats += div + pgrStat("Placements", pgrFmt(r0.placements)); }
+    }
+    stats += div + pgrStat("Haplotypes", pgrFmt(rows.length));
+    var page = pgrPage();
+    var acts = "";
+    if (page.querySeqs && page.querySeqs.length) {
+        acts += '<button type="button" class="gbPill" id="pgrSeqBtn" ' +
+                'title="Show the sequence you searched with, in FASTA format">' +
+                "Show Query Sequence</button>";
+    }
+    acts += '<button type="button" class="gbPill" id="pgrTsvBtn" title="Download the rows ' +
+            "below, in their current order and filter, as a tab-separated file that opens " +
+            'in Excel">Download Table</button>';
+    if (pgrPclaiReady()) {
+        // pgpInit() in hgPangenomePclai.js wires this button and keeps its label.
+        acts += '<button type="button" class="gbPill" id="pgrPclaiBtn" title="Where these ' +
+                'haplotypes sit in the pcLAI reference space">Show ancestry plot</button>';
+    }
+    return '<div class="gbStrip">' + stats + '<span class="gbStripActions">' + acts + "</span></div>";
+}
+
+function pgrTile(k, v, tip) {
+    return '<div class="pgrTile"><div class="k" title="' + pgrEsc(tip) + '">' + k +
+           '</div><div class="v">' + v + "</div></div>";
+}
+
+// The selected row, in hgBlat.js's docked detail panel: its figures as tiles,
+// and the row's two links as buttons.  They are the same <a data-rank> links the
+// table uses, so the one click handler opens both.
+function pgrDetailHtml(r) {
+    var id = pgrIdentityOf(r), q = pgrMapqOf(r);
+    var tiles = [
+        pgrTile("Identity", id == null ? "—" :
+                '<span style="color:' + pgrIdColor(id) + '">' + id.toFixed(1) + "%</span>",
+                "Percent identity of the aligned bases."),
+        pgrTile("Coverage", r.coverage == null ? "—" : r.coverage.toFixed(1) + "%",
+                "Share of the query's bases that aligned to this haplotype."),
+        pgrTile("MAPQ", q == null ? "—" : pgrMapqCell(r),
+                "Mapping quality: how sure the mapper is that it chose the right copy " +
+                "of a repeated region. 60 is certain; under 10 is doubtful."),
+        pgrTile("Strand", pgrEsc(r.strand || "—"), "Strand of this haplotype the sequence matched."),
+        pgrTile("Matches", r.matches == null ? "—" : pgrFmt(r.matches), "Bases that match."),
+        pgrTile("Mismatches", r.mismatches == null ? "—" : pgrFmt(r.mismatches),
+                "Bases that differ between your sequence and this haplotype."),
+        pgrTile("Inserted", r.inserted == null ? "—" : pgrFmt(r.inserted),
+                "Bases in your sequence that are not in this haplotype."),
+        pgrTile("Deleted", r.deleted == null ? "—" : pgrFmt(r.deleted),
+                "Bases in this haplotype that are not in your sequence.")
+    ];
+    if (r.qStart != null) {
+        tiles.push(pgrTile("Q span", pgrFmt(r.qStart + 1) + "-" + pgrFmt(r.qEnd),
+                           "Range of your sequence that aligned (1-based)."));
+    }
+    if (r.placements > 1) {
+        tiles.push(pgrTile("Placement", (r.placement + 1) + " of " + r.placements +
+                           (r.placement === 0 ? " (best)" : ""),
+                           "Which of the places in the graph this sequence aligned to."));
+    }
+    var where = r.contig == null ? pgrUnplacedText(r) :
+                pgrEsc(r.contig) + ":" + pgrFmt(r.start + 1) + "-" + pgrFmt(r.end);
+    var acts = r.contig == null ? "" :
+        '<div class="pgrDetailActions">' +
+        '<a class="gbPill primary" href="#" data-rank="' + r.rank + '" data-act="browser">' +
+        "View in Genome Browser</a>" +
+        '<a class="gbPill" href="#" data-rank="' + r.rank + '" data-act="details">Alignment</a>' +
+        "</div>";
+    return '<div class="dhead"><span class="lab">Selected</span>' +
+           '<span class="loc">' + pgrEsc(r.hap) + "</span>" +
+           '<span class="lab">' + pgrEsc(pgrAssemblyName(r.db) || pgrAssemblyLabel(r.db)) +
+           " · " + where + "</span></div>" +
+           '<div class="pgrDetailCard"><div class="pgrTiles">' + tiles.join("") + "</div></div>" +
+           acts;
+}
+
+function pgrHintHtml() {
+    return '<div class="pgrSelectHint">Click a row below to see how your sequence ' +
+           "aligned to that haplotype. Click its position to open the Genome Browser " +
+           "with your sequence drawn on it.</div>";
+}
+
+function pgrFasta(seqs) {
+    return seqs.map(function (q) {
+        var body = String(q.seq || "").toUpperCase().replace(/(.{60})/g, "$1\n").replace(/\n$/, "");
+        return ">" + q.name + "\n" + body;
+    }).join("\n") + "\n";
+}
+
+function pgrDownload(text, fileName, mime) {
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([text], { type: mime }));
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 0);
+}
+
+// One line per row, positions 1-based as on the page, then the counts and the
+// CIGAR, which with the start is enough to rebuild the alignment - as hgBlat's
+// download carries the PSL block lists for the same reason.
+function pgrRowsToTsv(rows) {
+    var clean = function (v) {
+        return String(v === undefined || v === null ? "" : v).replace(/[\t\r\n]/g, " ");
+    };
+    var head = ["query", "placement", "haplotype", "assembly", "contig", "strand", "start",
+                "end", "span", "identity", "coverage", "mapq", "qStart", "qEnd", "qSize",
+                "matches", "mismatches", "inserted", "deleted", "cigar"];
+    var lines = [head.join("\t")];
+    rows.forEach(function (r) {
+        var placed = r.contig != null, id = pgrIdentityOf(r);
+        lines.push([r.query, r.placement + 1, r.hap, pgrAssemblyLabel(r.db),
+            placed ? r.contig : "", placed ? r.strand : "", placed ? r.start + 1 : "",
+            placed ? r.end : "", placed ? r.end - r.start : "",
+            id == null ? "" : id.toFixed(2), r.coverage == null ? "" : r.coverage.toFixed(2),
+            pgrMapqOf(r), r.qStart == null ? "" : r.qStart + 1,
+            r.qEnd == null ? "" : r.qEnd, r.queryLength, r.matches, r.mismatches,
+            r.inserted, r.deleted, r.cigar].map(clean).join("\t"));
+    });
+    return lines.join("\n") + "\n";
+}
+
+function pgrShowSeq() {
+    var box = document.getElementById("pgrSeqBox");
+    if (box.style.display === "flex") { box.style.display = "none"; return; }
+    var fasta = pgrFasta(pgrPage().querySeqs || []);
+    box.style.display = "flex";
+    box.innerHTML = '<div class="pgrSeqBar"><span class="gbShareMsg">Query sequence (FASTA):</span>' +
+        '<button type="button" class="gbPill" id="pgrSeqCopy">Copy to Clipboard</button>' +
+        '<button type="button" class="gbPill" id="pgrSeqDl">Download</button>' +
+        '<button type="button" class="gbPill" id="pgrSeqClose">Close</button></div>' +
+        '<textarea id="pgrSeqText" class="pgrSeqText" readonly></textarea>';
+    var ta = document.getElementById("pgrSeqText");
+    ta.value = fasta;
+    document.getElementById("pgrSeqCopy").onclick = function () {
+        ta.select();
+        if (navigator.clipboard) { navigator.clipboard.writeText(fasta); }
+        else { document.execCommand("copy"); }
+        this.textContent = "Copied";
+    };
+    document.getElementById("pgrSeqDl").onclick = function () {
+        pgrDownload(fasta, "pangenomeQuery.fa", "text/plain");
+    };
+    document.getElementById("pgrSeqClose").onclick = function () { box.style.display = "none"; };
+}
+
+// ---- page ------------------------------------------------------------------
+
+var pgrSelRank = null;      // rank of the row shown in the detail panel
+
+function pgrSelect(dt, rank) {
+    pgrSelRank = rank;
+    jQuery("#pgrTable tbody tr").removeClass("pgrSel");
+    dt.rows().every(function () {
+        if (this.data().rank === rank) { jQuery(this.node()).addClass("pgrSel"); }
+    });
+    var r = pgrRows[rank];
+    if (r) { document.getElementById("pgrDetail").innerHTML = pgrDetailHtml(r); }
 }
 
 function pgrDraw(queries, rows, note) {
     var multiQuery = queries > 1;
     var multiPlace = rows.some(function (r) { return r.placements > 1; });
     var placed = rows.filter(function (r) { return r.contig != null; }).length;
+    var page = pgrPage();
 
-    var html = "<H2>Pangenome Mapping Results</H2>\n";
-    html += "<P>Your sequence was placed on " + rows.length + " haplotype" +
-            (rows.length === 1 ? "" : "s") + ", listed by identity.";
+    // Page actions go in the gold title bar beside the title, as on hgBlat's
+    // results page (the framework's own #sectTtl).
+    var sectTtl = document.getElementById("sectTtl");
+    if (sectTtl && !document.getElementById("pgrHeadActions")) {
+        var acts = document.createElement("span");
+        acts.id = "pgrHeadActions";
+        acts.className = "pgrHeadActions";
+        acts.innerHTML = (page.backUrl ?
+            '<a class="gbPill" href="' + pgrEsc(page.backUrl) + '" title="Return to the ' +
+            "Genome Browser at your previous location (" + pgrEsc(page.backPos) + ')">' +
+            "Back to Genome Browser</a>" : "") +
+            '<a class="gbPill" href="' + pgrEsc(page.newSearchUrl || pgrSelf) + '" ' +
+            'title="Map another sequence">New search</a>';
+        sectTtl.appendChild(acts);
+    }
+
+    // What is worth saying about these rows, beyond the rows themselves.
+    var notes = [];
+    if (note) { notes.push(note); }
     if (placed < rows.length) {
         // Only when the batch call failed and the graded list stood in for it.
-        html += " " + pgrFmt(rows.length - placed) + " could not be placed, and " +
-                "show only how well they match.";
+        notes.push(pgrFmt(rows.length - placed) + " could not be placed, and show " +
+                   "only how well they match.");
     }
-    html += " <A HREF=\"" + pgrSelf + "\">New search</A>.</P>\n";
-    if (note) { html += "<P>" + note + "</P>\n"; }
     if (pgrPclaiReady()) {
-        // Rows the plot cannot draw get no tick box, so say which and why
-        // rather than leaving a reader to wonder about the gap in the column.
-        var noPlot = pgrRows.filter(function (r) {
-            return r.contig != null && !pgrPclaiSpot(r); })
-            .map(function (r) { return r.hap; });
-        html += '<P><A HREF="#" id="pgrPclaiBtn">Show ancestry plot</A> ' +
-                '<SPAN style="color:#6b6b67">\u2014 where these haplotypes sit in ' +
-                'the pcLAI reference space. Tick a row to pick it out.' +
-                (noPlot.length
-                   ? ' ' + pgrEsc(noPlot.slice(0, 3).join(", ")) +
-                     (noPlot.length > 3 ? " and " + (noPlot.length - 3) + " more" : "") +
-                     (noPlot.length === 1 ? " has" : " have") +
-                     " no pcLAI of their own, so they are not plotted and have no box."
-                   : "") +
-                '</SPAN></P>\n' +
-                '<DIV id="pgrPclaiPlot" style="display:none;margin:0.5em 0"></DIV>\n';
+        var noPlot = rows.filter(function (r) { return r.contig != null && !pgrPclaiSpot(r); })
+                         .map(function (r) { return r.hap; });
+        if (noPlot.length) {
+            notes.push(pgrEsc(noPlot.slice(0, 3).join(", ")) +
+                       (noPlot.length > 3 ? " and " + (noPlot.length - 3) + " more" : "") +
+                       (noPlot.length === 1 ? " has" : " have") + " no pcLAI of " +
+                       (noPlot.length === 1 ? "its" : "their") + " own, so " +
+                       (noPlot.length === 1 ? "it is" : "they are") +
+                       " not in the ancestry plot.");
+        }
     }
-    html += pgrTableHtml(rows, { multiQuery: multiQuery, multiPlace: multiPlace,
-                                 pclai: pgrPclaiReady() });
-    // Worth saying only when it applies, which on a clean query it does not.
-    if (rows.some(function (r) {
-            var q = (r.surjMapq == null) ? r.mapq : r.surjMapq;
-            return q != null && q < 10; })) {
-        html += "<P>A low <B>MAPQ</B> means the mapper could not tell which " +
-                "copy of a duplicated region the sequence came from. Every " +
-                "haplotype is surjected onto whichever copy it chose, so those " +
-                "positions may belong to the other one.</P>\n";
+    if (rows.some(function (r) { var q = pgrMapqOf(r); return q != null && q < 10; })) {
+        notes.push("A low MAPQ, marked in red, means the mapper could not tell which copy " +
+                   "of a duplicated region the sequence came from; those positions may " +
+                   "belong to another copy.");
     }
+
+    var th = ["<th>#</th>"];
+    if (pgrPclaiReady()) { th.push('<th title="Tick to pick a haplotype out in the ancestry plot">Plot</th>'); }
+    if (multiQuery) { th.push("<th>Query</th>"); }
+    if (multiPlace) { th.push("<th>Placement</th>"); }
+    th.push("<th>Open in Genome Browser</th>", "<th>Show</th>", "<th>Haplotype</th>",
+            "<th>Assembly</th>", "<th>Query coverage</th>", "<th>Identity</th>",
+            "<th>MAPQ</th>", "<th>Strand</th>", "<th>Span</th>");
 
     var el = document.getElementById("pgrResults");
-    el.innerHTML = html;
-    if (pgrPclaiReady()) {
-        // Each haplotype is read at its own surjection, so what the plot gets
-        // is one spot per row rather than a locus they all share.
-        // Every plottable row goes to the plot, not a pre-trimmed best few:
-        // the plot does its own filtering and the thresholds are adjustable
-        // there, so trimming here would put rows out of its reach.  The count
-        // is already bounded by pangenome.resultsSurjectTop.
-        pgpInit(pgrRows.filter(pgrPclaiSpot).map(pgrPclaiSpotOf));
-    }
+    el.innerHTML =
+        '<div class="gbCard">' + pgrSummaryStrip(queries, rows, multiPlace) +
+        '<div id="pgrSeqBox" class="gbShareBox" style="display:none"></div>' +
+        (pgrPclaiReady() ? '<div id="pgrPclaiPlot" class="pgrPanel" style="display:none"></div>' : "") +
+        '<div id="pgrDetail" class="pgrDetail">' + pgrHintHtml() + "</div>" +
+        (notes.length ? '<div class="pgrNotes">' + notes.map(function (n) {
+            return '<div class="pgrNote">' + n + "</div>"; }).join("") + "</div>" : "") +
+        '<table id="pgrTable" class="display"><thead><tr>' + th.join("") +
+        "</tr></thead></table></div>";
 
+    var cols = [{ data: "rank", className: "rankCol",
+                  render: function (d, type) { return type === "display" ? d + 1 : d; } }];
+    if (pgrPclaiReady()) {
+        cols.push({ data: null, orderable: false, className: "pickCol",
+                    render: function (d, type, r) { return type === "display" ? pgrPickCell(r) : ""; } });
+    }
+    // Every column that shows text renders it escaped.  DataTables inserts a
+    // column's data as HTML when it has no renderer, and a query name is the
+    // user's own FASTA header - so a name that is markup would become markup in
+    // the page of anyone who opens the results link, which carries the job.
+    if (multiQuery) {
+        cols.push({ data: "query", className: "queryCol",
+                    render: function (d, type) { return type === "display" ? pgrEsc(d) : d; } });
+    }
+    if (multiPlace) {
+        cols.push({ data: "placement", className: "placeCol",
+                    render: function (d, type) { return type === "display" ? d + 1 : d; } });
+    }
+    // Sorts by contig in natural order (numbers zero-padded), then by start, as
+    // hgBlat's position column does; unplaced rows sort last.
+    cols.push({ data: null, className: "posCol",
+        render: function (d, type, r) {
+            if (type === "display") { return pgrPositionCell(r); }
+            if (r.contig == null) { return type === "filter" ? pgrUnplacedText(r) : "￿"; }
+            if (type === "filter") { return r.contig + ":" + (r.start + 1); }
+            return r.contig.replace(/\d+/g, function (n) { return ("0000" + n).slice(-4); }) +
+                   ":" + ("0000000000" + r.start).slice(-10);
+        } });
+    cols.push({ data: null, orderable: false, className: "actionsCol",
+        render: function (d, type, r) { return type === "display" ? pgrActionsCell(r) : ""; } });
+    cols.push({ data: "hap", className: "hapCol",
+        render: function (d, type) { return type === "display" ? pgrEsc(d) : d; } });
+    cols.push({ data: null, className: "asmCol",
+        render: function (d, type, r) {
+            var a = pgrAssemblyLabel(r.db);
+            return type === "display" ? pgrEsc(a) : a;
+        } });
+    cols.push({ data: null, className: "covCol",
+        render: function (d, type, r) {
+            return type === "display" ? pgrCoverageCell(r) : (r.coverage == null ? -1 : r.coverage);
+        } });
+    cols.push({ data: null, className: "identCol",
+        render: function (d, type, r) {
+            var id = pgrIdentityOf(r);
+            return type === "display" ? pgrIdentityCell(r) : (id == null ? -1 : id);
+        } });
+    cols.push({ data: null, className: "mapqCol",
+        render: function (d, type, r) {
+            var q = pgrMapqOf(r);
+            return type === "display" ? pgrMapqCell(r) : (q == null ? -1 : q);
+        } });
+    cols.push({ data: null, className: "strandCol",
+        render: function (d, type, r) { return r.contig == null ? "" : pgrEsc(r.strand || ""); } });
+    cols.push({ data: null, className: "spanCol",
+        render: function (d, type, r) {
+            if (r.contig == null) { return type === "display" ? "" : -1; }
+            var n = r.end - r.start;
+            return type === "display" ? pgrFmt(n) : n;
+        } });
+
+    var dt = jQuery("#pgrTable").DataTable({
+        data: rows,
+        columns: cols,
+        paging: false,
+        info: false,
+        order: [],       // keep the order the rows came in: best identity first
+        language: { search: "", searchPlaceholder: "Filter by haplotype, assembly, contig…" }
+    });
+
+    // One handler for every action on the page, the plot's included: a tick in
+    // the Plot column, and any of the arming links, wherever they are.
     el.onclick = function (ev) {
-        var box = ev.target && ev.target.classList &&
-                  ev.target.classList.contains("pgrPick") ? ev.target : null;
-        if (box) { pgpTogglePick(box.getAttribute("data-hap"), box.checked); return; }
-        var a = ev.target.closest ? ev.target.closest("a[data-rank]") : null;
+        var t = ev.target;
+        if (t && t.classList && t.classList.contains("pgrPick")) {
+            if (typeof pgpTogglePick === "function") { pgpTogglePick(t.getAttribute("data-hap"), t.checked); }
+            return;
+        }
+        var a = t && t.closest ? t.closest("a[data-rank]") : null;
         if (!a) { return; }
         ev.preventDefault();
         var row = pgrRows[parseInt(a.getAttribute("data-rank"), 10)];
         if (row) { pgrAct(row, a.getAttribute("data-act"), a); }
     };
+
+    jQuery("#pgrTable tbody").on("click", "tr", function (ev) {
+        if (jQuery(ev.target).closest("a, input").length) { return; }   // links and boxes do their own thing
+        var d = dt.row(this).data();
+        if (d) { pgrSelect(dt, d.rank); }
+    });
+    // The highlight survives sorting and filtering.
+    dt.on("draw", function () { if (pgrSelRank !== null) { pgrSelect(dt, pgrSelRank); } });
+
+    document.getElementById("pgrTsvBtn").onclick = function () {
+        var shown = dt.rows({ search: "applied", order: "applied" }).data().toArray();
+        var base = multiQuery ? "pangenomeResults" :
+            "pangenome_" + String((rows[0] || {}).query || "query").replace(/[^A-Za-z0-9._-]+/g, "_");
+        pgrDownload(pgrRowsToTsv(shown), base + ".tsv", "text/tab-separated-values");
+    };
+    if (document.getElementById("pgrSeqBtn")) {
+        document.getElementById("pgrSeqBtn").onclick = pgrShowSeq;
+    }
+
+    if (pgrPclaiReady()) {
+        // Each haplotype is read at its own surjection, so what the plot gets is
+        // one spot per row rather than a locus they all share.  Every plottable
+        // row goes, not a pre-trimmed best few: the plot does its own filtering
+        // and the thresholds are adjustable there.
+        pgpInit(pgrRows.filter(pgrPclaiSpot).map(pgrPclaiSpotOf));
+    }
+    if (typeof window.convertTitleTagsToMouseovers === "function") {
+        window.convertTitleTagsToMouseovers();
+    }
+}
+
+// Everything the page says before or instead of a table: a card, with the
+// shared spinner while the results are being fetched.
+function pgrMessage(el, html, busy) {
+    el.innerHTML = '<div class="gbCard pgrMsg">' +
+        (busy ? '<span class="gbSpinner"></span>' : "") + "<div>" + html + "</div></div>";
 }
 
 function pgrStart() {
@@ -698,8 +996,8 @@ function pgrStart() {
     if (!el) { return; }
     var job = pgrJobId();
     if (!job) {
-        el.innerHTML = "<P>No job was named in this link. " +
-            '<A HREF="' + pgrSelf + '">Start a new search</A>.</P>';
+        pgrMessage(el, "No job was named in this link. " +
+            '<a href="' + pgrSelf + '">Start a new search</a>.');
         return;
     }
     // Already been here in this tab - draw it straight back.
@@ -709,16 +1007,16 @@ function pgrStart() {
         pgrDraw(cached.queries, cached.rows, cached.note || null);
         return;
     }
-    el.innerHTML = "<P>Loading results&#8230;</P>";
+    pgrMessage(el, "Loading results&#8230;", true);
 
     pgrPoll(job).then(function (resp) {
         if (!resp || resp.status === "error") {
             throw new Error((resp && resp.error) || "the mapping server returned an error");
         }
         if (resp.status !== "done" && resp.status !== "completed") {
-            el.innerHTML = "<P>This mapping is still running (" +
+            pgrMessage(el, "This mapping is still running (" +
                 pgrEsc(resp.status || "pending") + "). " +
-                '<A HREF="">Reload</A> in a moment.</P>';
+                '<a href="">Reload</a> in a moment.');
             return null;
         }
         // One batch call per placement of per sequence.  Each returns the
@@ -733,8 +1031,8 @@ function pgrStart() {
             });
         });
         if (!jobs.length) {
-            el.innerHTML = "<P>This sequence was not found in any haplotype. " +
-                '<A HREF="' + pgrSelf + '">New search</A>.</P>';
+            pgrMessage(el, "This sequence was not found in any haplotype. " +
+                '<a href="' + pgrSelf + '">New search</a>.');
             return null;
         }
         return pgrPool(jobs.map(function (j) {
@@ -767,11 +1065,11 @@ function pgrStart() {
 
         function finish(rows) {
             if (!rows.length) {
-                el.innerHTML = "<P>This sequence was not found in any haplotype. " +
-                    '<A HREF="' + pgrSelf + '">New search</A>.</P>';
+                pgrMessage(el, "This sequence was not found in any haplotype. " +
+                    '<a href="' + pgrSelf + '">New search</a>.');
                 return;
             }
-            rows.sort(pgrByIdentity);
+            rows.sort(pgrRowOrder((resp.results || []).map(function (res) { return res.name; })));
             rows.forEach(function (r, i) { r.rank = i; });
             pgrRows = rows;
             var note = pgrTruncNote();
@@ -781,10 +1079,10 @@ function pgrStart() {
     }).catch(function (err) {
         // A job that has aged out of the server's cache is the common case, and
         // not a failure worth an alarming message.
-        el.innerHTML = "<P>Could not load these results: " + pgrEsc(err.message) +
-            ".</P><P>Mapping jobs are kept for a limited time, so a link to " +
-            'results may stop working. <A HREF="' + pgrSelf +
-            '">Run the search again</A>.</P>';
+        pgrMessage(el, "Could not load these results: " + pgrEsc(err.message) +
+            ". Mapping jobs are kept for a limited time, so a link to " +
+            'results may stop working. <a href="' + pgrSelf +
+            '">Run the search again</a>.');
     });
 }
 
