@@ -3125,8 +3125,18 @@ if (sameOk(cgiOptionalString("page"), "results"))
     webIncludeResourceFile("hgPangenome.css");
     printf("<div id='pgrResults' class='gbApp'></div>\n");
     injectConfig();
+    /* The job id comes straight from the URL, so it is checked before it goes
+     * anywhere, and an id that is not one becomes empty: the page then says no
+     * job was named.  It used to be echoed into a single-quoted literal through
+     * jsonStringEscape, which escapes double quotes but not single ones, so a
+     * quote in job_id ended the string and the rest ran as script - inside this
+     * page's own nonced block, where the CSP cannot stop it.  It is now also a
+     * double-quoted literal, which is what jsonStringEscape is for, so either
+     * fix alone would hold. */
     char *jobId = cgiUsualString("job_id", "");
-    jsInlineF("var pangenomeJobId = '%s';\n", jsonStringEscape(jobId));
+    if (!pgValidJobId(jobId))
+        jobId = "";
+    jsInlineF("var pangenomeJobId = \"%s\";\n", jsonStringEscape(jobId));
 
     /* What the page needs that the mapping job does not carry: the queries
      * themselves, for "Show Query Sequence", and where its two header buttons go.
