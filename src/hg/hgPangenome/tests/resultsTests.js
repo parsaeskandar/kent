@@ -178,4 +178,63 @@ t.test('a record without one leaves it unset, not zero', function () {
     t.ok(r.qStart === undefined, 'unset');
 });
 
+t.suite('one haplotype on its own');
+t.test('typed names resolve to the PanSN spelling, or to nothing', function () {
+    t.eq(R.pgrHapResolve('hg00097#1'), 'HG00097#1', 'lower case');
+    t.eq(R.pgrHapResolve('  HG00097 1 '), 'HG00097#1', 'space for #');
+    t.eq(R.pgrHapResolve('HG00097.2'), 'HG00097#2', 'dot for #');
+    t.eq(R.pgrHapResolve('chm13#0'), 'CHM13#0', 'CHM13 keeps its case');
+    t.eq(R.pgrHapResolve('grch38#0'), 'GRCh38#0', 'and GRCh38');
+    t.eq(R.pgrHapResolve('HG00097'), null, 'a sample alone is not a haplotype');
+    t.eq(R.pgrHapResolve('XX0#1'), null, 'unknown');
+    t.eq(R.pgrHapResolve(''), null, 'empty');
+});
+t.test('the picker lists every haplotype, references first', function () {
+    var n = R.pgrHapNames();
+    t.eq(n.length, Object.keys(R.window.pangenomeAssemblies).length, 'all of them');
+    t.eq(n[0], 'CHM13#0', 'CHM13 first');
+    t.eq(n[1], 'GRCh38#0', 'then GRCh38');
+    t.ok(n.indexOf('HG00097#1') > 1, 'samples upper-cased');
+});
+t.test('every placement of every query is a place to fill, from the rows alone', function () {
+    R.pgrMapping = null;
+    R.pgrRows = [row({ query: 'a', placements: 3 }), row({ query: 'a', placement: 2, placements: 3 }),
+                 row({ query: 'b', placements: 1 })];
+    var p = R.pgrPlaces().map(function (x) { return x.query + x.index; }).join(',');
+    t.eq(p, 'a0,a1,a2,b0', 'three for a, one for b, none twice');
+    t.ok(R.pgrHasRow('hg00097#2', 'a', 2), 'a row there, matched case-blind');
+    t.notOk(R.pgrHasRow('HG00097#2', 'a', 1), 'none at the placement it is missing from');
+    R.pgrRows = [];
+});
+t.test('a haplotype placed on request carries the mapping figures and its surjection', function () {
+    var res = { name: 'q', query_length: 300, alignments: [{}, {}] };
+    var aln = { score: 50, mapping_quality: 0,
+                haplotypes: { names: ['NA21106#2#JBHIJB010000016.1'], representative: 'CHM13#0#chr6' },
+                haplotype_coverage: [{ haplotype: 'NA21106#2', coverage: 97.36, identity: 96.04 }] };
+    var r = R.pgrRowForHap(res, aln, 1, 'NA21106#2', { haplotype: 'NA21106#2', surjection: {
+        status: 'ok', target: 'NA21106#2#JBHIJB010000016.1#6631428', position: 100, strand: '-',
+        cigar: '296M7S', mapping_quality: 0, identity: 0.976351, matches: 289 } });
+    t.ok(r.extra, 'kept apart from the best-few rows');
+    t.eq(r.placement, 1, 'placement');
+    t.eq(r.placements, 2, 'of two');
+    t.eq(r.coverage, 97.36, "the mapping's coverage");
+    t.ok(r.isCarrier, 'a carrier, by sample#phase');
+    t.eq(r.contig, 'JBHIJB010000016.1', 'contig without the offset');
+    t.eq(r.start, 6631528, 'fragment offset added');
+    t.eq(r.end, 6631824, 'end from the reference bases the CIGAR consumes');
+    t.eq(r.db, 'GCA_042076865.1', 'its assembly');
+});
+t.test('a haplotype with no path there reads "not present"', function () {
+    var r = R.pgrRowForHap({ name: 'q', alignments: [{}] }, {}, 0, 'XX00000#1',
+        { surjection: { status: 'surjection_failed', detail: 'no_anchors (unknown_path)' } });
+    t.eq(r.placeStatus, 'no_anchors', 'status');
+    t.contains(R.pgrPositionCell(r), 'not present', 'shown so');
+    t.eq(r.coverage, null, 'no coverage to show');
+});
+t.test('a row placed on request gets no number and no plot box', function () {
+    var R2 = loadResults({ pangenomePclai: true, pgpInit: function () {} });
+    t.eq(R2.pgrPickCell(row({ extra: true })), '', 'no box');
+    t.contains(R2.pgrPickCell(row()), 'pgrPick', 'a table row keeps its box');
+});
+
 process.exit(t.report());

@@ -320,6 +320,18 @@
  * table, as hgBlat opens its query-sequence and share panels. */
 .pgrPanel { padding:14px 18px; border-bottom:1px solid var(--line); background:var(--panel); overflow-x:auto; }
 .pgrNotes { padding:2px 18px 6px; }
+/* "Find a Haplotype" and the bar that says the table is narrowed to one.  Both
+ * are toggled with the hidden attribute, which .gbShareBox's display:flex would
+ * otherwise win over. */
+#pgrHapBox[hidden], .pgrFocusBar[hidden] { display:none; }
+.pgrHapInput { width:16em; max-width:100%; font-size:14px; padding:5px 8px;
+    border:1px solid var(--btnLine); border-radius:0; background:#fff; color:var(--ink); }
+.pgrHapErr { font-size:13px; color:#8b1a1a; }
+.pgrFocusBar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin:8px 18px 4px;
+    padding:9px 12px; background:var(--sel); box-shadow:inset 3px 0 0 var(--navy);
+    font-size:14px; color:var(--ink); }
+.pgrFocusBar > span { flex:1 1 320px; }
+.pgrFocusBar .gbSpinner { flex:0 0 auto; }
 .pgrNote { font-size:13px; color:var(--muted); line-height:1.5; margin-top:4px; }
 
 #pgrTable { font-size:13px; width:100%; border-collapse:collapse; }
