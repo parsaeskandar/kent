@@ -607,14 +607,14 @@ section "alignments per sequence (server-side ceiling)"
 
 : > "$REC"
 out=$(cgi_post_cmd "$CONF" map \
-  '{"sequences":[{"name":"a","sequence":"ACGT"}],"options":{"max_multimaps":11}}')
+  '{"sequences":[{"name":"a","sequence":"ACGT"}],"options":{"max_multimaps":4}}')
 check_contains "more than the ceiling rejected" "$out" \
-    "too many alignments per sequence: 11 (limit is 10)"
+    "too many alignments per sequence: 4 (limit is 3)"
 check_eq "and not forwarded" "$(mock_count)" "0"
 
 : > "$REC"
 out=$(cgi_post_cmd "$CONF" map \
-  '{"sequences":[{"name":"a","sequence":"ACGT"}],"options":{"max_multimaps":10}}')
+  '{"sequences":[{"name":"a","sequence":"ACGT"}],"options":{"max_multimaps":3}}')
 check_eq "exactly the ceiling accepted (boundary)" "$(mock_count)" "1"
 
 section "alignTrack: a hostile query name cannot corrupt the files"

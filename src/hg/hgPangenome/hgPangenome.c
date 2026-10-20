@@ -112,8 +112,9 @@
  * kept in sync with the middleware's own limits.
  *   pangenome.maxSequences   max sequences accepted per submit; default 50
  *   pangenome.maxMultimaps   default alignments per sequence; default 1
- *   pangenome.maxMultimapsLimit  most that may be asked for; default 10, which
- *                            is the mapping server's own ceiling.  Enforced
+ *   pangenome.maxMultimapsLimit  most that may be asked for; default 3, which
+ *                            is the mapping server's own ceiling (it returns
+ *                            at most 3 even when asked for more).  Enforced
  *                            here as well as in the page, since the browser's
  *                            max= is bypassable.
  */
@@ -629,7 +630,7 @@ if (sameString(cmd, "map"))
                       (unsigned long)strlen(payload), maxBytes);
         return;
         }
-    int maxMultimaps = atoi(cfgOr("pangenome.maxMultimapsLimit", "10"));
+    int maxMultimaps = atoi(cfgOr("pangenome.maxMultimapsLimit", "3"));
     char *bad = pgValidatePayload(payload, maxSeqs, maxSeqLen, maxMultimaps);
     if (bad != NULL)
         {
@@ -3227,7 +3228,7 @@ if (issueBotWarning)
 webIncludeResourceFile("gbModern.css");   // shared house-style components (.gbPill, .gbCard, ...)
 webIncludeResourceFile("hgPangenome.css");
 
-drawForm(atoi(cfgOr("pangenome.maxMultimapsLimit", "10")));
+drawForm(atoi(cfgOr("pangenome.maxMultimapsLimit", "3")));
 
 /* Config first (inline, runs before DOMContentLoaded), then the app + mock. */
 injectConfig();
