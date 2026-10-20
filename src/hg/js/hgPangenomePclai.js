@@ -838,6 +838,9 @@ function pgpOpen(spots) {
 // checkbox column out entirely.
 function pgpInit(spots) {
     if (!spots || !spots.length) { return false; }
+    // Called again when the table gains placements; what was read for the
+    // old rows does not cover the new ones.
+    pgpData = null;
     pgpSpots = spots;
     var btn = pgpEl("pgrPclaiBtn");
     if (btn) {

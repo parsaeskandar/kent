@@ -1115,9 +1115,11 @@ var surjectBoxByName = {};   // card name -> its "Position on assembly" section
 var pollTimer = null;
 
 function collectOptions() {
-    var mm = parseInt($("pgMaxMultimaps").value, 10);
     var opts = {
-        max_multimaps: (mm && mm > 0) ? mm : MAX_MULTIMAPS,
+        // Not a choice on the form: every job asks for as many as the install
+        // allows, and the results page shows the best placement first and the
+        // others only when they are asked for.
+        max_multimaps: MAX_MULTIMAPS,
         // Always on: there is no useful result without a position.
         surject: true,
         // Null means the representative assembly.  The user chooses a different
@@ -1276,7 +1278,7 @@ function onClear() {
 // style from gbModern.css (.gbSection bars, .gbPill buttons, .gbCard sidebar,
 // the busy overlay) and this tool's own layout from hgPangenome.css.  The
 // controls keep the ids the rest of this file has always used - pgSeq, pgFile,
-// pgSubmit, pgClear, pgMaxMultimaps - so nothing below had to change to work
+// pgSubmit, pgClear - so nothing below had to change to work
 // with them, and a page with no form data is left exactly as it was.
 
 // The Genome Browser's standard info icon, as hgBlat.js copies it from
@@ -1409,11 +1411,6 @@ function formBuild() {
     var box = $("pgFormBox");
     if (!fd || !box) return;
 
-    var opts = [];
-    for (var i = 1; i <= (fd.maxMultimapsLimit || 1); i++)
-        opts.push('<option value="' + i + '"' + (i === MAX_MULTIMAPS ? " selected" : "") +
-                  ">" + i + "</option>");
-
     box.innerHTML =
         '<div class="pgFormGrid"><div>' +
 
@@ -1421,13 +1418,10 @@ function formBuild() {
         '<div class="pgRow">' +
             '<div class="pgField pgGraphSlot"><span>Pangenome ' +
                 infoIcon("The pangenome graph your sequence is aligned to. Every " +
-                         "haplotype in it is searched at once.") + '</span>' +
+                         "haplotype in it is searched at once. If a sequence aligns " +
+                         "to more than one place, the results show the best one, and " +
+                         "the others are a click away.") + '</span>' +
                 '<div class="pgGraphName">' + escHtml(fd.graphLabel) + '</div></div>' +
-            '<label class="pgField"><span>Alignments per sequence ' +
-                infoIcon("How many places in the graph to report for each sequence. " +
-                         "A sequence from a repeat can align well in several, and the " +
-                         "results page then shows each placement separately.") +
-                '</span><select id="pgMaxMultimaps">' + opts.join("") + '</select></label>' +
         '</div>' +
 
         '<div class="gbSection">Query sequence</div>' +

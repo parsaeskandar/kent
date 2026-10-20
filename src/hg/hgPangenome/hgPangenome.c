@@ -111,7 +111,11 @@
  * enforced here server-side (the browser's checks are bypassable) and should be
  * kept in sync with the middleware's own limits.
  *   pangenome.maxSequences   max sequences accepted per submit; default 50
- *   pangenome.maxMultimaps   default alignments per sequence; default 1
+ *   pangenome.maxMultimaps   alignments asked for per sequence; default (and
+ *                            at most) maxMultimapsLimit.  The form offers no
+ *                            choice: every job asks for this many, and the
+ *                            results page shows the best placement first and
+ *                            the others when they are asked for.
  *   pangenome.maxMultimapsLimit  most that may be asked for; default 3, which
  *                            is the mapping server's own ceiling (it returns
  *                            at most 3 even when asked for more).  Enforced
@@ -2864,7 +2868,12 @@ boolean useMock = sameString(cfgOr("pangenome.useMock", useMockDef), "on");
 char *transport = cfgOr("pangenome.transport", "job");
 int pollMs = atoi(cfgOr("pangenome.pollIntervalMs", "1500"));
 int maxSeq = atoi(cfgOr("pangenome.maxSequences", "10"));
-int maxMultimaps = atoi(cfgOr("pangenome.maxMultimaps", "1"));
+int maxMultimapsLimit = atoi(cfgOr("pangenome.maxMultimapsLimit", "3"));
+int maxMultimaps = atoi(cfgOr("pangenome.maxMultimaps", cfgOr("pangenome.maxMultimapsLimit", "3")));
+if (maxMultimaps > maxMultimapsLimit)
+    maxMultimaps = maxMultimapsLimit;
+if (maxMultimaps < 1)
+    maxMultimaps = 1;
 
 /* apiBase and transport are admin-controlled; still route them through the
  * JS-string escaper to be safe. */
@@ -2923,7 +2932,7 @@ jsInlineF("window.pangenomeConfig = {\n"
           sameString(cfgOr("pangenome.resultsPage", "on"), "on") ? "true" : "false");
 }
 
-static void drawForm(int maxMultimapsLimit)
+static void drawForm()
 /* The search form, built in the browser the way hgBlat's new form is built by
  * hgBlat.js: this emits an empty .gbApp container and the form's settings as an
  * inline hgPangenomeFormData object, and hgPangenome.js lays the controls out
@@ -2948,7 +2957,6 @@ jsonWriteObjectStart(jw, NULL);
 /* The per-sequence length the server enforces, so the character counter can
  * say a sequence is too long before it is submitted rather than after. */
 jsonWriteNumber(jw, "maxSeqLen", atol(cfgOr("pangenome.maxSeqLen", "100000")));
-jsonWriteNumber(jw, "maxMultimapsLimit", maxMultimapsLimit);
 /* What is being searched, named on the form so that nobody has to guess which
  * graph a result came from.  A setting, because the graph is a deployment
  * choice and changes with each HPRC release. */
@@ -3228,7 +3236,7 @@ if (issueBotWarning)
 webIncludeResourceFile("gbModern.css");   // shared house-style components (.gbPill, .gbCard, ...)
 webIncludeResourceFile("hgPangenome.css");
 
-drawForm(atoi(cfgOr("pangenome.maxMultimapsLimit", "3")));
+drawForm();
 
 /* Config first (inline, runs before DOMContentLoaded), then the app + mock. */
 injectConfig();

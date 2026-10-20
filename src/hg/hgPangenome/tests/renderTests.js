@@ -17,7 +17,7 @@
 var t = require('./testLib.js');
 var loader = require('./loadClient.js');
 
-var PAGE_IDS = ['pgResults', 'pgStatus', 'pgSeq', 'pgMaxMultimaps',
+var PAGE_IDS = ['pgResults', 'pgStatus', 'pgSeq',
                 'pgSubmit', 'pgClear', 'pgFile'];
 
 // ---------------------------------------------------------------- fixtures

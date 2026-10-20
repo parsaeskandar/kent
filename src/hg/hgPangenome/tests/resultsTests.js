@@ -237,4 +237,57 @@ t.test('a row placed on request gets no number and no plot box', function () {
     t.contains(R2.pgrPickCell(row()), 'pgrPick', 'a table row keeps its box');
 });
 
+t.suite('the other placements');
+function setPlaces(R, list, rows, queries) {
+    R.pgrPlaceList = list.map(function (x) { return { query: x[0], index: x[1] }; });
+    R.pgrRows = rows;
+    R.pgrQueryCount = queries;
+    R.pgrQueryNames = ['a', 'b'];
+    R.pgrAllPlaces = false; R.pgrMoreBusy = false; R.pgrMoreErr = null;
+}
+t.test('the table numbers its own rows first, those aligned on request after, with no gaps', function () {
+    setPlaces(R, [['a', 0], ['a', 1]], [
+        row({ query: 'a', placement: 1, placements: 2, identity: 99, hap: 'X#1' }),
+        row({ query: 'a', placement: 0, placements: 2, identity: 98, hap: 'Y#1', extra: true }),
+        row({ query: 'a', placement: 0, placements: 2, identity: 97, hap: 'Z#1' })], 1);
+    R.pgrRerank();
+    t.eq(R.pgrRows.map(function (r) { return r.hap + ':' + r.rank; }).join(' '),
+         'Z#1:0 X#1:1 Y#1:2', 'best placement first, the extra last');
+});
+t.test('one sequence with other places: say how many, and that only the best is shown', function () {
+    setPlaces(R, [['a', 0], ['a', 1], ['a', 2]], [row({ query: 'a', placements: 3, mapq: 60 })], 1);
+    var h = R.pgrMoreHtml();
+    t.contains(h, 'also aligns to 2 other places', 'count');
+    t.contains(h, 'shows only the best one', 'what the table is');
+    t.contains(h, 'data-pgr="more"', 'the button');
+});
+t.test('a low MAPQ at the best placement says the others may be just as likely', function () {
+    setPlaces(R, [['a', 0], ['a', 1]], [row({ query: 'a', placements: 2, mapq: 0 })], 1);
+    var h = R.pgrMoreHtml();
+    t.contains(h, 'other place.', 'singular');
+    t.contains(h, 'could not tell it apart', 'why it matters');
+    t.contains(h, 'MAPQ 0', 'the figure');
+});
+t.test('several sequences: how many have other places, and how many in all', function () {
+    setPlaces(R, [['a', 0], ['a', 1], ['a', 2], ['b', 0]],
+              [row({ query: 'a', placements: 3, mapq: 3 }), row({ query: 'b', mapq: 60 })], 2);
+    var h = R.pgrMoreHtml();
+    t.contains(h, '1 of your sequences also aligns to other places (2 in all)', 'counts');
+    t.contains(h, 'For 1 of them the mapper could not tell', 'low MAPQ named');
+});
+t.test('no other places: nothing to offer', function () {
+    setPlaces(R, [['a', 0]], [row({ query: 'a' })], 1);
+    t.eq(R.pgrMoreHtml(), '', 'empty');
+});
+t.test('once shown, the bar offers the best only; while loading, it says so', function () {
+    setPlaces(R, [['a', 0], ['a', 1]], [row({ query: 'a', placements: 2 })], 1);
+    R.pgrAllPlaces = true;
+    t.contains(R.pgrMoreHtml(), 'data-pgr="bestonly"', 'best only');
+    R.pgrAllPlaces = false; R.pgrMoreBusy = true;
+    t.contains(R.pgrMoreHtml(), 'gbSpinner', 'spinner');
+    R.pgrMoreBusy = false; R.pgrMoreErr = 'gone <b>';
+    t.contains(R.pgrMoreHtml(), 'Could not load them: gone &lt;b&gt;', 'an error, escaped');
+    setPlaces(R, [], [], 0); R.pgrPlaceList = null;
+});
+
 process.exit(t.report());
