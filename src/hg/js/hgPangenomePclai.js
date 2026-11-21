@@ -525,7 +525,7 @@ function pgpTipHtml(m) {
         var names = m.group.members.slice(0, 4).map(function (x) {
             return pg.esc(x.hap); }).join(", ");
         var more = m.group.members.length - 4;
-        return "<b>" + m.group.members.length + " haplotypes here</b><br>" +
+        return "<b>" + m.group.members.length + " assemblies here</b><br>" +
                names + (more > 0 ? ", and " + more + " more" : "") +
                '<br><span style="color:#5b6572">' + coord +
                " \u2014 click to list them</span>";
@@ -638,7 +638,7 @@ function pgpDraw() {
         return;
     }
     if (!pts.length) {
-        host.innerHTML = "<p>None of these " + pg.esc(pgpData.asked) + " haplotypes " +
+        host.innerHTML = "<p>None of these " + pg.esc(pgpData.asked) + " assemblies " +
             "has a pcLAI window where the query matched it. pcLAI windows " +
             "follow SNPs, so regions without them - centromeres and other " +
             "repeat-rich sequence - are not covered.</p>";
@@ -816,7 +816,7 @@ function pgpDraw() {
     };
     var hitInk = 'rgb(' + pgpLabRgb(sp.cx, sp.cy).join(",") + ')';
     o.push('<circle cx="' + (lx + 5) + '" cy="' + ly + '" r="1.9" fill="#2b333d" opacity="0.55"/>');
-    keyText(lx + 18, ly + 3.5, "a reference haplotype");
+    keyText(lx + 18, ly + 3.5, "reference panel");
     o.push('<circle cx="' + (lx + 5) + '" cy="' + (ly + 22) + '" r="5" fill="' + hitInk +
            '" stroke="#1e2833" stroke-width="1.6"/>');
     keyText(lx + 18, ly + 25.5, pgpLegend.hit);
@@ -939,7 +939,7 @@ function pgpDetailHtml() {
     if (pgpSelected === null && pgpSelGroup !== null && pgpSelGroup.length > 1) {
         var g = ['<div id="pgpDetail" class="pgpDetail">'];
         g.push('<div class="dhead"><span class="loc">' + pgpSelGroup.length +
-               ' haplotypes at this point</span><span class="lab">They sit within ' +
+               ' assemblies at this point</span><span class="lab">They sit within ' +
                PGP_GROUP_R + ' units of one another, closer than one mark is wide. ' +
                'Pick one for its details.</span></div>');
         g.push('<div class="pgpGroupList">');

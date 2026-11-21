@@ -503,7 +503,7 @@ function pgrPositionCell(r) {
     }
     var rank = ' data-rank="' + r.rank + '"';
     return '<a href="#"' + rank + ' data-act="browser" ' +
-           'title="Open the Genome Browser on this haplotype, with your sequence drawn on it">' +
+           'title="Open the Genome Browser on this assembly, with your sequence drawn on it">' +
            pg.esc(r.contig) + ":" + pg.commas(r.start + 1) + "-" + pg.commas(r.end) + "</a>" +
            ' <a class="pgrNewTab" href="#"' + rank + ' data-act="newtab" ' +
            'title="Open in a new tab" aria-label="Open in a new tab"></a>';
@@ -512,7 +512,7 @@ function pgrPositionCell(r) {
 function pgrActionsCell(r) {
     if (r.contig == null) { return ""; }
     return '<a href="#" data-rank="' + r.rank + '" data-act="details" ' +
-           'title="Show the base-by-base alignment of your sequence to this haplotype">' +
+           'title="Show the base-by-base alignment of your sequence to this assembly">' +
            "Alignment</a>";
 }
 
@@ -597,7 +597,7 @@ function pgrPickCell(r) {
     if (!pgrPclaiSpot(r) || r.extra) { return ""; }
     var on = window.pangenomePlot && window.pangenomePlot.isPicked(r.hap);
     return '<input type="checkbox" class="pgrPick" data-hap="' + pg.esc(r.hap) + '"' +
-           (on ? " checked" : "") + ' title="Pick this haplotype out in the ancestry plot">';
+           (on ? " checked" : "") + ' title="Pick this assembly out in the ancestry plot">';
 }
 
 // ---- opening a row in the browser -----------------------------------------
@@ -784,10 +784,10 @@ function pgrAnnotControl() {
         return '<option value="' + pg.esc(r.hap) + '"' + (r.hap === cur ? " selected" : "") +
                ">" + pg.esc(r.label) + "</option>";
     }).concat('<option value="none"' + (cur ? "" : " selected") + ">none</option>");
-    return '<div class="gbStat pgrAnnotStat"><span class="k" title="When you open a ' +
-           "haplotype in the Genome Browser, the tracks you have turned on in this " +
+    return '<div class="gbStat pgrAnnotStat"><span class="k" title="When you open an ' +
+           "assembly in the Genome Browser, the tracks you have turned on in this " +
            "reference come with it, carried across through the pangenome graph. " +
-           'Choose none to open the haplotype with only its own tracks.">' +
+           'Choose none to open the assembly with only its own tracks.">' +
            "Annotations from</span>" +
            '<span class="v"><select id="pgrAnnotRef">' + opts.join("") + "</select></span></div>";
 }
@@ -1126,7 +1126,7 @@ function pgrPlaceAll(p) {
                 r.placeRetry = true;
             }
         });
-        pgrFail("Could not place the rest of the haplotypes: " + err.message + ".");
+        pgrFail("Could not place the rest of the assemblies: " + err.message + ".");
     }).then(function () {
         pgrFullBusy[key] = null;
         pgrCacheWrite(pgrJobId());
@@ -1282,7 +1282,7 @@ function pgrCovFloor() {
 }
 
 function pgrCovControl() {
-    return '<div class="gbStat"><span class="k" title="Show a haplotype at a hit only when ' +
+    return '<div class="gbStat"><span class="k" title="Show an assembly at a hit only when ' +
            "at least this much of your sequence aligned to it there. This keeps short " +
            "fragments, such as pieces of pseudogenes, out of the table. A sequence none " +
            'of whose hits reach it is shown in full.">Min. coverage</span>' +
@@ -1483,7 +1483,7 @@ function pgrSummaryStrip(queries, rows, multiPlace) {
                 pgrStat("Length", pg.commas(r0.queryLength || 0) + " bp");
         if (multiPlace) { stats += div + pgrStat("Hits", pg.commas(r0.hits)); }
     }
-    stats += div + pgrStat("Haplotypes", '<span id="pgrHapCount">' + pg.commas(pgrHapsShown(rows)) + "</span>") +
+    stats += div + pgrStat("Assemblies", '<span id="pgrHapCount">' + pg.commas(pgrHapsShown(rows)) + "</span>") +
              div + pgrCovControl();
     var annot = pgrAnnotControl();
     if (annot) { stats += div + annot; }
@@ -1500,7 +1500,7 @@ function pgrSummaryStrip(queries, rows, multiPlace) {
     if (pgrPclaiReady()) {
         // The plot's init() wires this button and keeps its label.
         acts += '<button type="button" class="gbPill" id="pgrPclaiBtn" title="Where these ' +
-                'haplotypes sit in the pcLAI reference space">Show ancestry plot</button>';
+                'assemblies sit in the pcLAI reference space">Show ancestry plot</button>';
     }
     return '<div class="gbStrip">' + stats + '<span class="gbStripActions">' + acts + "</span></div>";
 }
@@ -1520,18 +1520,18 @@ function pgrDetailHtml(r) {
                 '<span style="color:' + pgrIdColor(id) + '">' + id.toFixed(1) + "%</span>",
                 "Percent identity of the aligned bases."),
         pgrTile("Coverage", r.coverage == null ? "—" : r.coverage.toFixed(1) + "%",
-                "Share of the query's bases that aligned to this haplotype."),
+                "Share of the query's bases that aligned to this assembly."),
         pgrTile("MAPQ", q == null ? "—" : pgrMapqCell(r),
                 "Mapping quality: how sure the mapper is that it chose the right copy " +
                 "of a repeated region. 60 is certain; under 10 is doubtful."),
-        pgrTile("Strand", pg.esc(r.strand || "—"), "Strand of this haplotype the sequence matched."),
+        pgrTile("Strand", pg.esc(r.strand || "—"), "Strand of this assembly the sequence matched."),
         pgrTile("Matches", r.matches == null ? "—" : pg.commas(r.matches), "Bases that match."),
         pgrTile("Mismatches", r.mismatches == null ? "—" : pg.commas(r.mismatches),
-                "Bases that differ between your sequence and this haplotype."),
+                "Bases that differ between your sequence and this assembly."),
         pgrTile("Inserted", r.inserted == null ? "—" : pg.commas(r.inserted),
-                "Bases in your sequence that are not in this haplotype."),
+                "Bases in your sequence that are not in this assembly."),
         pgrTile("Deleted", r.deleted == null ? "—" : pg.commas(r.deleted),
-                "Bases in this haplotype that are not in your sequence.")
+                "Bases in this assembly that are not in your sequence.")
     ];
     if (r.qStart != null) {
         tiles.push(pgrTile("Q span", pg.commas(r.qStart + 1) + "-" + pg.commas(r.qEnd),
@@ -1560,7 +1560,7 @@ function pgrDetailHtml(r) {
 
 function pgrHintHtml() {
     return '<div class="pgrSelectHint">Click a row below to see how your sequence ' +
-           "aligned to that haplotype. Click its position to open the Genome Browser " +
+           "aligned to that assembly. Click its position to open the Genome Browser " +
            "with your sequence drawn on it.</div>";
 }
 
@@ -1806,9 +1806,9 @@ function pgrDraw(queries, allRows) {
     // hgBlat's columns, with the two it has no need for - which sample, and
     // which of its haplotypes - in front.
     var th = ["<th>#</th>"];
-    if (pgrPclaiReady()) { th.push('<th title="Tick to pick a haplotype out in the ancestry plot">Plot</th>'); }
+    if (pgrPclaiReady()) { th.push('<th title="Tick to pick an assembly out in the ancestry plot">Plot</th>'); }
     th.push("<th>Sample</th>",
-            '<th title="Which of the sample\'s two haplotypes; 0 for a reference">Haplotype</th>',
+            '<th title="Which of the sample\'s two haplotypes, one assembly each; 0 for a reference">Haplotype</th>',
             '<th title="The sample\'s population, as the HPRC describes it">Population</th>');
     if (multiQuery) { th.push("<th>Query</th>"); }
     if (multiPlace) {
@@ -2199,8 +2199,8 @@ function pgrStart() {
         if (!jobs.length) {
             // Nothing to list: say why, where the mapper gave a reason.
             var failed = pgrLeftOut.filter(function (x) { return x.error !== null; });
-            var none = pgrQueryCount > 1 ? "None of these sequences was found in any haplotype."
-                                         : "This sequence was not found in any haplotype.";
+            var none = pgrQueryCount > 1 ? "None of these sequences was found in any assembly."
+                                         : "This sequence was not found in any assembly.";
             pgrMessage(el, (failed.length ? pgrLeftOutNotes(failed, pgrQueryCount).join(" ") : none) +
                 ' <a href="' + pg.esc(pgrSelf) + '">New search</a>.');
             return null;
@@ -2219,7 +2219,7 @@ function pgrStart() {
 
         function finish(rows) {
             if (!rows.length) {
-                pgrMessage(el, "This sequence was not found in any haplotype. " +
+                pgrMessage(el, "This sequence was not found in any assembly. " +
                     '<a href="' + pg.esc(pgrSelf) + '">New search</a>.');
                 return;
             }

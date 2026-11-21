@@ -439,7 +439,7 @@ jsonWriteString(jw, "graphLabel", pgGraphLabel());
 jsonWriteString(jw, "exampleUrl", "../goldenPath/help/pangenomeExample.fa");
 jsonWriteString(jw, "exampleLabel", "Load example");
 jsonWriteString(jw, "exampleTitle", "Fill the box with an example query: "
-    "20 kb of the human MCM6 gene, which every haplotype in the graph carries.");
+    "20 kb of the human MCM6 gene, which every assembly in the graph carries.");
 jsonWriteStringf(jw, "blatUrl", "hgBlat?%s=%s", cartSessionVarName(), cartSessionId(cart));
 jsonWriteStringf(jw, "panConvertUrl", "hgPangenome?page=convert&%s=%s",
                  cartSessionVarName(), cartSessionId(cart));
@@ -462,7 +462,7 @@ char *position = cartUsualString(cart, "position", "");
 
 printf("<form id='pgcForm' onsubmit='return false;'>\n");
 printf("<h2>PanConvert</h2>\n");
-printf("<p>Convert a region to other haplotypes through the pangenome graph.</p>\n");
+printf("<p>Convert a region to other assemblies through the pangenome graph.</p>\n");
 
 printf("<table class='hgPangenomeTable pgcTable' border=0>\n");
 
@@ -496,7 +496,7 @@ printf("</table>\n");
  * any of them from its table.  Two boxes with an "or" between them, so the
  * second is not read as one more button of the first. */
 printf("<div class='pgcPath'>\n");
-printf("<div class='pgcPathHead'>I know which haplotypes I want</div>\n");
+printf("<div class='pgcPathHead'>I know which assemblies I want</div>\n");
 printf("<table class='hgPangenomeTable pgcTable' border=0>\n");
 
 /* ---- destination ---- */
@@ -504,7 +504,7 @@ printf("<tr><td><label for='pgcFilter'><b>Target assemblies</b></label></td>\n")
 printf("<td>\n");
 printf("<div class='pgcFind'>");
 printf("<input type='search' id='pgcFilter' size='30' "
-       "placeholder='Search haplotypes or populations'>\n");
+       "placeholder='Search assemblies or populations'>\n");
 /* A checkbox, not a pair of buttons: it says both what it does and whether it
  * is on. */
 printf("<label for='pgcReachableOnly' class='pgcToggle' title='Ask the graph "
@@ -561,11 +561,11 @@ printf("<div class='pgcOr'><span>or</span></div>\n");
 
 /* Every haplotype in one request, on a page of its own (page=liftAll). */
 printf("<div class='pgcPath'>\n");
-printf("<div class='pgcPathHead'>I want to compare haplotypes</div>\n");
+printf("<div class='pgcPathHead'>I want to compare assemblies</div>\n");
 printf("<div class='pgcPathText'>See how this region carries over to every "
-       "haplotype, then open any of them.</div>\n");
-printf("<input type='button' id='pgcAllBtn' value='View all haplotypes' "
-       "title='Translate this region to every haplotype in the pangenome and "
+       "assembly, then open any of them.</div>\n");
+printf("<input type='button' id='pgcAllBtn' value='View all assemblies' "
+       "title='Translate this region to every assembly in the pangenome and "
        "summarize how it carries over'>\n");
 printf("</div>\n");
 printf("</form>\n");
@@ -734,7 +734,7 @@ static void pageLiftAll()
  * and the interval - so it can be reloaded and handed on; cmd=liftoverAll
  * checks them again. */
 {
-pageStart("PanConvert — All haplotypes");
+pageStart("PanConvert — All assemblies");
 jsIncludeDataTablesLibs();
 webIncludeResourceFile("gbModern.css");
 webIncludeResourceFile("hgPangenome.css");

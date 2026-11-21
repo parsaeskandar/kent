@@ -163,7 +163,7 @@ await t.test('the search matches a name or a population, and keeps the choice', 
     api.fillTargets('gbr');
     t.eq(boxes().join(','), 'HG00097#2:on', 'by code');
     api.fillTargets('zzz');
-    t.contains(el.pgcHaps.textContent, 'No haplotype matches', 'says so when nothing does');
+    t.contains(el.pgcHaps.textContent, 'No assembly matches', 'says so when nothing does');
     t.eq(api.selectedTargets().join(','), 'HG00097#2', 'still chosen');
     api.fillTargets('');
 });
@@ -1339,7 +1339,7 @@ await t.test("a single place is a position link, with the share of the region it
     t.contains(s, 'Coverage', 'share of the region, as a column');
     t.contains(s, '83.3%', 'its figure: 20 of 24 bases');
     t.contains(s, 'Found on1 of 1', 'the strip counts the targets');
-    t.contains(s, 'View all haplotypes', 'and offers every haplotype');
+    t.contains(s, 'View all assemblies', 'and offers every haplotype');
     t.notOk(/Filter rows|By population/.test(s),
             'without the whole-pangenome statistics and filters');
     var l = links(single);

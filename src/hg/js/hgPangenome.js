@@ -413,14 +413,14 @@ function formSidebar(fd) {
     return '<div>' +
         '<div class="gbCard"><h3>Similar tools</h3>' +
         '<div><a href="' + pg.esc(fd.blatUrl) + '">BLAT</a> - finds a sequence ' +
-        'in one assembly, rather than across every haplotype at once.</div>' +
+        'in one assembly, rather than across every assembly at once.</div>' +
         '<div><a href="' + pg.esc(fd.panConvertUrl) + '">PanConvert</a> - for a region ' +
         'you already have coordinates for: translates it from one assembly to ' +
         'another through the graph.</div>' +
         '</div>' +
         '<div class="gbCard"><h3>About PanAlign</h3>' +
         '<div>Your sequence is aligned to the pangenome graph, which holds every ' +
-        'haplotype in it at once. The results list the haplotypes that carry it, ' +
+        'assembly in it at once. The results list the assemblies that carry it, ' +
         'with how well it matches each and where it lands, and open any of them ' +
         'in the Genome Browser.</div>' +
         '<div>The graph is built by the <a target="_blank" ' +
@@ -532,7 +532,7 @@ function formBuild() {
         '<div class="pgRow">' +
             '<div class="pgField pgGraphSlot"><span>Pangenome ' +
                 infoIcon("The pangenome graph your sequence is aligned to. Every " +
-                         "haplotype in it is searched at once. If a sequence aligns " +
+                         "assembly in it is searched at once. If a sequence aligns " +
                          "to more than one place, the results show the best one, and " +
                          "the others are a click away.") + '</span>' +
                 '<div class="pgGraphName">' + pg.esc(fd.graphLabel) + '</div></div>' +
@@ -568,7 +568,7 @@ function formBuild() {
         '<div id="pgStatusSlot"></div>' +
         '<div class="pgActions">' +
             '<input type="button" class="gbPill primary" id="pgSubmit" value="Submit" ' +
-            'title="Align the sequences to the pangenome and list the haplotypes that carry them">' +
+            'title="Align the sequences to the pangenome and list the assemblies that carry them">' +
             '<input type="button" class="gbPill" id="pgClear" value="Clear" ' +
             'title="Empty the sequence box">' +
         '</div>' +

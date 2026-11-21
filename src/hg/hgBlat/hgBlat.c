@@ -2951,6 +2951,11 @@ jsonWriteString(jw, "exampleTitle", "Fill the box with an example query: "
 jsonWriteString(jw, "pcrUrlTpl", "../cgi-bin/hgPcr?db=$DB$");
 jsonWriteStringf(jw, "oligoMatchUrlTpl", "hgTrackUi?%s=%s&db=$DB$&g=oligoMatch&oligoMatch=pack",
                  cartSessionVarName(), cartSessionId(cart));
+/* PanAlign aligns a sequence to the human pangenome graph.  It picks its own assemblies, so the
+ * link carries no db; offered where the pangenome tools are on (hg.conf pangenomeTools=on). */
+if (cfgOptionBooleanDefault("pangenomeTools", FALSE))
+    jsonWriteStringf(jw, "panAlignUrl", "../cgi-bin/hgPangenome?%s=%s",
+                     cartSessionVarName(), cartSessionId(cart));
 /* Link back to the classic form.  blatNewForm is a cart variable (defaulting to the hg.conf
  * setting), so this is a per-user opt-out rather than a machine-wide switch. */
 jsonWriteStringf(jw, "classicUrl", "hgBlat?blatNewForm=0&%s=%s&db=%s",

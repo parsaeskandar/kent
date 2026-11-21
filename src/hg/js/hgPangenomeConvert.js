@@ -632,8 +632,8 @@ function setAllFilter(f) {
         bar.hidden = !f;
         if (f) {
             var n = allHaps.filter(f.test).length;
-            bar.appendChild(el("span", { text: "Showing the " + pg.commas(n) + " haplotype" +
-                                               (n === 1 ? "" : "s") + " " + f.label + "." }));
+            bar.appendChild(el("span", { text: "Showing the " + pg.commas(n) + " assembl" +
+                                               (n === 1 ? "y" : "ies") + " " + f.label + "." }));
             var b = el("button", { type: "button", class: "gbPill", text: "Show all" });
             b.addEventListener("click", function () { setAllFilter(null); });
             bar.appendChild(b);
@@ -647,7 +647,7 @@ function filterLink(node, label, test) {
     node.classList.add("pgcPick2");
     node.setAttribute("tabindex", "0");
     node.setAttribute("role", "button");
-    node.setAttribute("title", "List these haplotypes in the table");
+    node.setAttribute("title", "List these assemblies in the table");
     var go = function () { setAllFilter({ label: label, test: test }); };
     node.addEventListener("click", go);
     node.addEventListener("keydown", function (e) {
@@ -718,19 +718,19 @@ function allSizePanel(haps) {
     var panel = el("div", { class: "pgcStatPanel" }, [el("h3", { text: "Insertions and deletions" })]);
     if (unsure.length)
         panel.appendChild(filterLink(el("p", { class: "pgcStatText pgcUnsure",
-            text: pg.commas(unsure.length) + " haplotype" + (unsure.length === 1 ? " is" : "s are") +
+            text: pg.commas(unsure.length) + " assembl" + (unsure.length === 1 ? "y is" : "ies are") +
                   " left out: the graph server could not settle where this region goes on " +
                   (unsure.length === 1 ? "it" : "them") + "." }),
             "whose size change is unclear", function (h) { return h.unsure; }));
     if (!found.length) {
-        panel.appendChild(el("p", { class: "pgMuted", text: "The region carried over to no haplotype." }));
+        panel.appendChild(el("p", { class: "pgMuted", text: "The region carried over to no assembly." }));
         return panel;
     }
     ALL_SIZE_KINDS.forEach(function (k) {
         var vals = found.map(k.get);
         var hi = Math.max.apply(null, vals);
         var head = el("div", { class: "pgcSizeHead" }, [el("b", { text: k.title }),
-            el("span", { text: hi === 0 ? "none on any haplotype"
+            el("span", { text: hi === 0 ? "none on any assembly"
                                         : "median " + k.fmt(median(vals)) + ", up to " + k.fmt(hi) })]);
         panel.appendChild(head);
         if (hi > 0) panel.appendChild(allHistogram(vals, 0, hi, k));
@@ -779,7 +779,7 @@ function allHistogram(vals, lo, hi, kind) {
     var x = function (v) { return L + (W - L - R) * (v - first) / (nBins * step); };
     var y = function (n) { return T + (H - T - B) * (1 - n / most); };
     var svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, class: "pgcHist", role: "img",
-        "aria-label": "Histogram of the bases " + kind.says + " on each haplotype, from " +
+        "aria-label": "Histogram of the bases " + kind.says + " on each assembly, from " +
                       kind.fmt(lo) + " to " + kind.fmt(hi) });
     // The count axis: its top and the baseline.
     svg.appendChild(svgEl("line", { x1: L, x2: W - R, y1: y(most), y2: y(most), class: "grid" }));
@@ -804,8 +804,8 @@ function allHistogram(vals, lo, hi, kind) {
         // A wider target than the bar, so the thin ones can be hovered.
         g.appendChild(svgEl("rect", { x: x(a), y: T, width: barW, height: y(0) - T, class: "hit" }));
         var range = step === 1 ? kind.fmt(a) : pg.commas(a) + " to " + kind.fmt(b - 1);
-        g.appendChild(svgEl("title", null, range + ": " + pg.commas(n) + " haplotype" +
-                                           (n === 1 ? "" : "s") + ". Click to list them."));
+        g.appendChild(svgEl("title", null, range + ": " + pg.commas(n) + " assembl" +
+                                           (n === 1 ? "y" : "ies") + ". Click to list them."));
         var go = function () {
             setAllFilter({ label: "with " + range + " " + kind.says,
                            test: function (h) { var v = kind.get(h); return v != null && v >= a && v < b; } });
@@ -841,8 +841,8 @@ function allPopPanel(haps) {
     });
     var cols = [
         { k: "name", text: "Population", cls: "" },
-        { k: "n", text: "Haps", cls: "num", title: "Haplotypes from this population" },
-        { k: "found", text: "Found", cls: "num", title: "Haplotypes the region carried over to" },
+        { k: "n", text: "Total", cls: "num", title: "Assemblies from this population" },
+        { k: "found", text: "Found", cls: "num", title: "Assemblies the region carried over to" },
         { k: "ins", text: "Inserted", cls: "num", title: "Median bases inserted, where it carried over" },
         { k: "del", text: "Deleted", cls: "num", title: "Median bases deleted, where it carried over" },
         { k: "net", text: "Net", cls: "num", title: "Median net size change, where it carried over" }
@@ -933,7 +933,7 @@ function allAnnotControl() {
     lift.addEventListener("change", sync);
     sync();
     return el("div", { class: "gbStat pgcAnnotStat" }, [
-        el("span", { class: "k", text: "Opening a haplotype" }),
+        el("span", { class: "k", text: "Opening an assembly" }),
         el("span", { class: "v" }, [
             el("label", { for: "pgcQuickLift", title: "Display tracks from the source " +
                           "assembly mapped onto the target assembly" }, [lift, " PanConvert tracks"]),
@@ -987,7 +987,7 @@ function renderAll(resp, src, chosen) {
         stat("Converted from", srcLabel), div(),
         stat("Population", sPop ? sPop.desc + " (" + sPop.code + ")" : "—"), div(),
         stat("Length", pg.commas(len) + " bp"), div(),
-        stat(chosen ? "Targets" : "Haplotypes", pg.commas(haps.length)), div(),
+        stat(chosen ? "Targets" : "Assemblies", pg.commas(haps.length)), div(),
         stat("Found on", chosen ? pg.commas(found) + " of " + pg.commas(haps.length)
                                 : pg.commas(found) + " (" +
              (haps.length ? Math.round(100 * found / haps.length) : 0) + "%)")]);
@@ -998,8 +998,8 @@ function renderAll(resp, src, chosen) {
     card.appendChild(strip);
     if (chosen)
         acts.appendChild(el("a", { class: "gbPill", href: liftAllUrl(src),
-            title: "This region on every haplotype in the pangenome, with figures on " +
-                   "how it carries over", text: "View all haplotypes" }));
+            title: "This region on every assembly in the pangenome, with figures on " +
+                   "how it carries over", text: "View all assemblies" }));
     var tsv = el("button", { type: "button", class: "gbPill", text: "Download Table",
         title: "Download the rows below, in their current order and filter, as a " +
                "tab-separated file that opens in Excel" });
@@ -1020,11 +1020,11 @@ function renderAll(resp, src, chosen) {
     }
     var notes = el("div", { class: "pgrNotes" });
     notes.appendChild(el("div", { class: "pgrNote", text: "One row for each piece of the region " +
-        "on a haplotype." + (chosen ? "" : " Click a number above to filter the table.") }));
+        "on an assembly." + (chosen ? "" : " Click a number above to filter the table.") }));
     (resp.warnings || []).forEach(function (w) {
         if (w && w.reason === "timeout")
             notes.appendChild(el("div", { class: "pgrNote pgErrBox", text: "The graph server " +
-                "ran out of time on this region, so some haplotypes may be missing pieces " +
+                "ran out of time on this region, so some assemblies may be missing pieces " +
                 "or missing altogether." }));
     });
     card.appendChild(notes);
@@ -1052,14 +1052,14 @@ function renderAll(resp, src, chosen) {
     if (split) head.push("Piece");
     head.push("Open in Genome Browser", "Coverage", "Span", "Inserted", "Deleted", "Size change", "Strand");
     var tips = { Piece: "Which piece of the region this is, numbered largest first",
-                 Coverage: "Share of the region's bases with a place on this haplotype, all pieces together",
-                 Inserted: "Bases on this haplotype, inside the parts that carried over, that no " +
+                 Coverage: "Share of the region's bases with a place on this assembly, all pieces together",
+                 Inserted: "Bases on this assembly, inside the parts that carried over, that no " +
                            "base of the region is placed on; all pieces together",
                  Deleted: "Bases of the region, inside the parts that carried over, with no " +
-                          "place on this haplotype; all pieces together",
+                          "place on this assembly; all pieces together",
                  Span: "Share of the region this piece covers, from its first base to its last",
                  "Size change": "This piece's length here less the length of the source it covers",
-                 Haplotype: "Which of the sample's two haplotypes; 0 for a reference",
+                 Haplotype: "Which of the sample's two haplotypes, one assembly each; 0 for a reference",
                  Population: "The sample's population, as the HPRC describes it" };
     var table = el("table", { id: "pgcTable", class: "display" });
     table.appendChild(el("thead", null, [el("tr", null, head.map(function (h) {
@@ -1202,7 +1202,7 @@ function initAll() {
     var src = { src: page.src, contig: parts.slice(2).join("#"), start: page.start, end: page.end };
     var what = hapLabel(src.src) + ":" + (src.start + 1) + "-" + src.end;
     var go = function () {
-        showBusy("Translating " + what + " to every haplotype in the pangenome…");
+        showBusy("Translating " + what + " to every assembly in the pangenome…");
         postCmd("liftoverAll", { src: src.src, start: src.start, end: src.end }).then(function (resp) {
             if (!resp || resp.status === "error") throw new Error((resp && resp.error) || "no answer");
             if (!resp.summary) throw new Error("the graph server sent no summary");
@@ -1436,7 +1436,7 @@ function drawHaps(shown, chosenSet) {
                 : room > 0 ? "Choose first " + room : null;
     box.appendChild(el("div", { class: "pgcPaneHead" }, [
         el("span", { text: title }),
-        el("span", { class: "pgcPaneN", text: shown.length + (shown.length === 1 ? " haplotype" : " haplotypes") +
+        el("span", { class: "pgcPaneN", text: shown.length + (shown.length === 1 ? " assembly" : " assemblies") +
             (reachableScored ? ", best first" : "") }),
         (shown.length && allText) ? el("button", { type: "button", class: "pgcAllBtn",
                                                    "data-all": allOn ? "off" : "on", text: allText }) : null
@@ -1444,7 +1444,7 @@ function drawHaps(shown, chosenSet) {
     var listBox = el("div", { class: "pgcHapsList" });
     if (!shown.length) {
         listBox.appendChild(el("div", { class: "pgMuted pgcEmpty",
-            text: "No haplotype matches. Clear the search or pick another population." }));
+            text: "No assembly matches. Clear the search or pick another population." }));
     }
     shown.forEach(function (h) {
         var on = !!chosenSet[h.toLowerCase()];
@@ -1520,7 +1520,7 @@ function fillTargets(filter) {
     // One short line under the picker, and only when the list was narrowed:
     // the pane's own heading counts what it shows.
     $("pgcTargetCount").textContent = reachable ?
-        candidates.length + " of " + allHaplotypes.length + " haplotypes have this region" : "";
+        candidates.length + " of " + allHaplotypes.length + " assemblies have this region" : "";
 }
 
 // Ask the graph which haplotypes this region exists on, and narrow the picker to
@@ -1954,7 +1954,7 @@ function buildSource() {
         return { error: db ? notInPangenome(db) : "No pangenome assembly for that source." };
     }
     if (!hapInGraph(hap))
-        return { error: "Haplotype " + hap + " is not in the loaded graph, so its " +
+        return { error: hap + " is not in the loaded graph, so its " +
                         "coordinates cannot be translated." };
     hap = canonicalHap(hap);          // the graph's own spelling
     var pos = parsePosition($("pgcPos").value);
@@ -1987,7 +1987,7 @@ function convertNow(seq) {
     var targets = selectedTargets();
     if (targets.length === 0) { showError("Choose at least one target assembly."); return; }
     if (MAX_CHOSEN > 0 && targets.length > MAX_CHOSEN) {
-        showError("Choose at most " + MAX_CHOSEN + " haplotypes, or use View all haplotypes.");
+        showError("Choose at most " + MAX_CHOSEN + " assemblies, or use View all assemblies.");
         return;
     }
     // Send the graph's spelling for targets too: an unknown target is not an

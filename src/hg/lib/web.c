@@ -1739,8 +1739,9 @@ if(scriptName)
     menuStr = replaceChars(menuStr, "<!-- SHARE_LINK -->", shareLi);
     }
 
-// The pangenome tools' Tools menu items are commented out in globalNavBar.inc, so a static page
-// or a server that has not turned the tools on (hg.conf pangenomeTools=on) does not offer them.
+// PanAlign's Tools menu item is commented out in globalNavBar.inc, so a static page or a server
+// that has not turned the pangenome tools on (hg.conf pangenomeTools=on) does not offer it.
+// PanConvert is in hgTracks' View menu, next to the other conversion (hgTracks/menu.c).
 if (cfgOptionBooleanDefault("pangenomeTools", FALSE))
     {
     menuStr = replaceChars(menuStr, "<!-- OPTIONAL_PANGENOME_MENU_START", "");

@@ -178,16 +178,20 @@ if (askAboutQuickLift)
         "});\n");
     }
 
-/* The haplotypes of the human pangenome mostly have no chain between them, so they are not in
- * the list above; PanConvert converts between them through the pangenome graph.  Offered where the
- * pangenome tools are turned on (hg.conf pangenomeTools=on, as hgPangenome reads it) and the
- * source is human. */
+/* The assemblies of the human pangenome (its haplotypes) mostly have no chain between them, so
+ * they are not in the list above; PanConvert converts between them through the pangenome graph.
+ * Offered where the pangenome tools are turned on (hg.conf pangenomeTools=on, as hgPangenome
+ * reads it) and the source is human.  The info icon's text is plain: a mouseover shows tags as
+ * they are written. */
 if (cfgOptionBooleanDefault("pangenomeTools", FALSE) && sameWord(fromDb->organism, "Human"))
     {
     puts("<div class='fieldRow' style='margin-top: 15px;'>\n");
-    hPrintf("To a pangenome haplotype? "
+    hPrintf("To a pangenome assembly? "
             "<a href='../cgi-bin/hgPangenome?page=convert&%s&db=%s&position=%s'>Use PanConvert</a>\n",
             cartSidUrlString(cart), cgiEncode(trackHubSkipHubName(database)), cgiEncode(fromPos));
+    printInfoIcon("The human pangenome is a graph that joins the genome assemblies of many "
+                  "people, built by the Human Pangenome Reference Consortium (HPRC). "
+                  "PanConvert finds this position in any of them.");
     puts("</div>\n");
     }
 

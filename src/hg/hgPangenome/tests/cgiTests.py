@@ -836,12 +836,12 @@ class Liftover(CgiTest):
         most = limit("PG_MAX_CHOSEN_TARGETS")
         names = lambda n: json.dumps(["h%d#1" % i for i in range(n)])
         self.reject("empty tgt array rejected", '{"src":"a#1#c","start":1,"end":2,"tgt":[]}',
-                    "'tgt' must be a list of haplotypes")
+                    "'tgt' must be a list of assemblies")
         # a reader may choose so many haplotypes and no more; past that the
         # question is about every haplotype, which is asked without a list
         self.reject("one target too many rejected",
                     '{"src":"a#1#c","start":1,"end":2,"tgt":%s}' % names(most + 1),
-                    "too many target haplotypes: %d (limit is %d per conversion)" % (most + 1, most))
+                    "too many target assemblies: %d (limit is %d per conversion)" % (most + 1, most))
         MOCK.clear()
         post(self.conf, "liftoverAll", '{"src":"a#1#c","start":1,"end":2,"tgt":%s}' % names(most))
         self.eq("as many targets as the limit accepted (boundary)", MOCK.count(), 1)
@@ -850,7 +850,7 @@ class Liftover(CgiTest):
         for bad in ['"*"', '"HG01234#2"', '["all"]', '["HG01234"]', '["HG01234#2 x"]', '["a#b#c#d"]',
                     '["HG01234#2","*"]', '["HG01234#2",5]', '[["HG01234#2"]]']:
             self.reject("tgt %s refused" % bad, '{"src":"a#1#c","start":1,"end":2,"tgt":%s}' % bad,
-                        "'tgt' must be a list of haplotypes")
+                        "'tgt' must be a list of assemblies")
         for good in ['["HG01234#2"]', '["hg01234#2"]', '["HG01234#2#CM0987.1"]', '["CHM13#0","GRCh38#0"]']:
             MOCK.clear()
             post(self.conf, "liftoverAll", '{"src":"a#1#c","start":1,"end":2,"tgt":%s}' % good)
@@ -865,7 +865,7 @@ class Liftover(CgiTest):
 
     def test_surject(self):
         out = post(self.conf, "surject", '{"tgt":"*","job_id":"job1","name":"r1"}')
-        self.has('surject: tgt "*" refused', out, "'tgt' must name a haplotype")
+        self.has('surject: tgt "*" refused', out, "'tgt' must name an assembly")
         self.eq('surject: tgt "*" - not forwarded', MOCK.count(), 0)
         post(self.conf, "surject", '{"tgt":"CHM13#0","job_id":"job1","name":"r1"}')
         self.eq("surject: a haplotype name accepted", MOCK.count(), 1)
@@ -1077,7 +1077,7 @@ class CartCommands(CgiTest):
         # and nothing else: "*" there would ask for every haplotype at once
         reject("quickLift", 'a target of "*" refused',
                '{"srcDb":"hs1","tgtDb":"GCA_044165735.1","src":"HG00097#1#CM094066.1","position":"c:1-2","tgt":"*"}',
-               "must name a haplotype")
+               "must name an assembly")
         reject("refAnnot", 'refAnnot: a path of "*#*#chr1" refused', hap % ("*#*#chr1", 1, 2),
                "missing or malformed assembly")
         reject("quickLift", 'an assembly named ".." refused',

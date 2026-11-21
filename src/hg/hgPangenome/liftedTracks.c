@@ -353,13 +353,13 @@ for (ref = jsonListVal(blocksEl, "blocks"); ref != NULL; ref = ref->next)
         ss->type != jsonNumber || se->type != jsonNumber ||
         ts->type != jsonNumber || te->type != jsonNumber)
         {
-        *retError = "a block is missing its haplotype or coordinates";
+        *retError = "a block is missing its assembly or coordinates";
         return NULL;
         }
     char *contig = pgContigOf(hap);
     if (contig == NULL)
         {
-        *retError = "a block's haplotype is not a full contig path";
+        *retError = "a block's assembly is not a full contig path";
         return NULL;
         }
     long sStart = pgCoord(ss), sEnd = pgCoord(se);
@@ -1430,7 +1430,7 @@ if (srcContig == NULL)
  * requests it forwards: a "*" there would ask for every haplotype at once. */
 if (!pgValidHapName(srcPath) || (!isEmpty(tgtHap) && !pgValidHapName(tgtHap)))
     {
-    emitJsonError("'src' and 'tgt' must name a haplotype, such as HG00097#1");
+    emitJsonError("'src' and 'tgt' must name an assembly, such as HG00097#1");
     return;
     }
 

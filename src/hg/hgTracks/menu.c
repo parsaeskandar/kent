@@ -21,6 +21,8 @@
 #include "chromAlias.h"
 #include "exportedDataHubs.h"
 #include "recTrackSets.h"
+#include "hgConfig.h"
+#include "genark.h"
 
 /* list of links to display in a menu */
 /* a link with an empty name is displayed as a horizontal separator line */
@@ -222,6 +224,18 @@ for(i = 0, link = links; link != NULL; i++, link = link->next)
 slFreeList(links);
 }
 
+static boolean isHumanAssembly(char *db)
+/* TRUE if db is a human assembly, one of ours or a GenArk one: what hgConvert asks before it
+ * offers PanConvert.  The global organism is no help here, a GenArk assembly has its own name
+ * in it. */
+{
+char *name = trackHubSkipHubName(db);
+struct dbDb *dbDb = hDbDb(name);
+if (dbDb == NULL)
+    dbDb = genarkLiftOverDb(name);
+return dbDb != NULL && sameWord(dbDb->organism, "Human");
+}
+
 void printMenuBar()
 /* Put up the special menu bar for hgTracks. */
 {
@@ -271,6 +285,18 @@ safef(buf, sizeof(buf), "%s&o=%d&g=getDna&i=mixed&c=%s&l=%d&r=%d&db=%s",
 appendLinkWithShortcut(&links, buf, "DNA Sequence", "dnaLink", "Show DNA sequence in view", "v d", FALSE, FALSE);
 safef(buf, sizeof(buf), "../cgi-bin/hgConvert?hgsid=%s&db=%s", cartSessionId(cart), database);
 appendLink(&links, buf, "In Other Genomes (Convert)", "convertMenuLink", FALSE);
+/* PanConvert converts the same position through the human pangenome graph, so it is next to the
+ * other conversion.  Offered where hgConvert offers it: the pangenome tools are on (hg.conf
+ * pangenomeTools=on, asked first, so a server without them makes no query) and the assembly is
+ * human. */
+if (cfgOptionBooleanDefault("pangenomeTools", FALSE) && isHumanAssembly(database))
+    {
+    safef(buf, sizeof(buf), "../cgi-bin/hgPangenome?page=convert&hgsid=%s&db=%s",
+          cartSessionId(cart), trackHubSkipHubName(database));
+    appendLinkMaybeInactive(&links, buf, "In Pangenome (PanConvert)",
+        "panConvertMenuLink", "Convert this position to other human assemblies through the "
+        "pangenome graph", FALSE, FALSE);
+    }
 
 safef(buf, sizeof(buf), "../cgi-bin/hgTracks?chromInfoPage=&hgsid=%s&db=%s", cartSessionId(cart), database);
 appendLinkWithShortcut(&links, buf, "Chromosomes", "showSizesLink", "Show a table of all chromsomes in this assembly (or scaffolds/contigs) and their sizes.", "v s", FALSE, FALSE);

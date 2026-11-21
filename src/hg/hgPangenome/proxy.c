@@ -352,7 +352,7 @@ if (errCatchStart(errCatch))
     struct jsonElement *endEl = jsonFindNamedField(root, "", "end");
 
     if (isEmpty(src))
-        result = "missing 'src' haplotype path";
+        result = "missing 'src' assembly path";
     else if (countChars(src, '#') < 2)
         result = "'src' must be a full contig path, e.g. HG00097#1#CM094066.1";
     else if (startEl == NULL || endEl == NULL)
@@ -394,9 +394,9 @@ if (errCatchStart(errCatch))
     char *jobId = jsonOptionalStringField(root, "job_id", NULL);
     char *name = jsonOptionalStringField(root, "name", NULL);
     if (isEmpty(tgt))
-        result = "missing 'tgt' haplotype";
+        result = "missing 'tgt' assembly";
     else if (!pgValidHapName(tgt))
-        result = "'tgt' must name a haplotype, such as HG00097#1";
+        result = "'tgt' must name an assembly, such as HG00097#1";
     else if (!pgValidJobId(jobId))
         result = "missing or invalid 'job_id'";
     else if (isEmpty(name))
@@ -623,12 +623,12 @@ if (tgtEl != NULL)
     {
     if (tgtEl->type != jsonList || tgtEl->val.jeList == NULL || !pgTargetsAreNames(tgtEl))
         {
-        emitJsonError("'tgt' must be a list of haplotypes, such as HG00097#1");
+        emitJsonError("'tgt' must be a list of assemblies, such as HG00097#1");
         return;
         }
     if (slCount(tgtEl->val.jeList) > PG_MAX_CHOSEN_TARGETS)
         {
-        emitJsonError("too many target haplotypes: %d (limit is %d per conversion)",
+        emitJsonError("too many target assemblies: %d (limit is %d per conversion)",
                       slCount(tgtEl->val.jeList), PG_MAX_CHOSEN_TARGETS);
         return;
         }
@@ -661,8 +661,8 @@ jsonWriteFree(&jw);
 if (pgTooBig)
     {
     emitJsonError("the graph server's answer for this region is over %ld MB, too "
-                  "large to show: in a duplicated or inverted region it can split a "
-                  "haplotype into thousands of pieces. Try a smaller region",
+                  "large to show: in a duplicated or inverted region it can split an "
+                  "assembly into thousands of pieces. Try a smaller region",
                   (long)PG_MAX_LIFT_ALL_BYTES / 1000000);
     dyStringFree(&r.body);
     freez(&r.errMsg);

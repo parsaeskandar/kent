@@ -1128,6 +1128,10 @@ function blatFormSidebar(cfg) {
         tools += `<div>${tplLink(cfg.oligoMatchUrlTpl, 'Short Sequence Match')} - for ` +
             'sequences under 20 bp, within the region shown in the Genome Browser.</div>';
     }
+    if (cfg.panAlignUrl) {
+        tools += `<div><a href="${htmlEncode(cfg.panAlignUrl)}">PanAlign</a> - aligns sequences ` +
+            'to the human pangenome graph, to see them on any of its assemblies.</div>';
+    }
     tools += '<div><a target="_blank" href="https://hgdownload.soe.ucsc.edu/downloads.html#utilities_downloads">' +
         'findMotif</a> - like Short Sequence Match, but searches a whole genome, ' +
         'from the command line.</div>';
